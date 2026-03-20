@@ -9,23 +9,33 @@ This is a fork of [ollama/ollama](https://github.com/ollama/ollama). The followi
 To build all backends on Windows with CUDA 13.2 + MSVC, even on a machine with **no NVIDIA GPU**:
 
 ```shell
-# Configure with CUDA 13 preset (sets explicit GPU arch list, avoids -arch=native probe)
+# 1. Configure with CUDA 13 preset (sets explicit GPU arch list, avoids -arch=native probe)
 cmake -B build --preset "CUDA 13"
 
-# Build everything — CPU, Vulkan, and CUDA
-cmake --build build --config Release
+# 2. Build CUDA first (slow — compiles for many GPU architectures)
+cmake --build build --preset "CUDA 13" --parallel --config Release
+
+# 3. Build CPU and Vulkan (fast)
+cmake --build build --config Release --target ggml-cpu ggml-vulkan --parallel
 ```
 
-All DLLs land in `build\lib\ollama\` (CPU/Vulkan in root, CUDA in `cuda_v13\` subdirectory).
+All DLLs land in `build\lib\ollama\`.
 
-> **Why not plain `cmake -B build`?**
-> Without the preset, nvcc tries `-arch=native` to detect the GPU — which fails on machines without one.
+Or build everything in one command (simpler but can't parallelize CUDA separately):
+
+```shell
+cmake -B build --preset "CUDA 13"
+cmake --build build --config Release --parallel
+```
+
+> **Why `--config Release`?** MSVC is a multi-config generator — `Debug` and `Release` produce separate object files. The build preset does NOT default to Release, so **always specify `--config Release`** explicitly on every `cmake --build` step, otherwise CUDA gets compiled twice (once Debug, once Release).
+>
+> **Why `--preset "CUDA 13"` on configure?** Without it, nvcc tries `-arch=native` to detect the GPU — which fails on machines without one.
 
 ### Background: what was fixed
 
 - **`/Zc:preprocessor`**: CUDA 13.2's bundled CCCL library requires MSVC's standards-conforming preprocessor. Added automatically in `ml/backend/ggml/ggml/src/ggml-cuda/CMakeLists.txt` for MSVC builds.
 - **`-arch=native` failure**: The `"CUDA 13"` preset uses an explicit architecture list (`75;80;86;87;89;90;90a;100;103;110;120;121-virtual`) instead of GPU auto-detection.
-- **`--config Release`** is not needed with `cmake -B ... --preset` — the preset already sets `CMAKE_BUILD_TYPE=Release`.
 
 At runtime, CUDA is automatically preferred over Vulkan — no configuration needed.
 
