@@ -78,14 +78,15 @@ Raw JSONL files (from OLLAMA_TRACE_DIR)
 - **click** (CLI framework)
 - **jinja2** (Markdown report templates)
 - No heavy ML dependencies
+- Minimum versions: `polars >= 1.0`, `click >= 8.0`, `jinja2 >= 3.1`
 
 ### Commands
 
 ```bash
-# Single trace summary
+# Single trace summary (accepts exactly one JSONL file)
 trace-analyzer summary trace_req1_123.jsonl -o summary.json
 
-# Multi-trace comparison
+# Multi-trace comparison (exactly 2 files)
 trace-analyzer compare trace_cuda.jsonl trace_vulkan.jsonl \
     --labels "CUDA,Vulkan" -o compare.json
 
@@ -100,16 +101,20 @@ trace-analyzer report --compare trace_cuda.jsonl trace_vulkan.jsonl \
 trace-analyzer serve --data-dir /tmp/traces/
 ```
 
+**Command constraints**:
+- `summary` and `report` accept exactly one JSONL file. To process multiple traces, run the command once per file.
+- `compare` accepts exactly 2 JSONL files. N-way comparison is out of scope for v1.
+
 ### Internal modules
 
 | Module | Responsibility |
 |--------|----------------|
-| `parser.py` | Read JSONL → polars DataFrame. Parse event types, extract fields. |
-| `summary.py` | Single-trace analysis: op stats, backend stats, layer stats, copy detection, DAG reconstruction |
+| `parser.py` | Read JSONL → polars DataFrame. Parse event types, extract fields. Skip malformed lines with warning. Handle truncated traces (pass_start without matching pass_end). |
+| `summary.py` | Single-trace analysis: op stats, backend stats, layer stats, copy detection, DAG reconstruction. Prefill/decode classification: passes with `n_tokens > 1` are prefill; `n_tokens == 1` are decode. Per-pass wall time computed as `pass_end.ts - pass_start.ts`. |
 | `compare.py` | Multi-trace diff: align ops by name, compute diff%, flag significant differences |
-| `dag.py` | Build DAG from op events: `name` → node, `srcs` → edges. Layer grouping by `blk.X` prefix. |
+| `dag.py` | Build DAG from op events: `name` → node, `srcs` → edges. Layer grouping by `blk.X` prefix. Uses the **first decode pass** (pass 1) by default; configurable via `--pass` flag. |
 | `report.py` | Jinja2 templates → Markdown output. Single and compare modes. |
-| `serve.py` | Simple HTTP server: serves React build + JSON data files |
+| `serve.py` | Dev server (default port 8765): serves React build + JSON data. Provides `/api/files` endpoint listing available summary/compare JSON files in the data directory. React app fetches file list on load. |
 | `cli.py` | Click entry point wiring all subcommands |
 
 ### summary.json schema
@@ -118,7 +123,7 @@ trace-analyzer serve --data-dir /tmp/traces/
 {
   "meta": {
     "source_file": "trace_req1_123.jsonl",
-    "model": "llama3:8b",
+    "model": "llama3:8b",          // from --model CLI flag or filename heuristic; optional
     "total_ops": 3200,
     "total_passes": 64,
     "total_wall_ms": 1250
@@ -182,6 +187,11 @@ trace-analyzer serve --data-dir /tmp/traces/
 
 **Data size estimation**: `bytes = product(shape) * dtype_size[dtype]`
 where `dtype_size = {"f32": 4, "f16": 2, "bf16": 2, "q4_0": 0.5, "q8_0": 1, ...}`
+
+**Notes**:
+- `meta.model` is optional. Provided via `--model` CLI flag, or inferred from the trace filename if possible.
+- `est_bytes_total` in `op_stats` is only present for copy-related ops (CPY, DUP).
+- Edge `est_bytes` is computed from the **source** tensor's shape and dtype (the data actually flowing along that edge).
 
 **Copy detection**: Ops with `op == "CPY"` or `op == "DUP"` are flagged as data copies. The `backend` field on the node plus the `backend` of its source tensor reveals the transfer direction.
 
@@ -301,8 +311,7 @@ The `⚠️` marker helps LLMs focus on significant differences.
 
 - React 18 + TypeScript
 - **Cytoscape.js** — DAG view with compound nodes (layer folding)
-- **D3.js** — Timeline swimlane view
-- **ECharts** — Compare bar charts
+- **D3.js** — Timeline swimlane view + Compare bar charts (single charting lib to reduce bundle size)
 - **Tailwind CSS** — styling
 
 ### View 1: DAG View
@@ -365,7 +374,7 @@ Loads `compare.json` from Python CLI output.
   - Green background: `diff_pct < -10%` (faster)
   - White: insignificant difference
   - Default sort: by `|diff_pct|` descending → biggest differences first
-- Bottom: **Layer diff bar chart** (ECharts grouped bars)
+- Bottom: **Layer diff bar chart** (D3 grouped bars)
   - One group per layer, bars = each trace's total time
   - Significant diff bars highlighted with bold outline
 
@@ -442,7 +451,7 @@ tools/trace-analyzer/
 │   │   ├── components/
 │   │   │   ├── DagView.tsx         # Cytoscape.js DAG with layer folding
 │   │   │   ├── TimelineView.tsx    # D3 swimlane chart
-│   │   │   ├── CompareView.tsx     # Diff tables + ECharts bars
+│   │   │   ├── CompareView.tsx     # Diff tables + D3 bar charts
 │   │   │   ├── HotspotPanel.tsx    # Sidebar rankings
 │   │   │   ├── NodeDetail.tsx      # Op detail popup/drawer
 │   │   │   └── ColorToggle.tsx     # Backend / heatmap mode switch
@@ -479,12 +488,12 @@ tools/trace-analyzer/
    ```
 2. **summary command**:
    ```bash
-   trace-analyzer summary /tmp/traces/trace_*.jsonl -o summary.json
+   trace-analyzer summary /tmp/traces/trace_req1_123.jsonl -o summary.json
    # Verify: valid JSON, has meta/timing/op_stats/backend_stats/copy_stats/layer_stats/dag
    ```
 3. **report command**:
    ```bash
-   trace-analyzer report /tmp/traces/trace_*.jsonl -o report.md
+   trace-analyzer report /tmp/traces/trace_req1_123.jsonl -o report.md
    # Verify: readable Markdown with tables, paste into LLM
    ```
 4. **compare command** (use same trace twice as sanity check):
