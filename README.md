@@ -2,6 +2,39 @@
 
 This is a fork of [ollama/ollama](https://github.com/ollama/ollama). The following features have been added on top of the upstream codebase.
 
+## Build Notes (Windows + CUDA)
+
+### Building all backends (CPU + Vulkan + CUDA) on a machine without a GPU
+
+To build all backends in one shot on Windows with CUDA 13.2 + MSVC, even on a machine with **no NVIDIA GPU**:
+
+```shell
+# Configure once with CUDA 13 preset (sets explicit GPU arch list, avoids -arch=native probe)
+cmake -B build --preset "CUDA 13"
+
+# Build all backends — CPU, Vulkan, and CUDA in one command
+# CUDA is already built → skipped; CPU and Vulkan are newly compiled (fast)
+cmake --build build --config Release
+```
+
+All DLLs land in `build\lib\ollama\` (CPU/Vulkan in root, CUDA in `cuda_v13\` subdirectory).
+
+> **Why not `--preset "CUDA 13"` on the build step?**
+> The build preset restricts targets to `ggml-cuda` only. Omitting `--preset` builds all configured targets (CPU, Vulkan, CUDA).
+>
+> **Why not plain `cmake -B build`?**
+> Without the preset, nvcc tries `-arch=native` to detect the GPU — which fails on machines without one.
+
+### Background: what was fixed
+
+- **`/Zc:preprocessor`**: CUDA 13.2's bundled CCCL library requires MSVC's standards-conforming preprocessor. Added automatically in `ml/backend/ggml/ggml/src/ggml-cuda/CMakeLists.txt` for MSVC builds.
+- **`-arch=native` failure**: The `"CUDA 13"` preset uses an explicit architecture list (`75;80;86;87;89;90;90a;100;103;110;120;121-virtual`) instead of GPU auto-detection.
+- **`--config Release`** is not needed with `cmake -B ... --preset` — the preset already sets `CMAKE_BUILD_TYPE=Release`.
+
+At runtime, CUDA is automatically preferred over Vulkan — no configuration needed.
+
+---
+
 ## Inference Profiling & Tracing
 
 An opt-in per-operator execution tracing system for LlamaRunner. When enabled, it captures every GGML compute node (operator) dispatched during inference and writes a JSONL trace file per request, suitable for DAG visualization and performance analysis.
