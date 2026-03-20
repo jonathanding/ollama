@@ -6,22 +6,18 @@ This is a fork of [ollama/ollama](https://github.com/ollama/ollama). The followi
 
 ### Building all backends (CPU + Vulkan + CUDA) on a machine without a GPU
 
-To build all backends in one shot on Windows with CUDA 13.2 + MSVC, even on a machine with **no NVIDIA GPU**:
+To build all backends on Windows with CUDA 13.2 + MSVC, even on a machine with **no NVIDIA GPU**:
 
 ```shell
-# Configure once with CUDA 13 preset (sets explicit GPU arch list, avoids -arch=native probe)
+# Configure with CUDA 13 preset (sets explicit GPU arch list, avoids -arch=native probe)
 cmake -B build --preset "CUDA 13"
 
-# Build all backends — CPU, Vulkan, and CUDA in one command
-# CUDA is already built → skipped; CPU and Vulkan are newly compiled (fast)
+# Build everything — CPU, Vulkan, and CUDA
 cmake --build build --config Release
 ```
 
 All DLLs land in `build\lib\ollama\` (CPU/Vulkan in root, CUDA in `cuda_v13\` subdirectory).
 
-> **Why not `--preset "CUDA 13"` on the build step?**
-> The build preset restricts targets to `ggml-cuda` only. Omitting `--preset` builds all configured targets (CPU, Vulkan, CUDA).
->
 > **Why not plain `cmake -B build`?**
 > Without the preset, nvcc tries `-arch=native` to detect the GPU — which fails on machines without one.
 
