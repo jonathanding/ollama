@@ -30,6 +30,7 @@ import (
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/fs/ggml"
 	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/llm/profiler"
 	"github.com/ollama/ollama/logutil"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/ml/nn/pooling"
@@ -385,6 +386,9 @@ type Server struct {
 	// multimodalHash generates hashes for comparing equality
 	// of non-text data
 	multimodalHash maphash.Hash
+
+	// prof collects per-operator trace data when OLLAMA_TRACE_DIR is set
+	prof profiler.TraceCollector
 }
 
 func (s *Server) allNil() bool {
@@ -434,6 +438,8 @@ func (s *Server) removeSequence(seqIndex int, reason llm.DoneReason) {
 	seq.cache.InUse = false
 	s.seqs[seqIndex] = nil
 	s.seqsSem.Release(1)
+
+	s.prof.Flush(fmt.Sprintf("seq%d", seqIndex), s.modelPath)
 }
 
 // track batch state between forwardBatch, computeBatch and predictForwardBatch
@@ -713,12 +719,14 @@ func (s *Server) computeBatch(activeBatch batchState) {
 	s.mu.Unlock()
 
 	activeBatch.batch.Inputs.FromInts(batchInputs)
+	s.prof.RecordPassStart(activeBatch.id, len(batchInputs))
 	activeBatch.ctx.ComputeWithNotify(
 		func() {
 			logutil.Trace("computeBatch: signaling computeStartedCh", "batchID", activeBatch.id)
 			activeBatch.computeStartedCh <- struct{}{}
 		},
 		activeBatch.modelOutput)
+	s.prof.RecordPassEnd(activeBatch.id, 0)
 
 	outputs := activeBatch.modelOutput.Floats()
 	t := time.Now()
@@ -1239,6 +1247,9 @@ func (s *Server) allocModel(
 
 // closeModel frees all memory associated with a model
 func (s *Server) closeModel() {
+	if s.prof != nil {
+		s.prof.Close()
+	}
 	s.cache.Close()
 	s.cache = nil
 	if s.model != nil {
@@ -1256,6 +1267,14 @@ func (s *Server) loadModel() {
 		})
 	if err != nil {
 		panic(fmt.Errorf("failed to load model: %v", err))
+	}
+
+	s.prof = profiler.New(envconfig.TraceDir())
+	type evalCallbackSetter interface {
+		SetEvalCallback(profiler.TraceCollector)
+	}
+	if ecs, ok := s.model.Backend().(evalCallbackSetter); ok {
+		ecs.SetEvalCallback(s.prof)
 	}
 
 	s.status = llm.ServerStatusReady

@@ -11,7 +11,7 @@ extern void GoProfilerCallback(uintptr_t handle, void* tensorPtr, _Bool ask);
 
 static _Bool profilerEvalCallbackBridge(struct ggml_tensor* t, _Bool ask, void* user_data) {
     GoProfilerCallback((uintptr_t)user_data, (void*)t, ask);
-    return ask;
+    return 1; // always true: ask=true means "dispatch this node", ask=false means "continue"
 }
 
 // setProfilerEvalCallback sets the profiler bridge as eval callback.

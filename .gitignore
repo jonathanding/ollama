@@ -1,5 +1,7 @@
 .opencode/
 opencode.json
+temp/
+tmp/
 .DS_Store
 .vscode
 .env

@@ -2526,8 +2526,14 @@ void llama_set_abort_callback(llama_context * ctx, bool (*abort_callback)(void *
     ctx->set_abort_callback(abort_callback, abort_callback_data);
 }
 
+void llama_context::set_eval_callback(ggml_backend_sched_eval_callback cb, void * user_data) {
+    cparams.cb_eval = cb;
+    cparams.cb_eval_user_data = user_data;
+    ggml_backend_sched_set_eval_callback(sched.get(), cb, user_data);
+}
+
 void llama_context_set_eval_callback(struct llama_context * ctx, ggml_backend_sched_eval_callback callback, void * user_data) {
-    ggml_backend_sched_set_eval_callback(ctx->get_sched(), callback, user_data);
+    ctx->set_eval_callback(callback, user_data);
 }
 
 void llama_set_embeddings(llama_context * ctx, bool embeddings) {
