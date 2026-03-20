@@ -1,3 +1,83 @@
+# Fork Enhancements
+
+This is a fork of [ollama/ollama](https://github.com/ollama/ollama). The following features have been added on top of the upstream codebase.
+
+## Inference Profiling & Tracing
+
+**Branch:** `feature/profiling-tracing`
+
+An opt-in per-operator execution tracing system for LlamaRunner. When enabled, it captures every GGML compute node (operator) dispatched during inference and writes a JSONL trace file per request, suitable for DAG visualization and performance analysis.
+
+### How it works
+
+- Hooks into GGML's existing `ggml_backend_sched_eval_callback` mechanism via a minimal C++ patch (~10 lines) and a CGO bridge
+- Zero overhead when disabled — uses a `NoopCollector` that compiles away
+- Events are buffered in memory during inference and flushed asynchronously after each request completes
+- Captures per-operator: op type, tensor name, input tensor names (DAG edges), output shape, data type, backend device (CPU/CUDA/Vulkan), and CPU-side dispatch timestamps
+
+### Usage
+
+```bash
+# Enable tracing by setting the output directory
+mkdir -p /tmp/traces
+OLLAMA_TRACE_DIR=/tmp/traces ollama serve
+
+# Each inference request produces one trace file
+ls /tmp/traces/
+# trace_1742123456789_1742123456790.jsonl
+
+# Inspect operator coverage
+cat /tmp/traces/trace_*.jsonl | jq -r 'select(.type=="op")|.op' | sort | uniq -c | sort -rn
+
+# Inspect DAG edges (operator dependencies)
+cat /tmp/traces/trace_*.jsonl | jq 'select(.type=="op")|{name,srcs}' | head -20
+
+# Inspect backend distribution (CPU vs GPU)
+cat /tmp/traces/trace_*.jsonl | jq -r 'select(.type=="op")|.backend' | sort | uniq -c
+```
+
+### JSONL output format
+
+Each line is a JSON object. Two event types:
+
+**Pass events** (one pair per `llama_decode` call):
+```json
+{"type":"pass_start","pass":0,"n_tokens":512,"ts":1742123456789}
+{"type":"pass_end","pass":0,"n_nodes":0,"ts":1742123456800}
+```
+
+**Operator events** (one per GGML compute node):
+```json
+{"type":"op","pass":0,"seq":42,"op":"MUL_MAT","name":"blk.3.attn_q","srcs":["blk.3.attn_norm","blk.3.attn_q.weight"],"shape":[4096,512],"dtype":"f16","backend":"CUDA0","t_start":1742123456790123456,"t_end":1742123456790234567}
+```
+
+Fields: `pass` = batch index, `seq` = operator sequence number within the pass, `srcs` = source tensor names (DAG edges), `t_start`/`t_end` = CPU-side nanoseconds (approximate for GPU ops — captures dispatch time, not actual GPU execution time).
+
+### Architecture
+
+| File | Role |
+|------|------|
+| `llama/llama.cpp/include/llama.h` | C API declaration: `llama_context_set_eval_callback` |
+| `llama/llama.cpp/src/llama-context.cpp` | Implementation via `ctx->get_sched()` |
+| `llama/profiler_bridge.go` | CGO bridge: `GoProfilerCallback` (exported), static C bridge, `extractTensorInfo` |
+| `llama/llama.go` | `Context.profilerHandle` field |
+| `llm/profiler/profiler.go` | `TraceCollector` interface (pure Go, no CGO), `TensorInfo`, `OpEvent`, `New()` |
+| `llm/profiler/noop.go` | `NoopCollector` — zero overhead when disabled |
+| `llm/profiler/jsonl.go` | `JSONLTraceBuffer` — in-memory collection, async flush |
+| `envconfig/config.go` | `OLLAMA_TRACE_DIR` env var |
+| `runner/llamarunner/runner.go` | Hooks into `loadModel`, `processBatch`, `completion` |
+
+### Known caveats
+
+- **Phase 1 only (LlamaRunner):** The native Go OllamaRunner path is not yet instrumented
+- **GPU timing:** `t_start`/`t_end` are CPU-side dispatch times, not actual GPU execution times. Accurate for large ops (e.g. matmul), approximate for small ops
+- **Op fusion:** Flash attention appears as a single `FLASH_ATTN_EXT` node; SwiGLU may appear as `SWIGLU`. The trace reflects the actual fused execution graph
+- **Backend DLLs:** `ggml-cuda.dll`, `ggml-vulkan.dll` etc. do **not** need recompilation — the eval callback hooks at the scheduler level, above the backend DLLs
+
+---
+
+# Original README
+
 <p align="center">
   <a href="https://ollama.com">
     <img src="https://github.com/ollama/ollama/assets/3325447/0d0b44e2-8f4a-4e99-9b52-a5c1c741c8f7" alt="ollama" width="200"/>

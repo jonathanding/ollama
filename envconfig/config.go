@@ -223,6 +223,11 @@ var (
 	LLMLibrary = String("OLLAMA_LLM_LIBRARY")
 	Editor     = String("OLLAMA_EDITOR")
 
+	// TraceDir returns the directory for writing inference trace files.
+	// When empty (the default), profiling is disabled and zero overhead is incurred.
+	// Set OLLAMA_TRACE_DIR=/path/to/dir to enable per-request JSONL trace output.
+	TraceDir = String("OLLAMA_TRACE_DIR")
+
 	CudaVisibleDevices    = String("CUDA_VISIBLE_DEVICES")
 	HipVisibleDevices     = String("HIP_VISIBLE_DEVICES")
 	RocrVisibleDevices    = String("ROCR_VISIBLE_DEVICES")

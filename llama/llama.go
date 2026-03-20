@@ -159,8 +159,9 @@ func kvCacheTypeFromStr(s string) C.enum_ggml_type {
 }
 
 type Context struct {
-	c          *C.struct_llama_context
-	numThreads int
+	c              *C.struct_llama_context
+	numThreads     int
+	profilerHandle cgo.Handle // non-zero when profiling is active
 }
 
 var ErrKvCacheFull = errors.New("could not find a kv cache slot")

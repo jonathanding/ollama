@@ -942,6 +942,11 @@ extern "C" {
     // Set abort callback
     LLAMA_API void llama_set_abort_callback(struct llama_context * ctx, ggml_abort_callback abort_callback, void * abort_callback_data);
 
+    // Set per-node eval callback for inference profiling.
+    // The callback fires before (ask=true) and after (ask=false) each GGML node is dispatched.
+    // Pass NULL to disable. Zero overhead when not set.
+    LLAMA_API void llama_context_set_eval_callback(struct llama_context * ctx, ggml_backend_sched_eval_callback callback, void * user_data);
+
     // Wait until all computations are finished
     // This is automatically done when using one of the functions below to obtain the computation results
     // and is not necessary to call it explicitly in most cases
