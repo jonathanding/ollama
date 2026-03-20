@@ -2526,6 +2526,10 @@ void llama_set_abort_callback(llama_context * ctx, bool (*abort_callback)(void *
     ctx->set_abort_callback(abort_callback, abort_callback_data);
 }
 
+void llama_context_set_eval_callback(struct llama_context * ctx, ggml_backend_sched_eval_callback callback, void * user_data) {
+    ggml_backend_sched_set_eval_callback(ctx->get_sched(), callback, user_data);
+}
+
 void llama_set_embeddings(llama_context * ctx, bool embeddings) {
     ctx->set_embeddings(embeddings);
 }
