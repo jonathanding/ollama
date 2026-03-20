@@ -4,8 +4,6 @@ This is a fork of [ollama/ollama](https://github.com/ollama/ollama). The followi
 
 ## Inference Profiling & Tracing
 
-**Branch:** `feature/profiling-tracing`
-
 An opt-in per-operator execution tracing system for LlamaRunner. When enabled, it captures every GGML compute node (operator) dispatched during inference and writes a JSONL trace file per request, suitable for DAG visualization and performance analysis.
 
 ### How it works
