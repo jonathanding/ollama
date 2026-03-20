@@ -25,6 +25,7 @@ import (
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/llama"
 	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/llm/profiler"
 	"github.com/ollama/ollama/logutil"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/runner/common"
@@ -305,6 +306,12 @@ type Server struct {
 
 	// next sequence for prompt processing to avoid starvation
 	nextSeq int
+
+	// profiler collects per-operator trace events. NoopCollector when OLLAMA_TRACE_DIR is unset.
+	prof profiler.TraceCollector
+
+	// batchID is incremented each processBatch call, used as PassID in traces.
+	batchID int
 }
 
 func (s *Server) allNil() bool {
@@ -491,6 +498,9 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 	}
 
 	t := time.Now()
+	batchID := s.batchID
+	s.batchID++
+	s.prof.RecordPassStart(batchID, batch.NumTokens())
 	if err := s.lc.Decode(batch); err != nil {
 		return fmt.Errorf("failed to decode batch: %w", err)
 	}
@@ -498,6 +508,7 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 	if numOutputs > 0 {
 		s.lc.Synchronize()
 	}
+	s.prof.RecordPassEnd(batchID, 0)
 
 	for i, seq := range s.seqs {
 		if seq == nil {
@@ -620,6 +631,8 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 }
 
 func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
+	requestID := fmt.Sprintf("%d", time.Now().UnixNano())
+
 	var req llm.CompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
@@ -716,6 +729,7 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			close(seq.quit)
+			s.prof.Flush(requestID, s.modelPath)
 			return
 		case resp, ok := <-seq.responses:
 			if ok {
@@ -741,6 +755,7 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, fmt.Sprintf("failed to encode final response: %v", err), http.StatusInternalServerError)
 				}
 
+				s.prof.Flush(requestID, s.modelPath)
 				return
 			}
 		}
@@ -848,6 +863,8 @@ func (s *Server) loadModel(
 	if err != nil {
 		panic(err)
 	}
+	s.prof = profiler.New(envconfig.TraceDir())
+	s.lc.SetEvalCallback(s.prof)
 
 	for _, path := range lpath {
 		err := s.model.ApplyLoraFromFile(s.lc, path, 1.0, threads)
