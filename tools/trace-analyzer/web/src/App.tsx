@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFileList, useSummary, useCompare } from './hooks/useTraceData';
 import { DagView } from './components/DagView';
 import { TimelineView } from './components/TimelineView';
 import { CompareView } from './components/CompareView';
 import { HotspotPanel } from './components/HotspotPanel';
+import { ReplayPanel, type ReplayState, type ExpandMode } from './components/ReplayPanel';
 
 type View = 'dag' | 'timeline' | 'compare';
 
@@ -13,6 +14,9 @@ export default function App() {
   const [compareFile, setCompareFile] = useState<string | null>(null);
   const [view, setView] = useState<View>('dag');
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [replayActive, setReplayActive] = useState(false);
+  const [replayState, setReplayState] = useState<ReplayState | null>(null);
+  const [replayExpandMode, setReplayExpandMode] = useState<ExpandMode>('keep');
 
   const summaryFiles = files.filter(f => f.name.includes('summary'));
   const compareFiles = files.filter(f => f.name.includes('compare'));
@@ -23,6 +27,18 @@ export default function App() {
   const { data: compareData } = useCompare(
     view === 'compare' ? compareFile : null
   );
+
+  const handleReplayActivate = () => {
+    setReplayActive(true);
+    setHighlightId(null);
+  };
+
+  useEffect(() => {
+    if (view !== 'dag') {
+      setReplayActive(false);
+      setReplayState(null);
+    }
+  }, [view]);
 
   return (
     <div className="h-screen flex flex-col bg-gray-50">
@@ -61,7 +77,14 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden min-h-0">
         <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
           {view === 'dag' && summaryData && (
-            <DagView data={summaryData} highlightId={highlightId} onSelectNode={setHighlightId} />
+            <DagView
+              data={summaryData}
+              highlightId={highlightId}
+              onSelectNode={setHighlightId}
+              replayState={replayState}
+              replayExpandMode={replayExpandMode}
+              onReplayActivate={handleReplayActivate}
+            />
           )}
           {view === 'timeline' && summaryData && (
             <TimelineView data={summaryData} onSelectOp={setHighlightId} />
@@ -77,7 +100,17 @@ export default function App() {
           )}
         </div>
         {summaryData && view !== 'compare' && (
-          <HotspotPanel data={summaryData} selectedId={highlightId} onSelect={setHighlightId} />
+          replayActive && view === 'dag' ? (
+            <ReplayPanel
+              data={summaryData}
+              onReplayState={setReplayState}
+              onStop={() => { setReplayActive(false); setReplayState(null); }}
+              expandMode={replayExpandMode}
+              onExpandModeChange={setReplayExpandMode}
+            />
+          ) : (
+            <HotspotPanel data={summaryData} selectedId={highlightId} onSelect={setHighlightId} />
+          )
         )}
       </div>
     </div>
