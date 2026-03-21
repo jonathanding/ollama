@@ -2,7 +2,7 @@
 # Ollama Trace Analyzer — Release Packaging Script
 #
 # Usage (from repo root):
-#   powershell -ExecutionPolicy Bypass -File tools\trace-analyzer\build-release.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\package-trace-analyzer.ps1
 #
 # Output:
 #   release\ollama-trace-<VERSION>\
@@ -20,7 +20,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Root = (Resolve-Path "$PSScriptRoot\..\..").Path
+$Root = (Resolve-Path "$PSScriptRoot\..").Path
 $Version = Get-Date -Format "yyyyMMdd-HHmmss"
 $ReleaseDir = Join-Path $Root "release\ollama-trace-$Version"
 
