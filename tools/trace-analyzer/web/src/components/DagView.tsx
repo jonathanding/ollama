@@ -6,6 +6,7 @@ import { buildCytoscapeElements, type ColorMode } from '../utils/dagLayout';
 import { computeTreeCompoundPositions } from '../utils/treeCompoundLayout';
 import { ColorToggle } from './ColorToggle';
 import { NodeDetail } from './NodeDetail';
+import type { ReplayState, ExpandMode } from './ReplayPanel';
 
 cytoscape.use(fcose);
 
@@ -66,9 +67,12 @@ interface Props {
   data: SummaryData;
   highlightId: string | null;
   onSelectNode: (id: string) => void;
+  replayState?: ReplayState | null;
+  replayExpandMode?: ExpandMode;
+  onReplayActivate?: () => void;
 }
 
-export function DagView({ data, highlightId, onSelectNode }: Props) {
+export function DagView({ data, highlightId, onSelectNode, replayState, replayExpandMode, onReplayActivate }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
   const [colorMode, setColorMode] = useState<ColorMode>('backend');
@@ -174,6 +178,31 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
             'z-index': 999,
           },
         },
+        {
+          selector: '.replay-visited',
+          style: {
+            'background-opacity': 0.4,
+            'border-opacity': 0.4,
+          },
+        },
+        {
+          selector: '.replay-current',
+          style: {
+            'border-color': '#dc2626',
+            'border-width': 6,
+            'overlay-color': '#fbbf24',
+            'overlay-opacity': 0.3,
+            'z-index': 999,
+          },
+        },
+        {
+          selector: 'edge.replay-edge-active',
+          style: {
+            'line-color': '#fbbf24',
+            'target-arrow-color': '#fbbf24',
+            'width': 4,
+          },
+        },
       ],
     });
 
@@ -238,6 +267,75 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
       }
     }
   }, [highlightId, collapsed]);
+
+  // Replay highlight effect
+  useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy || !replayState) {
+      if (cy) {
+        cy.nodes().removeClass('replay-visited replay-current');
+        cy.edges().removeClass('replay-edge-active');
+      }
+      return;
+    }
+
+    const { currentNodeId, visitedNodeIds } = replayState;
+
+    // Auto expand mode: expand current node's layer, collapse others
+    if (replayExpandMode === 'auto') {
+      const dagNode = data.dag.nodes.find(n => n.id === currentNodeId);
+      if (dagNode?.layer && collapsed.has(dagNode.layer)) {
+        setCollapsed(prev => {
+          const next = new Set(allLayers);
+          if (dagNode.layer) next.delete(dagNode.layer);
+          return next;
+        });
+        return;
+      }
+    }
+
+    // Clear previous replay state
+    cy.nodes().removeClass('replay-current');
+    cy.edges().removeClass('replay-edge-active');
+
+    // Apply visited state
+    cy.nodes().forEach(node => {
+      const id = node.id();
+      if (visitedNodeIds.has(id) && id !== currentNodeId) {
+        node.addClass('replay-visited');
+      }
+    });
+
+    // Highlight current node
+    const currentNode = cy.getElementById(currentNodeId);
+    if (currentNode.length) {
+      currentNode.removeClass('replay-visited');
+      currentNode.addClass('replay-current');
+
+      // Flash incoming edges
+      const incomingEdges = cy.edges().filter(e => e.data('target') === currentNodeId);
+      incomingEdges.addClass('replay-edge-active');
+      setTimeout(() => {
+        incomingEdges.removeClass('replay-edge-active');
+      }, 200);
+
+      // Smart pan
+      const ext = cy.extent();
+      const pos = currentNode.position();
+      if (pos.x < ext.x1 || pos.x > ext.x2 || pos.y < ext.y1 || pos.y > ext.y2) {
+        cy.animate({ center: { eles: currentNode }, duration: 150 });
+      }
+    } else if (replayExpandMode === 'keep') {
+      const dagNode = data.dag.nodes.find(n => n.id === currentNodeId);
+      if (dagNode?.layer) {
+        const layerNode = cy.getElementById(`layer:${dagNode.layer}`);
+        if (layerNode.length) {
+          layerNode.addClass('replay-current');
+          setTimeout(() => layerNode.removeClass('replay-current'), 200);
+        }
+      }
+    }
+  }, [replayState, replayExpandMode, collapsed, colorMode, layoutName, data.dag.nodes]);
 
   const handleSearch = useCallback((term: string) => {
     setSearch(term);
@@ -340,6 +438,15 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
           onChange={e => handleSearch(e.target.value)}
           className="border rounded px-2 py-1 text-xs w-36"
         />
+
+        {!replayState && onReplayActivate && (
+          <>
+            <div className="w-px h-5 bg-gray-300 mx-0.5" />
+            <Btn onClick={onReplayActivate} title="Replay execution">
+              Replay
+            </Btn>
+          </>
+        )}
       </div>
       <div ref={containerRef} style={{ flex: '1 1 0', minHeight: 0 }} />
       {selectedNode && (
