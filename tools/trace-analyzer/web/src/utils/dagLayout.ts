@@ -24,6 +24,7 @@ export function buildCytoscapeElements(
   }
   const maxLayerTotal = Math.max(...layerTotals.values(), 1);
 
+  // Layer compound nodes
   for (const layer of layers) {
     const totalNs = layerTotals.get(layer) ?? 0;
     const bgColor = colorMode === 'heatmap'
@@ -35,12 +36,13 @@ export function buildCytoscapeElements(
         id: `layer:${layer}`,
         label: `${layer} (${formatNs(totalNs)})`,
         isLayer: true,
-        collapsed: collapsed.has(layer),
+        bgColor,
       },
-      style: { 'background-color': bgColor },
     });
   }
 
+  // Nodes
+  const nodeIdSet = new Set<string>();
   for (const node of dag.nodes) {
     const layerId = node.layer ? `layer:${node.layer}` : undefined;
     if (layerId && collapsed.has(node.layer!)) continue;
@@ -51,40 +53,53 @@ export function buildCytoscapeElements(
       ? opColor(node.op)
       : backendColor(node.backend);
 
+    const size = Math.max(30, Math.log2(node.ns + 1) * 5);
+
+    nodeIdSet.add(node.id);
     elements.push({
       data: {
         ...node,
         id: node.id,
         label: `${node.op}\n${node.id}`,
         parent: layerId,
-      },
-      style: {
-        'background-color': bgColor,
-        'border-style': node.is_copy ? 'dashed' : 'solid',
-        'border-color': node.is_copy ? '#ef4444' : '#6b7280',
-        'border-width': node.is_copy ? 3 : 1,
-        width: Math.max(30, Math.log2(node.ns + 1) * 5),
-        height: Math.max(30, Math.log2(node.ns + 1) * 5),
+        bgColor,
+        borderStyle: node.is_copy ? 'dashed' : 'solid',
+        borderColor: node.is_copy ? '#ef4444' : '#6b7280',
+        borderWidth: node.is_copy ? 3 : 1,
+        nodeWidth: size,
+        nodeHeight: size,
       },
     });
   }
 
+  // Edges — when both endpoints are visible, connect directly.
+  // When one or both endpoints are in a collapsed layer, promote edge to layer node.
   const nodeMap = new Map(dag.nodes.map(n => [n.id, n]));
+  const addedEdges = new Set<string>();
 
   for (const edge of dag.edges) {
     const fromNode = nodeMap.get(edge.from);
     const toNode = nodeMap.get(edge.to);
-    if (fromNode?.layer && collapsed.has(fromNode.layer)) continue;
-    if (toNode?.layer && collapsed.has(toNode.layer)) continue;
+    if (!fromNode || !toNode) continue;
+
+    const fromCollapsed = fromNode.layer && collapsed.has(fromNode.layer);
+    const toCollapsed = toNode.layer && collapsed.has(toNode.layer);
+
+    const source = fromCollapsed ? `layer:${fromNode.layer}` : edge.from;
+    const target = toCollapsed ? `layer:${toNode.layer}` : edge.to;
+
+    if (source === target) continue;
+
+    const edgeKey = `${source}->${target}`;
+    if (addedEdges.has(edgeKey)) continue;
+    addedEdges.add(edgeKey);
 
     elements.push({
       data: {
-        source: edge.from,
-        target: edge.to,
+        source,
+        target,
         est_bytes: edge.est_bytes,
-      },
-      style: {
-        width: Math.max(1, Math.log2(edge.est_bytes + 1) * 0.5),
+        edgeWidth: Math.max(1, Math.log2(edge.est_bytes + 1) * 0.5),
       },
     });
   }

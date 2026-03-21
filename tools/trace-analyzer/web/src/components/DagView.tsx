@@ -31,21 +31,52 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
       elements,
       layout: { name: 'breadthfirst', directed: true, spacingFactor: 1.5 },
       style: [
-        { selector: 'node', style: {
-          label: 'data(label)', 'font-size': 10, 'text-wrap': 'wrap',
-          'text-valign': 'center', 'text-halign': 'center',
-        }},
-        { selector: ':parent', style: {
-          'text-valign': 'top', 'font-weight': 'bold',
-        }},
-        { selector: 'edge', style: {
-          'curve-style': 'bezier', 'target-arrow-shape': 'triangle',
-          'arrow-scale': 0.8, 'line-color': '#9ca3af', 'target-arrow-color': '#9ca3af',
-        }},
-        { selector: '.highlighted', style: {
-          'border-color': '#2563eb', 'border-width': 4,
-          'overlay-color': '#2563eb', 'overlay-opacity': 0.15,
-        }},
+        {
+          selector: 'node',
+          style: {
+            'label': 'data(label)',
+            'font-size': 10,
+            'text-wrap': 'wrap',
+            'text-valign': 'center',
+            'text-halign': 'center',
+            'background-color': 'data(bgColor)',
+            'border-style': 'data(borderStyle)' as any,
+            'border-color': 'data(borderColor)',
+            'border-width': 'data(borderWidth)',
+            'width': 'data(nodeWidth)',
+            'height': 'data(nodeHeight)',
+          },
+        },
+        {
+          selector: ':parent',
+          style: {
+            'text-valign': 'top',
+            'font-weight': 'bold',
+            'border-width': 1,
+            'border-color': '#9ca3af',
+            'border-style': 'solid',
+          },
+        },
+        {
+          selector: 'edge',
+          style: {
+            'curve-style': 'bezier',
+            'target-arrow-shape': 'triangle',
+            'arrow-scale': 0.8,
+            'line-color': '#9ca3af',
+            'target-arrow-color': '#9ca3af',
+            'width': 'data(edgeWidth)',
+          },
+        },
+        {
+          selector: '.highlighted',
+          style: {
+            'border-color': '#2563eb',
+            'border-width': 4,
+            'overlay-color': '#2563eb',
+            'overlay-opacity': 0.15,
+          },
+        },
       ],
     });
 
