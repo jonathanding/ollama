@@ -2,26 +2,19 @@
 
 Post-process and visualize Ollama inference traces (JSONL format from Phase 1 profiler).
 
-## Quick Start
+## Install
 
 ```bash
-cd tools/ollama-trace-analyzer
-
-# Install dependencies (one-time)
+cd tools/trace-analyzer
 pip install -e .
-
-# Or just install deps without editable install:
-pip install polars click jinja2
 ```
+
+## Usage
 
 ### Generate summary from a trace
 
 ```bash
-# With pip install -e .:
 ollama-trace-analyzer summary trace.jsonl -o data/summary.json
-
-# Without install:
-python -m trace_analyzer summary trace.jsonl -o data/summary.json
 ```
 
 ### Compare two traces
@@ -48,17 +41,6 @@ ollama-trace-analyzer serve --data-dir data/ --port 8765
 # Open http://localhost:8765
 ```
 
-For frontend development:
-
-```bash
-# Terminal 1: Python data server
-ollama-trace-analyzer serve --data-dir data/ --port 8765
-
-# Terminal 2: Vite dev server with HMR
-cd web && npm run dev
-# Open http://localhost:5173
-```
-
 ## CLI Commands
 
 | Command   | Description                          | Key Options                              |
@@ -77,6 +59,5 @@ cd web && npm run dev
 ## Running Tests
 
 ```bash
-pip install pytest
 python -m pytest tests/ -v
 ```
