@@ -40,6 +40,11 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
             'text-valign': 'center',
             'text-halign': 'center',
             'background-color': 'data(bgColor)',
+          },
+        },
+        {
+          selector: 'node[borderColor]',
+          style: {
             'border-style': 'data(borderStyle)' as any,
             'border-color': 'data(borderColor)',
             'border-width': 'data(borderWidth)',

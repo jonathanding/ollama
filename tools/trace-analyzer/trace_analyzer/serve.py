@@ -53,7 +53,5 @@ def run_server(data_dir: Path, port: int = 8765, web_dir: Path | None = None):
     TraceHandler.data_dir = data_dir
     TraceHandler.web_dir = web_dir
     server = HTTPServer(("0.0.0.0", port), TraceHandler)
-    click.echo(f"Serving on http://localhost:{port}")
-    click.echo(f"  Data dir: {data_dir}")
-    click.echo(f"  API: http://localhost:{port}/api/files")
+    click.echo(f"Serving on http://localhost:{port}  (data: {data_dir})")
     server.serve_forever()
