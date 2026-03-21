@@ -285,7 +285,7 @@ export function DagView({ data, highlightId, onSelectNode, replayState, replayEx
     if (replayExpandMode === 'auto') {
       const dagNode = data.dag.nodes.find(n => n.id === currentNodeId);
       if (dagNode?.layer && collapsed.has(dagNode.layer)) {
-        setCollapsed(prev => {
+        setCollapsed(() => {
           const next = new Set(allLayers);
           if (dagNode.layer) next.delete(dagNode.layer);
           return next;
