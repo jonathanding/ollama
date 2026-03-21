@@ -139,35 +139,48 @@ def report(trace_file: Path, output: Path | None, model: str | None, trace_b: Pa
         click.echo(md)
 
 
-def _build_web(web_root: Path, force: bool = False) -> Path:
-    """Build React frontend if dist/ is missing or --force."""
-    import subprocess
+def _ensure_web_dist(web_root: Path, force: bool = False) -> Path | None:
+    """Return web/dist if it exists; auto-build from source if npm is available."""
     dist_dir = web_root / "dist"
-    if not force and dist_dir.is_dir() and any(dist_dir.iterdir()):
+    has_source = (web_root / "package.json").is_file()
+
+    # Already built and not forcing rebuild
+    if not force and dist_dir.is_dir() and (dist_dir / "index.html").is_file():
         return dist_dir
-    if not (web_root / "package.json").is_file():
-        click.echo(click.style("  Web source not found, skipping build", fg="yellow"))
-        return dist_dir
+
+    # No source to build from (release package)
+    if not has_source:
+        return dist_dir if dist_dir.is_dir() else None
+
+    # Dev mode: try to build
+    import shutil
+    import subprocess
+
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        click.echo(click.style("  npm not found, skipping web build", fg="yellow"))
+        return dist_dir if dist_dir.is_dir() else None
+
     click.echo("Building web frontend...")
-    npm = "npm.cmd" if __import__("sys").platform == "win32" else "npm"
     if not (web_root / "node_modules").is_dir():
         click.echo("  Installing dependencies...")
         subprocess.run([npm, "install"], cwd=web_root, check=True)
     subprocess.run([npm, "run", "build"], cwd=web_root, check=True)
     click.echo(click.style("  Web build complete", fg="green"))
-    return dist_dir
+    return dist_dir if dist_dir.is_dir() else None
 
 
 @main.command()
 @click.option("--data-dir", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--port", type=int, default=8765)
-@click.option("--force", is_flag=True, help="Force rebuild web frontend before serving")
-def serve(data_dir: Path, port: int, force: bool):
-    """Launch dev server for React frontend + JSON data."""
+@click.option("--force-build", is_flag=True, hidden=True, help="Force rebuild web frontend (dev only)")
+def serve(data_dir: Path, port: int, force_build: bool):
+    """Launch visualization server for trace data."""
     from .serve import run_server
+
     web_root = Path(__file__).parent.parent / "web"
-    web_dir = _build_web(web_root, force=force)
-    run_server(data_dir, port, web_dir if web_dir.is_dir() else None)
+    web_dir = _ensure_web_dist(web_root, force=force_build)
+    run_server(data_dir, port, web_dir)
 
 
 if __name__ == "__main__":
