@@ -1,0 +1,36 @@
+# Inference Trace Report{% if meta.model %}: {{ meta.model }}{% endif %}
+
+## Summary
+- Source: `{{ meta.source_file }}`
+- Total passes: {{ meta.total_passes }}, Total ops: {{ meta.total_ops }}
+- Wall time: {{ "%.1f"|format(timing.total_ms) }}ms (prefill: {{ "%.1f"|format(timing.prefill_ms) }}ms/{{ timing.prefill_tokens }}tok, decode avg: {{ "%.1f"|format(timing.decode_avg_ms) }}ms/tok)
+
+## Top Operators by Time
+| Op | Count | Total (ms) | % Time | Avg (us) |
+|----|-------|-----------|--------|----------|
+{% for o in op_stats -%}
+| {{ o.op }} | {{ o.count }} | {{ "%.1f"|format(o.total_ns / 1e6) }} | {{ o.pct_time }}% | {{ (o.avg_ns / 1000)|int }} |
+{% endfor %}
+
+## Backend Distribution
+| Backend | Ops | % Ops | % Time |
+|---------|-----|-------|--------|
+{% for b in backend_stats -%}
+| {{ b.backend }} | {{ b.count }} | {{ b.pct_ops }}% | {{ b.pct_time }}% |
+{% endfor %}
+
+{% if copy_stats.count > 0 -%}
+## Data Transfers
+| Tensor | Est. Size | Time (us) | Backend |
+|--------|-----------|-----------|---------|
+{% for c in copy_stats.copies -%}
+| {{ c.name }} | {{ "%.1f"|format(c.est_bytes / 1048576) }} MB | {{ (c.ns / 1000)|int }} | {{ c.backend }} |
+{% endfor %}
+{% endif %}
+
+## Per-Layer Breakdown
+| Layer | Ops | Total (ms) | % Time | Top Op |
+|-------|-----|-----------|--------|--------|
+{% for l in layer_stats -%}
+| {{ l.layer }} | {{ l.n_ops }} | {{ "%.1f"|format(l.total_ns / 1e6) }} | {{ l.pct_time }}% | {{ l.top_op }} |
+{% endfor %}

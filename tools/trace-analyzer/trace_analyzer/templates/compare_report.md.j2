@@ -1,0 +1,22 @@
+# Trace Comparison: {{ labels[0] }} vs {{ labels[1] }}
+
+## Summary
+| Metric | {{ labels[0] }} | {{ labels[1] }} | Diff |
+|--------|{% for _ in labels %}---------|{% endfor %}------|
+| Total (ms) | {{ "%.1f"|format(timing_diff.total_ms[0]) }} | {{ "%.1f"|format(timing_diff.total_ms[1]) }} | {% if timing_diff.diff_pct.total|abs > 10 %}⚠️ {% endif %}{{ "%+.1f"|format(timing_diff.diff_pct.total) }}% |
+| Prefill (ms) | {{ "%.1f"|format(timing_diff.prefill_ms[0]) }} | {{ "%.1f"|format(timing_diff.prefill_ms[1]) }} | {% if timing_diff.diff_pct.prefill|abs > 10 %}⚠️ {% endif %}{{ "%+.1f"|format(timing_diff.diff_pct.prefill) }}% |
+| Decode avg (ms) | {{ "%.1f"|format(timing_diff.decode_avg_ms[0]) }} | {{ "%.1f"|format(timing_diff.decode_avg_ms[1]) }} | {% if timing_diff.diff_pct.decode|abs > 10 %}⚠️ {% endif %}{{ "%+.1f"|format(timing_diff.diff_pct.decode) }}% |
+
+## Op Comparison
+| Op | {{ labels[0] }} (ms) | {{ labels[1] }} (ms) | Diff | Significant |
+|----|----------|----------|------|-------------|
+{% for o in op_diff -%}
+| {{ o.op }} | {{ "%.1f"|format(o['values'][0].total_ns / 1e6) }} | {{ "%.1f"|format(o['values'][1].total_ns / 1e6) }} | {% if o.significant %}⚠️ {% endif %}{{ "%+.1f"|format(o.diff_pct) }}% | {{ "Yes" if o.significant else "No" }} |
+{% endfor %}
+
+## Layer Comparison
+| Layer | {{ labels[0] }} (ms) | {{ labels[1] }} (ms) | Diff | Significant |
+|-------|----------|----------|------|-------------|
+{% for l in layer_diff -%}
+| {{ l.layer }} | {{ "%.1f"|format(l['values'][0].total_ns / 1e6) }} | {{ "%.1f"|format(l['values'][1].total_ns / 1e6) }} | {% if l.significant %}⚠️ {% endif %}{{ "%+.1f"|format(l.diff_pct) }}% | {{ "Yes" if l.significant else "No" }} |
+{% endfor %}
