@@ -101,6 +101,10 @@ export function ReplayPanel({ data, onReplayState, onStop, expandMode, onExpandM
     setLog([]);
     visitedRef.current = new Set();
     onReplayState(null);
+  };
+
+  const handleClose = () => {
+    handleStopClick();
     onStop();
   };
 
@@ -135,7 +139,7 @@ export function ReplayPanel({ data, onReplayState, onStop, expandMode, onExpandM
         <span className="font-semibold text-sm tracking-wide">Replay</span>
         <button
           className="text-indigo-200 hover:text-white text-lg leading-none"
-          onClick={handleStopClick}
+          onClick={handleClose}
           title="Close replay"
         >&times;</button>
       </div>
