@@ -1,45 +1,68 @@
 # Ollama Trace Analyzer
 
-Post-process and visualize Ollama inference traces (JSONL format from Phase 1 profiler).
+Post-process and visualize Ollama inference traces.
 
 ## Install
 
-```bash
-cd tools/trace-analyzer
+```cmd
+cd tools\trace-analyzer
 pip install -e .
 ```
 
-## Usage
+## End-to-End Workflow (Windows)
 
-### Generate summary from a trace
+### 1. Generate a trace
 
-```bash
-ollama-trace-analyzer summary trace.jsonl -o data/summary.json
+Set `OLLAMA_TRACE_DIR` to enable per-request JSONL trace output, then run a request:
+
+```cmd
+set OLLAMA_TRACE_DIR=C:\workspace\myollama\tmp
+ollama run llama3.2 "Hello"
 ```
 
-### Compare two traces
+Trace files appear in the directory as `trace_*.jsonl`.
 
-```bash
-ollama-trace-analyzer compare cuda_trace.jsonl vulkan_trace.jsonl --labels "CUDA,Vulkan" -o data/compare.json
+### 2. Generate summary
+
+```cmd
+ollama-trace-analyzer summary C:\workspace\myollama\tmp\trace_xxx.jsonl -o data\summary.json
 ```
 
-### Generate Markdown report (for LLM analysis)
-
-```bash
-ollama-trace-analyzer report trace.jsonl -o report.md
-ollama-trace-analyzer report trace.jsonl --compare other.jsonl --labels "A,B" -o compare_report.md
+Output:
+```
+Parsing trace_xxx.jsonl...
+  34204 ops across 68 passes
+  1 layers, top op: MUL_MAT, wall time: 7147.0ms
+  -> data\summary.json (7148658 bytes)
 ```
 
-### Launch visualization
+### 3. Compare two traces
 
-```bash
-# Build the React frontend (one-time)
-cd web && npm install && npm run build && cd ..
-
-# Start the server
-ollama-trace-analyzer serve --data-dir data/ --port 8765
-# Open http://localhost:8765
+```cmd
+ollama-trace-analyzer compare trace_cuda.jsonl trace_vulkan.jsonl --labels "CUDA,Vulkan" -o data\compare.json
 ```
+
+### 4. Generate Markdown report
+
+```cmd
+ollama-trace-analyzer report C:\workspace\myollama\tmp\trace_xxx.jsonl -o report.md
+ollama-trace-analyzer report trace_a.jsonl --compare trace_b.jsonl --labels "A,B" -o compare_report.md
+```
+
+### 5. Launch visualization
+
+```cmd
+rem Build the React frontend (one-time)
+cd web
+npm install
+npm run build
+cd ..
+
+rem Start the server
+ollama-trace-analyzer serve --data-dir data\ --port 8765
+```
+
+Open http://localhost:8765 in browser.
 
 ## CLI Commands
 
@@ -58,6 +81,6 @@ ollama-trace-analyzer serve --data-dir data/ --port 8765
 
 ## Running Tests
 
-```bash
-python -m pytest tests/ -v
+```cmd
+python -m pytest tests\ -v
 ```
