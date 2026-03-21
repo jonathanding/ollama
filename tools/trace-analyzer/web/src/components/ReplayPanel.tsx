@@ -129,19 +129,22 @@ export function ReplayPanel({ data, onReplayState, onStop, expandMode, onExpandM
   const heatRatio = maxDur > minDur ? (duration - minDur) / (maxDur - minDur) : 0;
 
   return (
-    <div className="w-72 shrink-0 bg-white border-l flex flex-col h-full">
-      <div className="flex items-center justify-between p-2 border-b">
-        <span className="font-bold text-sm">Replay</span>
+    <div className="w-72 shrink-0 bg-gray-50 border-l flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2 bg-indigo-600 text-white">
+        <span className="font-semibold text-sm tracking-wide">Replay</span>
         <button
-          className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+          className="text-indigo-200 hover:text-white text-lg leading-none"
           onClick={handleStopClick}
           title="Close replay"
         >&times;</button>
       </div>
 
-      <div className="p-2 border-b space-y-2">
+      {/* Pass selector */}
+      <div className="px-3 py-2 bg-white border-b">
+        <label className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Pass</label>
         <select
-          className="w-full border rounded px-2 py-1 text-xs"
+          className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-xs mt-1 bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 outline-none"
           value={selectedPass}
           onChange={e => { setSelectedPass(Number(e.target.value)); }}
         >
@@ -149,79 +152,102 @@ export function ReplayPanel({ data, onReplayState, onStop, expandMode, onExpandM
             <option key={p.pass} value={i}>{passLabel(p)}</option>
           ))}
         </select>
+      </div>
 
-        <div className="flex gap-2 text-xs">
-          <label className="flex items-center gap-1 cursor-pointer">
-            <input type="radio" name="expandMode" checked={expandMode === 'keep'}
-              onChange={() => onExpandModeChange('keep')} className="w-3 h-3" />
-            Keep Current
-          </label>
-          <label className="flex items-center gap-1 cursor-pointer">
-            <input type="radio" name="expandMode" checked={expandMode === 'auto'}
-              onChange={() => onExpandModeChange('auto')} className="w-3 h-3" />
-            Auto Expand
-          </label>
+      {/* Layer mode */}
+      <div className="px-3 py-2 bg-white border-b">
+        <label className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Layer Folding</label>
+        <div className="flex gap-1 mt-1">
+          <button
+            className={`flex-1 px-2 py-1 text-xs rounded-md transition-colors ${expandMode === 'keep'
+              ? 'bg-indigo-100 text-indigo-700 font-medium ring-1 ring-indigo-300'
+              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+            onClick={() => onExpandModeChange('keep')}
+            title="Keep current layer expand/collapse state during replay"
+          >Manual</button>
+          <button
+            className={`flex-1 px-2 py-1 text-xs rounded-md transition-colors ${expandMode === 'auto'
+              ? 'bg-indigo-100 text-indigo-700 font-medium ring-1 ring-indigo-300'
+              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+            onClick={() => onExpandModeChange('auto')}
+            title="Auto-expand the active layer and collapse others"
+          >Auto Expand</button>
         </div>
       </div>
 
-      <div className="p-2 border-b space-y-2">
-        <div className="flex items-center gap-1">
+      {/* Transport controls */}
+      <div className="px-3 py-2 bg-white border-b space-y-2">
+        <div className="flex items-center gap-1.5">
           {playing ? (
-            <button className="px-3 py-1 text-xs rounded bg-gray-800 text-white hover:bg-gray-700"
+            <button className="px-4 py-1.5 text-xs rounded-md bg-amber-500 text-white hover:bg-amber-600 font-medium shadow-sm transition-colors"
               onClick={handlePause}>Pause</button>
           ) : (
-            <button className="px-3 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-30"
+            <button className="px-4 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-30 font-medium shadow-sm transition-colors"
               onClick={handlePlay} disabled={steps.length === 0}>Play</button>
           )}
-          <button className="px-3 py-1 text-xs rounded bg-gray-200 hover:bg-gray-300"
+          <button className="px-3 py-1.5 text-xs rounded-md bg-gray-200 text-gray-600 hover:bg-gray-300 transition-colors"
             onClick={handleStopClick}>Stop</button>
-          <span className="text-xs text-gray-400 ml-auto">
-            {currentIndex >= 0 ? currentIndex + 1 : 0}/{steps.length}
+          <span className="text-xs text-gray-400 ml-auto font-mono tabular-nums">
+            {currentIndex >= 0 ? currentIndex + 1 : 0}<span className="text-gray-300">/</span>{steps.length}
           </span>
         </div>
 
-        <div className="flex gap-1">
-          {SPEED_PRESETS.map(s => (
-            <button key={s}
-              className={`flex-1 py-0.5 text-xs rounded ${speed === s ? 'bg-gray-800 text-white' : 'bg-gray-200'}`}
-              onClick={() => handleSpeedChange(s)}>{s}x</button>
-          ))}
+        {/* Speed */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold shrink-0">Speed</span>
+          <div className="flex gap-0.5 flex-1">
+            {SPEED_PRESETS.map(s => (
+              <button key={s}
+                className={`flex-1 py-0.5 text-[11px] rounded transition-colors ${speed === s
+                  ? 'bg-indigo-600 text-white font-medium'
+                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+                onClick={() => handleSpeedChange(s)}>{s}x</button>
+            ))}
+          </div>
         </div>
 
+        {/* Progress */}
         <input type="range" min={0} max={Math.max(0, steps.length - 1)}
           value={Math.max(0, currentIndex)}
           onChange={e => handleSeek(Number(e.target.value))}
-          className="w-full h-1 cursor-pointer" />
+          className="w-full h-1 cursor-pointer accent-indigo-600" />
       </div>
 
+      {/* Current op card */}
       {currentStep && (
-        <div className="m-2 p-2 border rounded text-xs space-y-1"
+        <div className="mx-3 mt-2 mb-1 p-2.5 bg-white rounded-lg shadow-sm border border-gray-100 text-xs space-y-1"
           style={{ borderLeftWidth: 4, borderLeftColor: heatmapColor(heatRatio) }}>
-          <div className="font-bold text-base">{currentStep.op}</div>
-          <div className="font-mono text-gray-600 truncate">{currentStep.name}</div>
-          <div className="flex justify-between text-gray-500">
-            <span>{currentStep.backend}</span>
-            <span>{formatNs(duration)}</span>
+          <div className="font-bold text-sm text-gray-800">{currentStep.op}</div>
+          <div className="font-mono text-gray-500 truncate text-[11px]">{currentStep.name}</div>
+          <div className="flex justify-between text-gray-400 pt-0.5">
+            <span className="bg-gray-100 px-1.5 py-0.5 rounded text-[10px]">{currentStep.backend}</span>
+            <span className="font-mono tabular-nums">{formatNs(duration)}</span>
           </div>
           {dagNode && (
-            <div className="text-gray-400">
+            <div className="text-gray-400 font-mono text-[10px] pt-0.5">
               [{dagNode.shape.join(', ')}] {dagNode.dtype}
             </div>
           )}
         </div>
       )}
 
-      <div ref={logRef} className="overflow-y-auto flex-1 text-xs">
+      {/* Log header */}
+      <div className="px-3 pt-2 pb-1">
+        <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Op Log</span>
+      </div>
+
+      {/* Log queue */}
+      <div ref={logRef} className="overflow-y-auto flex-1 text-xs mx-2 mb-2 bg-white rounded-lg border border-gray-100">
         {log.map((op, i) => {
           const isActive = i === 0 && currentStep?.seq === op.seq;
           return (
             <div key={`${op.seq}-${i}`}
-              className={`px-2 py-1 border-b cursor-pointer hover:bg-blue-50 flex gap-2 ${isActive ? 'bg-blue-100' : ''}`}
+              className={`px-2 py-1 border-b border-gray-50 cursor-pointer hover:bg-indigo-50 flex gap-2 transition-colors ${isActive ? 'bg-indigo-100' : ''}`}
               onClick={() => handleSeek(steps.findIndex(s => s.seq === op.seq))}>
-              <span className="text-gray-400 w-6 text-right shrink-0">#{op.seq}</span>
-              <span className="font-medium w-16 truncate shrink-0">{op.op}</span>
-              <span className="font-mono truncate flex-1 text-gray-500">{op.name}</span>
-              <span className="text-gray-400 shrink-0">{formatNs(op.t_end - op.t_start)}</span>
+              <span className="text-gray-300 w-6 text-right shrink-0 tabular-nums">#{op.seq}</span>
+              <span className="font-medium w-16 truncate shrink-0 text-gray-700">{op.op}</span>
+              <span className="font-mono truncate flex-1 text-gray-400">{op.name}</span>
+              <span className="text-gray-300 shrink-0 tabular-nums">{formatNs(op.t_end - op.t_start)}</span>
             </div>
           );
         })}
