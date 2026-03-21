@@ -26,8 +26,9 @@ def test_node_count():
 def test_edge_count():
     ops, _ = parse_trace(FIXTURE)
     dag = build_dag(ops, pass_id=1)
-    # token_embd:1 + attn_norm:1 + attn_q:2 + ffn_gate:2 + ffn_out:1 = 7
-    assert len(dag["edges"]) == 7
+    # Only edges between compute nodes (weight/leaf tensors filtered out)
+    # token_embd->attn_norm, attn_norm->attn_q, attn_norm->ffn_gate, ffn_gate->ffn_out = 4
+    assert len(dag["edges"]) == 4
 
 def test_layer_grouping():
     ops, _ = parse_trace(FIXTURE)

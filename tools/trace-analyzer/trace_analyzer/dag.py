@@ -52,10 +52,9 @@ def build_dag(ops_df: pl.DataFrame, pass_id: int) -> dict:
         })
         for src_name in row.get("srcs", []):
             src = node_info.get(src_name)
-            if src:
-                est = _estimate_bytes(src["shape"], src["dtype"])
-            else:
-                est = _estimate_bytes(row["shape"], row["dtype"])
+            if not src:
+                continue  # skip weight/leaf tensors not in compute graph
+            est = _estimate_bytes(src["shape"], src["dtype"])
             edges.append({
                 "from": src_name,
                 "to": row["name"],
