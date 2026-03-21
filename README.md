@@ -4,7 +4,7 @@ This is a fork of [ollama/ollama](https://github.com/ollama/ollama). The followi
 
 ## Pre-built Release (Windows x64)
 
-A ready-to-use **Windows x64 package** is available under `release/`. It includes a tracing-enabled Ollama binary, all native acceleration libraries (CUDA, Vulkan, CPU), and the Trace Analyzer with a pre-built web UI — **no building required**. See the `README.md` inside the release package for installation and usage instructions.
+A ready-to-use **Windows x64 package** is available on the [Releases](../../releases) page. It includes a tracing-enabled Ollama binary, all native acceleration libraries (CUDA, Vulkan, CPU), and the Trace Analyzer with a pre-built web UI — **no building required**. See the `README.md` inside the release package for installation and usage instructions.
 
 To generate a release package from your own build, run:
 ```
