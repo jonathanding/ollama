@@ -7,7 +7,7 @@ from pathlib import Path
 
 @click.group()
 def main():
-    """Trace Analyzer — post-process ollama inference traces."""
+    """Ollama Trace Analyzer — post-process and visualize inference traces."""
     pass
 
 
@@ -21,13 +21,21 @@ def summary(trace_file: Path, output: Path | None, model: str | None, dag_pass: 
     from .parser import parse_trace
     from .summary import build_summary
 
+    click.echo(f"Parsing {trace_file.name}...")
     ops, passes = parse_trace(trace_file)
+    click.echo(f"  {len(ops)} ops across {len(passes)} passes")
+
     result = build_summary(ops, passes, source_file=trace_file.name, model=model, dag_pass=dag_pass)
+
+    n_layers = len(result["layer_stats"])
+    top_op = result["op_stats"][0]["op"] if result["op_stats"] else "N/A"
+    click.echo(f"  {n_layers} layers, top op: {top_op}, wall time: {result['timing']['total_ms']:.1f}ms")
 
     text = json.dumps(result, indent=2)
     if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text)
-        click.echo(f"Written to {output}")
+        click.echo(click.style(f"  -> {output} ({len(text)} bytes)", fg="green"))
     else:
         click.echo(text)
 
@@ -49,16 +57,26 @@ def compare(trace_a: Path, trace_b: Path, labels: str, output: Path | None, mode
     if len(label_list) != 2:
         raise click.BadParameter("Exactly 2 labels required", param_hint="--labels")
 
+    click.echo(f"Parsing {trace_a.name} ({label_list[0]})...")
     ops_a, passes_a = parse_trace(trace_a)
+    click.echo(f"  {len(ops_a)} ops across {len(passes_a)} passes")
+
+    click.echo(f"Parsing {trace_b.name} ({label_list[1]})...")
     ops_b, passes_b = parse_trace(trace_b)
+    click.echo(f"  {len(ops_b)} ops across {len(passes_b)} passes")
+
     sa = build_summary(ops_a, passes_a, source_file=trace_a.name, model=model)
     sb = build_summary(ops_b, passes_b, source_file=trace_b.name, model=model)
     result = build_compare(sa, sb, labels=label_list, threshold=threshold)
 
+    sig_ops = sum(1 for o in result["op_diff"] if o["significant"])
+    click.echo(f"Compared: {len(result['op_diff'])} ops, {sig_ops} significant (>{threshold}%)")
+
     text = json.dumps(result, indent=2)
     if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text)
-        click.echo(f"Written to {output}")
+        click.echo(click.style(f"  -> {output} ({len(text)} bytes)", fg="green"))
     else:
         click.echo(text)
 
@@ -78,6 +96,7 @@ def report(trace_file: Path, output: Path | None, model: str | None, trace_b: Pa
     if trace_b:
         from .compare import build_compare
         label_list = [l.strip() for l in labels.split(",")] if labels else ["A", "B"]
+        click.echo(f"Generating comparison report: {trace_file.name} vs {trace_b.name}...")
         ops_a, passes_a = parse_trace(trace_file)
         ops_b, passes_b = parse_trace(trace_b)
         sa = build_summary(ops_a, passes_a, source_file=trace_file.name, model=model)
@@ -85,13 +104,15 @@ def report(trace_file: Path, output: Path | None, model: str | None, trace_b: Pa
         cmp = build_compare(sa, sb, labels=label_list)
         md = render_compare(cmp)
     else:
+        click.echo(f"Generating report for {trace_file.name}...")
         ops, passes = parse_trace(trace_file)
         s = build_summary(ops, passes, source_file=trace_file.name, model=model)
         md = render_single(s)
 
     if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(md)
-        click.echo(f"Written to {output}")
+        click.echo(click.style(f"  -> {output} ({len(md)} bytes)", fg="green"))
     else:
         click.echo(md)
 
