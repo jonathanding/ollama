@@ -54,24 +54,38 @@ An opt-in per-operator execution tracing system for LlamaRunner. When enabled, i
 
 ### Usage
 
-```bash
-# Enable tracing by setting the output directory
-mkdir -p /tmp/traces
-OLLAMA_TRACE_DIR=/tmp/traces ollama serve
+#### Step 1: Capture a trace
 
-# Each inference request produces one trace file
-ls /tmp/traces/
-# trace_1742123456789_1742123456790.jsonl
-
-# Inspect operator coverage
-cat /tmp/traces/trace_*.jsonl | jq -r 'select(.type=="op")|.op' | sort | uniq -c | sort -rn
-
-# Inspect DAG edges (operator dependencies)
-cat /tmp/traces/trace_*.jsonl | jq 'select(.type=="op")|{name,srcs}' | head -20
-
-# Inspect backend distribution (CPU vs GPU)
-cat /tmp/traces/trace_*.jsonl | jq -r 'select(.type=="op")|.backend' | sort | uniq -c
+```cmd
+set OLLAMA_TRACE_DIR=C:\workspace\myollama\tmp
+ollama serve
+rem In another terminal:
+ollama run llama3.2 "Hello"
+rem Trace file appears in tmp\ as trace_*.jsonl
 ```
+
+#### Step 2: Analyze with ollama-trace-analyzer
+
+```cmd
+cd tools\trace-analyzer
+pip install -e .
+
+rem Generate summary JSON
+ollama-trace-analyzer summary C:\workspace\myollama\tmp\trace_xxx.jsonl -o data\summary.json
+
+rem Compare two traces (e.g. CUDA vs Vulkan)
+ollama-trace-analyzer compare trace_cuda.jsonl trace_vulkan.jsonl --labels "CUDA,Vulkan" -o data\compare.json
+
+rem Generate Markdown report (for LLM analysis)
+ollama-trace-analyzer report C:\workspace\myollama\tmp\trace_xxx.jsonl -o report.md
+
+rem Launch interactive visualization (DAG / Timeline / Compare views)
+cd web && npm install && npm run build && cd ..
+ollama-trace-analyzer serve --data-dir data\ --port 8765
+rem Open http://localhost:8765
+```
+
+See [tools/trace-analyzer/README.md](tools/trace-analyzer/README.md) for full CLI reference.
 
 ### JSONL output format
 
