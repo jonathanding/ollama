@@ -12,7 +12,8 @@ export function buildCytoscapeElements(
 ): ElementDefinition[] {
   const elements: ElementDefinition[] = [];
 
-  const maxNs = Math.max(...dag.nodes.map(n => n.ns), 1);
+  // Use reduce to avoid stack overflow on large arrays
+  const maxNs = dag.nodes.reduce((m, n) => Math.max(m, n.ns), 1);
 
   const layers = new Set<string>();
   const layerTotals = new Map<string, number>();
@@ -22,7 +23,10 @@ export function buildCytoscapeElements(
       layerTotals.set(node.layer, (layerTotals.get(node.layer) ?? 0) + node.ns);
     }
   }
-  const maxLayerTotal = Math.max(...layerTotals.values(), 1);
+  let maxLayerTotal = 1;
+  for (const v of layerTotals.values()) {
+    if (v > maxLayerTotal) maxLayerTotal = v;
+  }
 
   // Layer compound nodes
   for (const layer of layers) {
@@ -34,15 +38,14 @@ export function buildCytoscapeElements(
     elements.push({
       data: {
         id: `layer:${layer}`,
-        label: `${layer} (${formatNs(totalNs)})`,
+        label: `${layer}\n${formatNs(totalNs)}`,
         isLayer: true,
         bgColor,
       },
     });
   }
 
-  // Nodes
-  const nodeIdSet = new Set<string>();
+  // Op nodes (skip if their layer is collapsed)
   for (const node of dag.nodes) {
     const layerId = node.layer ? `layer:${node.layer}` : undefined;
     if (layerId && collapsed.has(node.layer!)) continue;
@@ -54,17 +57,17 @@ export function buildCytoscapeElements(
       : backendColor(node.backend);
 
     const size = Math.max(30, Math.log2(node.ns + 1) * 5);
+    // Truncate long names for display
+    const shortId = node.id.length > 20 ? node.id.slice(0, 18) + '..' : node.id;
 
-    nodeIdSet.add(node.id);
     elements.push({
       data: {
         ...node,
         id: node.id,
-        label: `${node.op}\n${node.id}`,
+        label: `${node.op}\n${shortId}`,
         parent: layerId,
         bgColor,
-        borderStyle: node.is_copy ? 'dashed' : 'solid',
-        borderColor: node.is_copy ? '#ef4444' : '#6b7280',
+        isCopy: node.is_copy ? 'yes' : 'no',
         borderWidth: node.is_copy ? 3 : 1,
         nodeWidth: size,
         nodeHeight: size,
@@ -72,8 +75,7 @@ export function buildCytoscapeElements(
     });
   }
 
-  // Edges — when both endpoints are visible, connect directly.
-  // When one or both endpoints are in a collapsed layer, promote edge to layer node.
+  // Edges — promote to layer-level when endpoints are collapsed
   const nodeMap = new Map(dag.nodes.map(n => [n.id, n]));
   const addedEdges = new Set<string>();
 

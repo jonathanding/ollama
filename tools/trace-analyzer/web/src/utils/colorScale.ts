@@ -41,10 +41,21 @@ export function opColor(op: string): string {
   return FALLBACK_OP_COLORS[Math.abs(hash) % FALLBACK_OP_COLORS.length];
 }
 
+/** Blue (cold, ratio=0) -> Yellow (mid) -> Red (hot, ratio=1) */
 export function heatmapColor(ratio: number): string {
-  const r = ratio < 0.5 ? Math.round(ratio * 2 * 255) : 255;
-  const g = ratio < 0.5 ? 255 : Math.round((1 - (ratio - 0.5) * 2) * 255);
-  const b = ratio < 0.5 ? Math.round((1 - ratio * 2) * 255) : 0;
+  const t = Math.max(0, Math.min(1, ratio));
+  let r: number, g: number, b: number;
+  if (t < 0.5) {
+    const s = t * 2;
+    r = Math.round(s * 255);
+    g = Math.round(s * 255);
+    b = Math.round((1 - s) * 200);
+  } else {
+    const s = (t - 0.5) * 2;
+    r = 255;
+    g = Math.round((1 - s) * 255);
+    b = 0;
+  }
   return `rgb(${r},${g},${b})`;
 }
 

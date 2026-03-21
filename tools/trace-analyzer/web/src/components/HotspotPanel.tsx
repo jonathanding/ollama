@@ -12,16 +12,6 @@ interface Props {
 
 export function HotspotPanel({ data, selectedId, onSelect }: Props) {
   const [tab, setTab] = useState<Tab>('ops');
-  const [collapsed, setCollapsed] = useState(false);
-
-  if (collapsed) {
-    return (
-      <button
-        className="fixed right-0 top-1/2 bg-gray-800 text-white px-2 py-4 rounded-l z-40"
-        onClick={() => setCollapsed(false)}
-      >{'<'}</button>
-    );
-  }
 
   const opsRanked = [...data.dag.nodes].sort((a, b) => b.ns - a.ns);
   const copies = data.copy_stats.copies;
@@ -29,10 +19,9 @@ export function HotspotPanel({ data, selectedId, onSelect }: Props) {
   const copiesByTime = [...copies].sort((a, b) => b.total_ns - a.total_ns);
 
   return (
-    <div className="fixed right-0 top-0 h-full w-72 bg-white border-l shadow z-40 flex flex-col">
+    <div className="w-72 shrink-0 bg-white border-l flex flex-col h-full">
       <div className="flex items-center justify-between p-2 border-b">
         <span className="font-bold text-sm">Hotspots</span>
-        <button onClick={() => setCollapsed(true)} className="text-gray-400">{'>'}</button>
       </div>
       <div className="flex gap-1 p-2 bg-gray-50">
         {(['ops', 'copies_size', 'copies_time'] as Tab[]).map(t => (
@@ -52,7 +41,7 @@ export function HotspotPanel({ data, selectedId, onSelect }: Props) {
           >
             <div className="flex justify-between">
               <span className="text-gray-400 mr-2">#{i + 1}</span>
-              <span className="font-mono truncate flex-1">{node.id}</span>
+              <span className="font-mono truncate flex-1 text-xs">{node.id}</span>
             </div>
             <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>{node.op}</span>
@@ -68,12 +57,12 @@ export function HotspotPanel({ data, selectedId, onSelect }: Props) {
           >
             <div className="flex justify-between">
               <span className="text-gray-400 mr-2">#{i + 1}</span>
-              <span className="font-mono truncate flex-1">{c.name}</span>
+              <span className="font-mono truncate flex-1 text-xs">{c.name}</span>
             </div>
             <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>{formatBytes(c.est_bytes)}</span>
               <span>{formatNs(c.total_ns)}</span>
-              <span>×{c.count}</span>
+              <span>x{c.count}</span>
               <span>{c.backend}</span>
             </div>
           </div>

@@ -26,15 +26,15 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-50">
-      <div className="bg-white border-b px-4 py-2 flex items-center gap-4">
-        <h1 className="font-bold text-lg">Trace Analyzer</h1>
-        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+      <div className="bg-white border-b px-4 py-2 flex items-center gap-4 shrink-0">
+        <h1 className="font-bold text-lg whitespace-nowrap">Ollama Trace Analyzer</h1>
+        <div className="flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
           {(['dag', 'timeline', 'compare'] as View[]).map(v => (
             <button
               key={v}
-              className={`px-3 py-1 rounded text-sm capitalize ${view === v ? 'bg-white shadow' : ''}`}
+              className={`px-3 py-1 rounded text-sm capitalize ${view === v ? 'bg-white shadow font-medium' : 'text-gray-600'}`}
               onClick={() => setView(v)}
-            >{v}</button>
+            >{v === 'dag' ? 'DAG' : v}</button>
           ))}
         </div>
         {view !== 'compare' ? (
@@ -58,8 +58,8 @@ export default function App() {
         )}
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        <div className="flex-1 overflow-auto">
+      <div className="flex-1 flex overflow-hidden min-h-0">
+        <div className="flex-1 overflow-auto min-w-0">
           {view === 'dag' && summaryData && (
             <DagView data={summaryData} highlightId={highlightId} onSelectNode={setHighlightId} />
           )}

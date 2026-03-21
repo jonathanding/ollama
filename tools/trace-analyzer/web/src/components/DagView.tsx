@@ -15,13 +15,12 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
   const [colorMode, setColorMode] = useState<ColorMode>('backend');
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
-    const layers = new Set<string>();
-    for (const n of data.dag.nodes) { if (n.layer) layers.add(n.layer); }
-    return layers;
-  });
+  const allLayers = new Set(data.dag.nodes.map(n => n.layer).filter(Boolean) as string[]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(allLayers));
   const [selectedNode, setSelectedNode] = useState<DagNode | null>(null);
   const [search, setSearch] = useState('');
+
+  const allCollapsed = collapsed.size === allLayers.size;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -31,6 +30,7 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
       elements,
       layout: { name: 'breadthfirst', directed: true, spacingFactor: 1.5 },
       style: [
+        // All nodes: label + bgColor
         {
           selector: 'node',
           style: {
@@ -42,16 +42,26 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
             'background-color': 'data(bgColor)',
           },
         },
+        // Op nodes: sized + bordered
         {
-          selector: 'node[borderColor]',
+          selector: 'node[borderWidth]',
           style: {
-            'border-style': 'data(borderStyle)' as any,
-            'border-color': 'data(borderColor)',
-            'border-width': 'data(borderWidth)',
             'width': 'data(nodeWidth)',
             'height': 'data(nodeHeight)',
+            'border-width': 'data(borderWidth)',
+            'border-color': '#6b7280',
+            'border-style': 'solid',
           },
         },
+        // Copy op nodes: red dashed border
+        {
+          selector: 'node[isCopy="yes"]',
+          style: {
+            'border-style': 'dashed',
+            'border-color': '#ef4444',
+          },
+        },
+        // Layer compound nodes
         {
           selector: ':parent',
           style: {
@@ -62,6 +72,7 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
             'border-style': 'solid',
           },
         },
+        // Edges
         {
           selector: 'edge',
           style: {
@@ -73,6 +84,7 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
             'width': 'data(edgeWidth)',
           },
         },
+        // Highlight
         {
           selector: '.highlighted',
           style: {
@@ -127,22 +139,30 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-4 p-2 border-b">
+      <div className="flex items-center gap-3 p-2 border-b bg-white">
         <ColorToggle
           mode={colorMode}
           onChange={setColorMode}
           visibleOps={[...new Set(data.dag.nodes.map(n => n.op))]}
         />
+        <button
+          className="px-2 py-1 text-xs rounded bg-gray-200 hover:bg-gray-300 whitespace-nowrap"
+          onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(allLayers))}
+        >{allCollapsed ? 'Expand All' : 'Collapse All'}</button>
         <input
           type="text"
           placeholder="Search tensor..."
           value={search}
           onChange={e => handleSearch(e.target.value)}
-          className="border rounded px-2 py-1 text-sm flex-1 max-w-xs"
+          className="border rounded px-2 py-1 text-sm w-40"
         />
       </div>
-      <div ref={containerRef} className="flex-1" />
-      <NodeDetail node={selectedNode} onClose={() => setSelectedNode(null)} />
+      <div className="flex-1 relative">
+        <div ref={containerRef} className="absolute inset-0" />
+        {selectedNode && (
+          <NodeDetail node={selectedNode} onClose={() => setSelectedNode(null)} />
+        )}
+      </div>
     </div>
   );
 }
