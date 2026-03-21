@@ -2,6 +2,15 @@
 
 This is a fork of [ollama/ollama](https://github.com/ollama/ollama). The following features have been added on top of the upstream codebase.
 
+## Pre-built Release (Windows x64)
+
+A ready-to-use **Windows x64 package** is available under `release/`. It includes a tracing-enabled Ollama binary, all native acceleration libraries (CUDA, Vulkan, CPU), and the Trace Analyzer with a pre-built web UI — **no building required**. See the `README.md` inside the release package for installation and usage instructions.
+
+To generate a release package from your own build, run:
+```
+powershell -ExecutionPolicy Bypass -File scripts\package-ollama-with-tracing.ps1
+```
+
 ## Build Notes (Windows + CUDA)
 
 ### Building all backends (CPU + Vulkan + CUDA) on a machine without a GPU
