@@ -11,6 +11,9 @@ dependencies = [
 [project.scripts]
 ollama-trace-analyzer = "trace_analyzer.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["trace_analyzer*"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
