@@ -70,7 +70,7 @@ export function CompareView({ data }: Props) {
   }, [data]);
 
   return (
-    <div className="p-4 space-y-6">
+    <div className="flex-1 overflow-auto min-h-0 p-4 space-y-6">
       <div className="grid grid-cols-3 gap-4">
         {cards.map(c => (
           <div key={c.label} className="border rounded p-3">

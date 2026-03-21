@@ -148,8 +148,13 @@ def build_dag(ops_df: pl.DataFrame, pass_id: int) -> dict:
         ns = row["t_end"] - row["t_start"]
         if has_layer_col:
             layer = row["layer"]
-            if layer == "_top" or layer == "_pre" or layer == "_post":
+            # Convert internal markers to display names; _top stays ungrouped
+            if layer == "_top":
                 layer = None
+            elif layer == "_pre":
+                layer = "pre"
+            elif layer == "_post":
+                layer = "post"
         else:
             layer = _extract_layer(row["name"])
         nodes.append({

@@ -5,7 +5,7 @@ interface Props { node: DagNode; onClose: () => void; }
 
 export function NodeDetail({ node, onClose }: Props) {
   return (
-    <div className="absolute bottom-0 left-0 right-0 bg-white border-t shadow-lg p-3 z-10">
+    <>
       <div className="flex items-start justify-between mb-2">
         <h3 className="font-bold text-sm font-mono">{node.id}</h3>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 ml-4 text-sm">X</button>
@@ -20,6 +20,6 @@ export function NodeDetail({ node, onClose }: Props) {
         <span><span className="text-gray-500">Layer:</span> {node.layer ?? '(top-level)'}</span>
         {node.is_copy && <span className="text-red-600 font-medium">Copy Op</span>}
       </div>
-    </div>
+    </>
   );
 }

@@ -59,7 +59,7 @@ export default function App() {
       </div>
 
       <div className="flex-1 flex overflow-hidden min-h-0">
-        <div className="flex-1 overflow-auto min-w-0">
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
           {view === 'dag' && summaryData && (
             <DagView data={summaryData} highlightId={highlightId} onSelectNode={setHighlightId} />
           )}
@@ -70,10 +70,10 @@ export default function App() {
             <CompareView data={compareData} />
           )}
           {!summaryData && view !== 'compare' && (
-            <div className="flex items-center justify-center h-full text-gray-400">Select a summary file to begin</div>
+            <div className="flex-1 flex items-center justify-center text-gray-400">Select a summary file to begin</div>
           )}
           {!compareData && view === 'compare' && (
-            <div className="flex items-center justify-center h-full text-gray-400">Select a compare file to begin</div>
+            <div className="flex-1 flex items-center justify-center text-gray-400">Select a compare file to begin</div>
           )}
         </div>
         {summaryData && view !== 'compare' && (
