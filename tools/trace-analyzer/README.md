@@ -1,11 +1,11 @@
-# Trace Analyzer
+# Ollama Trace Analyzer
 
 Post-process and visualize Ollama inference traces (JSONL format from Phase 1 profiler).
 
 ## Quick Start
 
 ```bash
-cd tools/trace-analyzer
+cd tools/ollama-trace-analyzer
 
 # Install dependencies (one-time)
 pip install -e .
@@ -18,7 +18,7 @@ pip install polars click jinja2
 
 ```bash
 # With pip install -e .:
-trace-analyzer summary trace.jsonl -o data/summary.json
+ollama-trace-analyzer summary trace.jsonl -o data/summary.json
 
 # Without install:
 python -m trace_analyzer summary trace.jsonl -o data/summary.json
@@ -27,14 +27,14 @@ python -m trace_analyzer summary trace.jsonl -o data/summary.json
 ### Compare two traces
 
 ```bash
-trace-analyzer compare cuda_trace.jsonl vulkan_trace.jsonl --labels "CUDA,Vulkan" -o data/compare.json
+ollama-trace-analyzer compare cuda_trace.jsonl vulkan_trace.jsonl --labels "CUDA,Vulkan" -o data/compare.json
 ```
 
 ### Generate Markdown report (for LLM analysis)
 
 ```bash
-trace-analyzer report trace.jsonl -o report.md
-trace-analyzer report trace.jsonl --compare other.jsonl --labels "A,B" -o compare_report.md
+ollama-trace-analyzer report trace.jsonl -o report.md
+ollama-trace-analyzer report trace.jsonl --compare other.jsonl --labels "A,B" -o compare_report.md
 ```
 
 ### Launch visualization
@@ -44,7 +44,7 @@ trace-analyzer report trace.jsonl --compare other.jsonl --labels "A,B" -o compar
 cd web && npm install && npm run build && cd ..
 
 # Start the server
-trace-analyzer serve --data-dir data/ --port 8765
+ollama-trace-analyzer serve --data-dir data/ --port 8765
 # Open http://localhost:8765
 ```
 
@@ -52,7 +52,7 @@ For frontend development:
 
 ```bash
 # Terminal 1: Python data server
-trace-analyzer serve --data-dir data/ --port 8765
+ollama-trace-analyzer serve --data-dir data/ --port 8765
 
 # Terminal 2: Vite dev server with HMR
 cd web && npm run dev

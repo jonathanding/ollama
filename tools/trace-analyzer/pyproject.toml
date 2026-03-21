@@ -1,5 +1,5 @@
 [project]
-name = "trace-analyzer"
+name = "ollama-trace-analyzer"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.scripts]
-trace-analyzer = "trace_analyzer.cli:main"
+ollama-trace-analyzer = "trace_analyzer.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
