@@ -139,13 +139,34 @@ def report(trace_file: Path, output: Path | None, model: str | None, trace_b: Pa
         click.echo(md)
 
 
+def _build_web(web_root: Path, force: bool = False) -> Path:
+    """Build React frontend if dist/ is missing or --force."""
+    import subprocess
+    dist_dir = web_root / "dist"
+    if not force and dist_dir.is_dir() and any(dist_dir.iterdir()):
+        return dist_dir
+    if not (web_root / "package.json").is_file():
+        click.echo(click.style("  Web source not found, skipping build", fg="yellow"))
+        return dist_dir
+    click.echo("Building web frontend...")
+    npm = "npm.cmd" if __import__("sys").platform == "win32" else "npm"
+    if not (web_root / "node_modules").is_dir():
+        click.echo("  Installing dependencies...")
+        subprocess.run([npm, "install"], cwd=web_root, check=True)
+    subprocess.run([npm, "run", "build"], cwd=web_root, check=True)
+    click.echo(click.style("  Web build complete", fg="green"))
+    return dist_dir
+
+
 @main.command()
 @click.option("--data-dir", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--port", type=int, default=8765)
-def serve(data_dir: Path, port: int):
+@click.option("--force", is_flag=True, help="Force rebuild web frontend before serving")
+def serve(data_dir: Path, port: int, force: bool):
     """Launch dev server for React frontend + JSON data."""
     from .serve import run_server
-    web_dir = Path(__file__).parent.parent / "web" / "dist"
+    web_root = Path(__file__).parent.parent / "web"
+    web_dir = _build_web(web_root, force=force)
     run_server(data_dir, port, web_dir if web_dir.is_dir() else None)
 
 
