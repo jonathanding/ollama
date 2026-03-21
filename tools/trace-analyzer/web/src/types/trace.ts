@@ -24,7 +24,9 @@ export interface SummaryData {
   copy_stats: {
     count: number; total_ns: number; est_total_bytes: number;
     copies: Array<{
-      name: string; op: string; est_bytes: number; ns: number; backend: string;
+      name: string; op: string; est_bytes: number;
+      shape: number[]; dtype: string;
+      total_ns: number; count: number; backend: string;
     }>;
   };
   layer_stats: Array<{

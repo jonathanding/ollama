@@ -6,7 +6,7 @@ interface Props { node: DagNode | null; onClose: () => void; }
 export function NodeDetail({ node, onClose }: Props) {
   if (!node) return null;
   return (
-    <div className="fixed right-0 top-0 h-full w-80 bg-white shadow-lg p-4 overflow-y-auto z-50">
+    <div className="fixed right-72 top-0 h-full w-80 bg-white shadow-lg p-4 overflow-y-auto z-50 border-r">
       <button onClick={onClose} className="float-right text-gray-400 hover:text-gray-600">X</button>
       <h3 className="font-bold text-lg mb-4">{node.id}</h3>
       <table className="w-full text-sm">

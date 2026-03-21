@@ -42,6 +42,10 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
           'curve-style': 'bezier', 'target-arrow-shape': 'triangle',
           'arrow-scale': 0.8, 'line-color': '#9ca3af', 'target-arrow-color': '#9ca3af',
         }},
+        { selector: '.highlighted', style: {
+          'border-color': '#2563eb', 'border-width': 4,
+          'overlay-color': '#2563eb', 'overlay-opacity': 0.15,
+        }},
       ],
     });
 
@@ -88,7 +92,11 @@ export function DagView({ data, highlightId, onSelectNode }: Props) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-4 p-2 border-b">
-        <ColorToggle mode={colorMode} onChange={setColorMode} />
+        <ColorToggle
+          mode={colorMode}
+          onChange={setColorMode}
+          visibleOps={[...new Set(data.dag.nodes.map(n => n.op))]}
+        />
         <input
           type="text"
           placeholder="Search tensor..."

@@ -1,7 +1,7 @@
 from __future__ import annotations
-import re
+from datetime import datetime, timezone
 import polars as pl
-from .dag import build_dag, COPY_OPS, _estimate_bytes, _extract_layer
+from .dag import build_dag, assign_layers, COPY_OPS, _estimate_bytes
 
 
 def build_summary(
@@ -81,17 +81,39 @@ def build_summary(
     # Copy stats
     if len(ops) > 0:
         copy_df = ops_with_ns.filter(pl.col("op").is_in(list(COPY_OPS)))
-        copies = []
+        copies_raw = []
         for row in copy_df.to_dicts():
-            copies.append({
-                "name": row["name"], "op": row["op"],
-                "est_bytes": _estimate_bytes(row["shape"], row["dtype"]),
-                "ns": int(row["ns"]), "backend": row["backend"],
+            shape = row["shape"]
+            dtype = row["dtype"]
+            est = _estimate_bytes(shape, dtype)
+            label = row["name"].strip()
+            if not label or label == "(copy)":
+                label = f"{dtype} {'x'.join(str(s) for s in shape)}"
+            copies_raw.append({
+                "name": label, "op": row["op"],
+                "shape": shape, "dtype": dtype,
+                "est_bytes": est, "ns": int(row["ns"]),
+                "backend": row["backend"],
             })
+        # Aggregate by (name, shape_key, dtype, backend) to deduplicate per-pass copies
+        agg: dict[tuple, dict] = {}
+        for c in copies_raw:
+            key = (c["name"], str(c["shape"]), c["dtype"], c["backend"])
+            if key not in agg:
+                agg[key] = {
+                    "name": c["name"], "op": c["op"],
+                    "shape": c["shape"], "dtype": c["dtype"],
+                    "est_bytes": c["est_bytes"],
+                    "total_ns": 0, "count": 0,
+                    "backend": c["backend"],
+                }
+            agg[key]["total_ns"] += c["ns"]
+            agg[key]["count"] += 1
+        copies = sorted(agg.values(), key=lambda x: x["total_ns"], reverse=True)
         copy_stats = {
-            "count": len(copies),
+            "count": len(copies_raw),
             "total_ns": int(copy_df["ns"].sum()) if len(copy_df) > 0 else 0,
-            "est_total_bytes": sum(c["est_bytes"] for c in copies),
+            "est_total_bytes": sum(c["est_bytes"] for c in copies_raw),
             "copies": copies,
         }
     else:
@@ -99,9 +121,7 @@ def build_summary(
 
     # Layer stats
     if len(ops) > 0:
-        ops_layered = ops_with_ns.with_columns(
-            pl.col("name").str.extract(r"^(blk\.\d+)\.", 1).fill_null("_top").alias("layer")
-        )
+        ops_layered = assign_layers(ops_with_ns)
         layer_groups = ops_layered.group_by("layer").agg([
             pl.col("ns").sum().alias("total_ns"),
             pl.len().alias("n_ops"),
@@ -133,11 +153,21 @@ def build_summary(
         dp = int(passes["pass"].min())
     else:
         dp = 0
-    dag = build_dag(ops, dp)
+    ops_with_layers = assign_layers(ops) if len(ops) > 0 else ops
+    dag = build_dag(ops_with_layers, dp)
+
+    # Extract timestamp from first pass
+    timestamp = None
+    if len(passes) > 0:
+        ts_start_col = passes.sort("pass")["ts_start"].drop_nulls()
+        if len(ts_start_col) > 0:
+            ts_ms = int(ts_start_col[0])
+            timestamp = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
 
     return {
         "meta": {
             "source_file": source_file, "model": model,
+            "timestamp": timestamp,
             "total_ops": len(ops), "total_passes": len(passes),
             "total_wall_ms": total_ms,
         },

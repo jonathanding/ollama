@@ -1,9 +1,9 @@
 import type { DagData } from '../types/trace';
 import type { ElementDefinition } from 'cytoscape';
-import { backendColor, heatmapColor } from './colorScale';
+import { backendColor, heatmapColor, opColor } from './colorScale';
 import { formatNs } from './dataSize';
 
-export type ColorMode = 'backend' | 'heatmap';
+export type ColorMode = 'backend' | 'heatmap' | 'op';
 
 export function buildCytoscapeElements(
   dag: DagData,
@@ -47,6 +47,8 @@ export function buildCytoscapeElements(
 
     const bgColor = colorMode === 'heatmap'
       ? heatmapColor(node.ns / maxNs)
+      : colorMode === 'op'
+      ? opColor(node.op)
       : backendColor(node.backend);
 
     elements.push({

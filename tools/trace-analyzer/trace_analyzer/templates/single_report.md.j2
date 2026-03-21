@@ -2,7 +2,9 @@
 
 ## Summary
 - Source: `{{ meta.source_file }}`
-- Total passes: {{ meta.total_passes }}, Total ops: {{ meta.total_ops }}
+{% if meta.model %}- Model: {{ meta.model }}
+{% endif %}{% if meta.timestamp %}- Timestamp: {{ meta.timestamp }}
+{% endif %}- Total passes: {{ meta.total_passes }}, Total ops: {{ meta.total_ops }}
 - Wall time: {{ "%.1f"|format(timing.total_ms) }}ms (prefill: {{ "%.1f"|format(timing.prefill_ms) }}ms/{{ timing.prefill_tokens }}tok, decode avg: {{ "%.1f"|format(timing.decode_avg_ms) }}ms/tok)
 
 ## Top Operators by Time
@@ -21,10 +23,10 @@
 
 {% if copy_stats.count > 0 -%}
 ## Data Transfers
-| Tensor | Est. Size | Time (us) | Backend |
-|--------|-----------|-----------|---------|
+| Tensor | Shape | dtype | Est. Size | Count | Total Time (us) | Backend |
+|--------|-------|-------|-----------|-------|-----------------|---------|
 {% for c in copy_stats.copies -%}
-| {{ c.name }} | {{ "%.1f"|format(c.est_bytes / 1048576) }} MB | {{ (c.ns / 1000)|int }} | {{ c.backend }} |
+| {{ c.name }} | {{ c.shape|join('x') }} | {{ c.dtype }} | {% if c.est_bytes >= 1048576 %}{{ "%.1f"|format(c.est_bytes / 1048576) }} MB{% elif c.est_bytes >= 1024 %}{{ "%.1f"|format(c.est_bytes / 1024) }} KB{% else %}{{ c.est_bytes }} B{% endif %} | {{ c.count }} | {{ (c.total_ns / 1000)|int }} | {{ c.backend }} |
 {% endfor %}
 {% endif %}
 

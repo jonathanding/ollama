@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import type { SummaryData, DagNode } from '../types/trace';
-import { formatNs } from '../utils/dataSize';
+import type { SummaryData } from '../types/trace';
+import { formatNs, formatBytes } from '../utils/dataSize';
 
 type Tab = 'ops' | 'copies_size' | 'copies_time';
 
@@ -24,17 +24,9 @@ export function HotspotPanel({ data, selectedId, onSelect }: Props) {
   }
 
   const opsRanked = [...data.dag.nodes].sort((a, b) => b.ns - a.ns);
-  const copies = data.dag.nodes.filter(n => n.is_copy);
-  const copiesBySize = [...copies].sort((a, b) => {
-    const sa = a.shape.reduce((x, y) => x * y, 1);
-    const sb = b.shape.reduce((x, y) => x * y, 1);
-    return sb - sa;
-  });
-  const copiesByTime = [...copies].sort((a, b) => b.ns - a.ns);
-
-  const items: DagNode[] =
-    tab === 'ops' ? opsRanked :
-    tab === 'copies_size' ? copiesBySize : copiesByTime;
+  const copies = data.copy_stats.copies;
+  const copiesBySize = [...copies].sort((a, b) => b.est_bytes - a.est_bytes);
+  const copiesByTime = [...copies].sort((a, b) => b.total_ns - a.total_ns);
 
   return (
     <div className="fixed right-0 top-0 h-full w-72 bg-white border-l shadow z-40 flex flex-col">
@@ -52,7 +44,7 @@ export function HotspotPanel({ data, selectedId, onSelect }: Props) {
         ))}
       </div>
       <div className="overflow-y-auto flex-1">
-        {items.slice(0, 50).map((node, i) => (
+        {tab === 'ops' && opsRanked.slice(0, 50).map((node, i) => (
           <div
             key={node.id + i}
             className={`px-3 py-2 cursor-pointer text-sm border-b hover:bg-blue-50 ${selectedId === node.id ? 'bg-blue-100' : ''}`}
@@ -69,6 +61,26 @@ export function HotspotPanel({ data, selectedId, onSelect }: Props) {
             </div>
           </div>
         ))}
+        {tab !== 'ops' && (tab === 'copies_size' ? copiesBySize : copiesByTime).map((c, i) => (
+          <div
+            key={c.name + i}
+            className="px-3 py-2 text-sm border-b"
+          >
+            <div className="flex justify-between">
+              <span className="text-gray-400 mr-2">#{i + 1}</span>
+              <span className="font-mono truncate flex-1">{c.name}</span>
+            </div>
+            <div className="flex justify-between text-xs text-gray-500 mt-1">
+              <span>{formatBytes(c.est_bytes)}</span>
+              <span>{formatNs(c.total_ns)}</span>
+              <span>×{c.count}</span>
+              <span>{c.backend}</span>
+            </div>
+          </div>
+        ))}
+        {tab !== 'ops' && copies.length === 0 && (
+          <div className="px-3 py-4 text-sm text-gray-400 text-center">No copy operations found</div>
+        )}
       </div>
     </div>
   );
