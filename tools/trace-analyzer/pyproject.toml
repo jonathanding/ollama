@@ -1,0 +1,19 @@
+[project]
+name = "trace-analyzer"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "polars>=1.0",
+    "click>=8.0",
+    "jinja2>=3.1",
+]
+
+[project.scripts]
+trace-analyzer = "trace_analyzer.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

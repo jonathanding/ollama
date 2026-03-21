@@ -1,0 +1,8 @@
+pyproject.toml
+trace_analyzer/__init__.py
+trace_analyzer.egg-info/PKG-INFO
+trace_analyzer.egg-info/SOURCES.txt
+trace_analyzer.egg-info/dependency_links.txt
+trace_analyzer.egg-info/entry_points.txt
+trace_analyzer.egg-info/requires.txt
+trace_analyzer.egg-info/top_level.txt

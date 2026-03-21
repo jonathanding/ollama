@@ -1,0 +1,14 @@
+{"type":"pass_start","pass":0,"n_tokens":4,"ts":1700000000000}
+{"type":"op","pass":0,"seq":0,"op":"GET_ROWS","name":"token_embd","srcs":["token_embd.weight"],"shape":[128,4],"dtype":"f16","backend":"CUDA0","t_start":100000000,"t_end":100050000}
+{"type":"op","pass":0,"seq":1,"op":"RMS_NORM","name":"blk.0.attn_norm","srcs":["token_embd"],"shape":[128,4],"dtype":"f32","backend":"CUDA0","t_start":100050000,"t_end":100080000}
+{"type":"op","pass":0,"seq":2,"op":"MUL_MAT","name":"blk.0.attn_q","srcs":["blk.0.attn_norm","blk.0.attn_q.weight"],"shape":[128,4],"dtype":"f16","backend":"CUDA0","t_start":100080000,"t_end":100280000}
+{"type":"op","pass":0,"seq":3,"op":"MUL_MAT","name":"blk.0.ffn_gate","srcs":["blk.0.attn_norm","blk.0.ffn_gate.weight"],"shape":[256,4],"dtype":"f16","backend":"CUDA0","t_start":100280000,"t_end":100500000}
+{"type":"op","pass":0,"seq":4,"op":"CPY","name":"blk.0.ffn_out","srcs":["blk.0.ffn_gate"],"shape":[128,4],"dtype":"f32","backend":"CPU","t_start":100500000,"t_end":100600000}
+{"type":"pass_end","pass":0,"n_nodes":5,"ts":1700000000001}
+{"type":"pass_start","pass":1,"n_tokens":1,"ts":1700000000002}
+{"type":"op","pass":1,"seq":0,"op":"GET_ROWS","name":"token_embd","srcs":["token_embd.weight"],"shape":[128,1],"dtype":"f16","backend":"CUDA0","t_start":200000000,"t_end":200030000}
+{"type":"op","pass":1,"seq":1,"op":"RMS_NORM","name":"blk.0.attn_norm","srcs":["token_embd"],"shape":[128,1],"dtype":"f32","backend":"CUDA0","t_start":200030000,"t_end":200050000}
+{"type":"op","pass":1,"seq":2,"op":"MUL_MAT","name":"blk.0.attn_q","srcs":["blk.0.attn_norm","blk.0.attn_q.weight"],"shape":[128,1],"dtype":"f16","backend":"CUDA0","t_start":200050000,"t_end":200150000}
+{"type":"op","pass":1,"seq":3,"op":"MUL_MAT","name":"blk.0.ffn_gate","srcs":["blk.0.attn_norm","blk.0.ffn_gate.weight"],"shape":[256,1],"dtype":"f16","backend":"CUDA0","t_start":200150000,"t_end":200280000}
+{"type":"op","pass":1,"seq":4,"op":"CPY","name":"blk.0.ffn_out","srcs":["blk.0.ffn_gate"],"shape":[128,1],"dtype":"f32","backend":"CPU","t_start":200280000,"t_end":200350000}
+{"type":"pass_end","pass":1,"n_nodes":5,"ts":1700000000003}
