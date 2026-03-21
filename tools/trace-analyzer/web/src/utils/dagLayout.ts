@@ -66,7 +66,7 @@ export function buildCytoscapeElements(
       // Collapsed: single summary node (no compound, no children)
       const bgColor = colorMode === 'heatmap'
         ? heatmapColor(layerHeatRatio(totalNs))
-        : '#bfdbfe'; // blue-200
+        : '#e5e7eb'; // gray-200
       visibleNodeIds.add(layerId);
       elements.push({
         data: {

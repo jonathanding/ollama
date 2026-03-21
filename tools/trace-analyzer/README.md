@@ -2,6 +2,10 @@
 
 A profiling and visualization toolkit for Ollama inference traces. Captures per-operator execution data during model inference and provides interactive tools to explore performance bottlenecks, compare configurations, and generate LLM-ready analysis reports.
 
+## Pre-built Release (Windows x64)
+
+A ready-to-use Windows x64 package is available under `release/`. It includes a tracing-enabled Ollama binary, all native libraries, and the Trace Analyzer with a pre-built web UI — no building required. See the `README.md` inside the release package for usage instructions.
+
 ## Why
 
 When running LLM inference on different hardware (CUDA, Vulkan, Metal, CPU), understanding where time is spent is critical for optimization. Raw traces contain thousands of operator events — this tool turns them into actionable insights:

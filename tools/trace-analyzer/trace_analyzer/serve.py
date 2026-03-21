@@ -13,6 +13,23 @@ mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("image/svg+xml", ".svg")
 
 
+def _detect_json_type(path: Path) -> str | None:
+    """Peek at top-level keys to classify a JSON file as 'summary' or 'compare'."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            # Read just enough to parse top-level keys
+            obj = json.load(f)
+        if not isinstance(obj, dict):
+            return None
+        if "labels" in obj and "op_diff" in obj:
+            return "compare"
+        if "dag" in obj or "op_stats" in obj:
+            return "summary"
+        return None
+    except Exception:
+        return None
+
+
 class TraceHandler(SimpleHTTPRequestHandler):
     data_dir: Path
     web_dir: Path | None
@@ -30,7 +47,9 @@ class TraceHandler(SimpleHTTPRequestHandler):
     def _list_files(self):
         files = []
         for f in sorted(self.data_dir.glob("*.json")):
-            files.append({"name": f.name, "size": f.stat().st_size})
+            ftype = _detect_json_type(f)
+            if ftype:
+                files.append({"name": f.name, "size": f.stat().st_size, "type": ftype})
         self._json_response(json.dumps(files))
 
     def _serve_data_file(self):

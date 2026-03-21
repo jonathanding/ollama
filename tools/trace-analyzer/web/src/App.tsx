@@ -18,8 +18,8 @@ export default function App() {
   const [replayState, setReplayState] = useState<ReplayState | null>(null);
   const [replayExpandMode, setReplayExpandMode] = useState<ExpandMode>('keep');
 
-  const summaryFiles = files.filter(f => f.name.includes('summary'));
-  const compareFiles = files.filter(f => f.name.includes('compare'));
+  const summaryFiles = files.filter(f => f.type === 'summary');
+  const compareFiles = files.filter(f => f.type === 'compare');
 
   const { data: summaryData } = useSummary(
     view !== 'compare' ? selectedFile : null

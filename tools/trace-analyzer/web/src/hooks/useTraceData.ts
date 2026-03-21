@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { SummaryData, CompareData } from '../types/trace';
 
-interface FileEntry { name: string; size: number; }
+interface FileEntry { name: string; size: number; type: 'summary' | 'compare'; }
 
 const BASE = import.meta.env.DEV ? 'http://localhost:8765' : '';
 

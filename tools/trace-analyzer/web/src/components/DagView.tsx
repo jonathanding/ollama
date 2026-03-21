@@ -132,7 +132,7 @@ export function DagView({ data, highlightId, onSelectNode, replayState, replayEx
           style: {
             'shape': 'round-rectangle',
             'font-weight': 'bold',
-            'border-color': '#3b82f6',
+            'border-color': '#94a3b8',
             'border-style': 'solid',
           },
         },
