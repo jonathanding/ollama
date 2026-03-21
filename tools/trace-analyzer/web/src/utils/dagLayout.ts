@@ -13,6 +13,12 @@ export function buildCytoscapeElements(
   const elements: ElementDefinition[] = [];
 
   const maxNs = dag.nodes.reduce((m, n) => Math.max(m, n.ns), 1);
+  const minNs = dag.nodes.reduce((m, n) => Math.min(m, n.ns), maxNs);
+  // Log scale for heatmap to spread out the distribution
+  const logMin = Math.log1p(minNs);
+  const logMax = Math.log1p(maxNs);
+  const logRange = logMax - logMin || 1;
+  const heatRatio = (ns: number) => (Math.log1p(ns) - logMin) / logRange;
 
   // Compute layer stats
   const layerTotals = new Map<string, number>();
@@ -29,10 +35,18 @@ export function buildCytoscapeElements(
       layerTopOpNs.set(node.layer, node.ns);
     }
   }
+  // Separate log scale for layer totals (sums are much larger than single-node ns)
+  let minLayerTotal = Infinity;
   let maxLayerTotal = 1;
   for (const v of layerTotals.values()) {
     if (v > maxLayerTotal) maxLayerTotal = v;
+    if (v < minLayerTotal) minLayerTotal = v;
   }
+  if (minLayerTotal === Infinity) minLayerTotal = 0;
+  const logLayerMin = Math.log1p(minLayerTotal);
+  const logLayerMax = Math.log1p(maxLayerTotal);
+  const logLayerRange = logLayerMax - logLayerMin || 1;
+  const layerHeatRatio = (ns: number) => (Math.log1p(ns) - logLayerMin) / logLayerRange;
 
   const allLayers = new Set<string>();
   for (const node of dag.nodes) {
@@ -51,7 +65,7 @@ export function buildCytoscapeElements(
     if (collapsed.has(layer)) {
       // Collapsed: single summary node (no compound, no children)
       const bgColor = colorMode === 'heatmap'
-        ? heatmapColor(totalNs / maxLayerTotal)
+        ? heatmapColor(layerHeatRatio(totalNs))
         : '#bfdbfe'; // blue-200
       visibleNodeIds.add(layerId);
       elements.push({
@@ -68,7 +82,7 @@ export function buildCytoscapeElements(
     } else {
       // Expanded: compound parent node + child op nodes
       const bgColor = colorMode === 'heatmap'
-        ? heatmapColor(totalNs / maxLayerTotal)
+        ? heatmapColor(layerHeatRatio(totalNs))
         : '#dbeafe'; // light blue
       visibleNodeIds.add(layerId);
       elements.push({
@@ -87,7 +101,7 @@ export function buildCytoscapeElements(
     if (node.layer && collapsed.has(node.layer)) continue;
 
     const bgColor = colorMode === 'heatmap'
-      ? heatmapColor(node.ns / maxNs)
+      ? heatmapColor(heatRatio(node.ns))
       : colorMode === 'op'
       ? opColor(node.op)
       : backendColor(node.backend);

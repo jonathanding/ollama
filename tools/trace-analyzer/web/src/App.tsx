@@ -42,20 +42,24 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-50">
-      <div className="bg-white border-b px-4 py-2 flex items-center gap-4 shrink-0">
-        <h1 className="font-bold text-lg whitespace-nowrap">Ollama Trace Analyzer</h1>
-        <div className="flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
+      <div className="bg-indigo-700 px-4 py-2.5 flex items-center gap-4 shrink-0 shadow-md">
+        <h1 className="font-bold text-lg whitespace-nowrap text-white tracking-tight">Trace Analyzer</h1>
+        <div className="flex gap-0.5 bg-indigo-800/60 rounded-lg p-0.5">
           {(['dag', 'timeline', 'compare'] as View[]).map(v => (
             <button
               key={v}
-              className={`px-3 py-1 rounded text-sm capitalize ${view === v ? 'bg-white shadow font-medium' : 'text-gray-600'}`}
+              className={`px-3 py-1.5 rounded-md text-sm capitalize transition-colors ${view === v ? 'bg-white text-indigo-700 shadow font-semibold' : 'text-indigo-200 hover:text-white hover:bg-indigo-600/50'}`}
               onClick={() => setView(v)}
             >{v === 'dag' ? 'DAG' : v}</button>
           ))}
         </div>
         {view !== 'compare' ? (
           <select
-            className="border rounded px-2 py-1 text-sm"
+            className={`rounded-md px-2.5 py-1.5 text-sm outline-none font-medium transition-colors [&>option]:text-gray-900 [&>option]:bg-white ${
+              selectedFile
+                ? 'bg-amber-500 text-white border border-amber-400 focus:ring-2 focus:ring-amber-200'
+                : 'bg-amber-400 text-amber-950 border border-amber-300 focus:ring-2 focus:ring-amber-200 animate-pulse'
+            }`}
             value={selectedFile ?? ''}
             onChange={e => setSelectedFile(e.target.value || null)}
           >
@@ -64,7 +68,11 @@ export default function App() {
           </select>
         ) : (
           <select
-            className="border rounded px-2 py-1 text-sm"
+            className={`rounded-md px-2.5 py-1.5 text-sm outline-none font-medium transition-colors [&>option]:text-gray-900 [&>option]:bg-white ${
+              compareFile
+                ? 'bg-amber-500 text-white border border-amber-400 focus:ring-2 focus:ring-amber-200'
+                : 'bg-amber-400 text-amber-950 border border-amber-300 focus:ring-2 focus:ring-amber-200 animate-pulse'
+            }`}
             value={compareFile ?? ''}
             onChange={e => setCompareFile(e.target.value || null)}
           >

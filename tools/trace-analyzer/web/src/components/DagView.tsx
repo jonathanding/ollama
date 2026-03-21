@@ -6,6 +6,7 @@ import { buildCytoscapeElements, type ColorMode } from '../utils/dagLayout';
 import { computeTreeCompoundPositions } from '../utils/treeCompoundLayout';
 import { ColorToggle } from './ColorToggle';
 import { NodeDetail } from './NodeDetail';
+import { HeatmapHistogram } from './HeatmapHistogram';
 import type { ReplayState, ExpandMode } from './ReplayPanel';
 
 cytoscape.use(fcose);
@@ -383,74 +384,90 @@ export function DagView({ data, highlightId, onSelectNode, replayState, replayEx
     cy.zoom({ level: cy.zoom() / 1.4, renderedPosition: center });
   };
 
-  const Btn = ({ onClick, title, children, active }: {
-    onClick: () => void; title: string; children: React.ReactNode; active?: boolean;
-  }) => (
-    <button
-      className={`px-2 py-1 text-xs rounded hover:bg-gray-300 whitespace-nowrap
-        ${active ? 'bg-gray-800 text-white hover:bg-gray-700' : 'bg-gray-200'}`}
-      onClick={onClick}
-      title={title}
-    >{children}</button>
-  );
-
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b bg-white shrink-0 flex-wrap text-xs">
-        <ColorToggle
-          mode={colorMode}
-          onChange={setColorMode}
-          visibleOps={[...new Set(data.dag.nodes.map(n => n.op))]}
-        />
+      <div className="flex items-center gap-2 px-3 py-2 border-b bg-white shrink-0 flex-wrap text-xs">
+        {/* Group: Color Mode */}
+        <div className="flex items-center gap-1.5 bg-gray-50 rounded-lg px-2 py-1 border border-gray-200/80">
+          <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Color</span>
+          <ColorToggle
+            mode={colorMode}
+            onChange={setColorMode}
+            visibleOps={[...new Set(data.dag.nodes.map(n => n.op))]}
+          />
+        </div>
 
-        <div className="w-px h-5 bg-gray-300 mx-0.5" />
+        {/* Group: Layout */}
+        <div className="flex items-center gap-1 bg-gray-50 rounded-lg px-2 py-1 border border-gray-200/80">
+          <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mr-0.5">Layout</span>
+          {LAYOUTS.map(l => (
+            <button
+              key={l.name}
+              className={`px-2 py-1 text-xs rounded-md whitespace-nowrap transition-colors font-medium border ${
+                layoutName === l.name
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100 hover:border-gray-400'
+              }`}
+              onClick={() => { fitAfterLayoutRef.current = true; setLayoutName(l.name); }}
+              title={`${l.label} layout`}
+            >{l.label}</button>
+          ))}
+        </div>
 
-        <span className="text-gray-500">Layout:</span>
-        {LAYOUTS.map(l => (
-          <Btn
-            key={l.name}
-            active={layoutName === l.name}
-            onClick={() => { fitAfterLayoutRef.current = true; setLayoutName(l.name); }}
-            title={`${l.label} layout`}
-          >{l.label}</Btn>
-        ))}
+        {/* Group: Layers */}
+        <div className="flex items-center gap-1 bg-gray-50 rounded-lg px-2 py-1 border border-gray-200/80">
+          <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mr-0.5">Layers</span>
+          <button
+            className="px-2.5 py-1 text-xs rounded-md whitespace-nowrap transition-colors font-medium border bg-white text-gray-600 border-gray-300 hover:bg-gray-100 hover:border-gray-400"
+            onClick={handleCollapseExpandAll}
+            title={allCollapsed ? 'Expand all layers' : 'Collapse all layers'}
+          >{allCollapsed ? 'Expand All' : 'Collapse All'}</button>
+        </div>
 
-        <div className="w-px h-5 bg-gray-300 mx-0.5" />
+        {/* Group: View Controls */}
+        <div className="flex items-center gap-1 bg-gray-50 rounded-lg px-2 py-1 border border-gray-200/80">
+          <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mr-0.5">View</span>
+          {[
+            { label: 'Fit', onClick: handleFitAll, title: 'Fit entire graph' },
+            { label: 'Center', onClick: handleCenterSelection, title: 'Center on selected' },
+            { label: '+', onClick: handleZoomIn, title: 'Zoom in' },
+            { label: '\u2013', onClick: handleZoomOut, title: 'Zoom out' },
+          ].map(btn => (
+            <button
+              key={btn.label}
+              className="px-2 py-1 text-xs rounded-md whitespace-nowrap transition-colors font-medium border bg-white text-gray-600 border-gray-300 hover:bg-gray-100 hover:border-gray-400"
+              onClick={btn.onClick}
+              title={btn.title}
+            >{btn.label}</button>
+          ))}
+        </div>
 
-        <Btn onClick={handleCollapseExpandAll} title={allCollapsed ? 'Expand all layers' : 'Collapse all layers'}>
-          {allCollapsed ? '⊞ Expand' : '⊟ Collapse'}
-        </Btn>
-
-        <div className="w-px h-5 bg-gray-300 mx-0.5" />
-
-        <Btn onClick={handleFitAll} title="Fit entire graph in view">⊡ Fit</Btn>
-        <Btn onClick={handleCenterSelection} title="Center on selected node">◎ Center</Btn>
-        <Btn onClick={handleZoomIn} title="Zoom in">＋</Btn>
-        <Btn onClick={handleZoomOut} title="Zoom out">－</Btn>
-
-        <div className="w-px h-5 bg-gray-300 mx-0.5" />
-
-        <span className="text-gray-500">🔍</span>
+        {/* Search */}
         <input
           type="text"
           placeholder="Search tensor..."
           value={search}
           onChange={e => handleSearch(e.target.value)}
-          className="border rounded px-2 py-1 text-xs w-36"
+          className="border border-gray-300 rounded-md px-2.5 py-1.5 text-xs w-40 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 outline-none"
         />
 
+        {/* Replay */}
         {!replayState && onReplayActivate && (
-          <>
-            <div className="w-px h-5 bg-gray-300 mx-0.5" />
-            <Btn onClick={onReplayActivate} title="Replay execution">
-              Replay
-            </Btn>
-          </>
+          <button
+            className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white font-medium hover:bg-indigo-700 shadow-sm transition-colors"
+            onClick={onReplayActivate}
+            title="Replay execution"
+          >Replay</button>
         )}
       </div>
-      <div ref={containerRef} style={{ flex: '1 1 0', minHeight: 0 }} />
+      <div className="relative" style={{ flex: '1 1 0', minHeight: 0 }}>
+        <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
+        {colorMode === 'heatmap' && (
+          <HeatmapHistogram durations={data.dag.nodes.map(n => n.ns)} />
+        )}
+      </div>
       {selectedNode && (
-        <div className="shrink-0 bg-white border-t shadow-lg p-3 z-10">
+        <div className="shrink-0 bg-white border-t border-indigo-100 shadow-lg p-3 z-10">
           <NodeDetail node={selectedNode} onClose={() => setSelectedNode(null)} />
         </div>
       )}

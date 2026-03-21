@@ -37,7 +37,7 @@ export function CompareView({ data }: Props) {
     const x1 = d3.scaleBand().domain(data.labels).range([0, x0.bandwidth()]).padding(0.05);
     const maxVal = d3.max(layers, l => d3.max(l.values, v => v.total_ns)) ?? 1;
     const y = d3.scaleLinear().domain([0, maxVal]).range([height, 0]);
-    const color = d3.scaleOrdinal(data.labels, ['#3b82f6', '#f97316']);
+    const color = d3.scaleOrdinal(data.labels, ['#4f46e5', '#f97316']);
 
     const g = svg
       .attr('width', width + margin.left + margin.right)
@@ -57,66 +57,87 @@ export function CompareView({ data }: Props) {
           .attr('width', x1.bandwidth())
           .attr('height', height - y(val.total_ns))
           .attr('fill', color(val.label))
-          .attr('stroke', layer.significant ? '#000' : 'none')
+          .attr('rx', 2)
+          .attr('stroke', layer.significant ? '#1e1b4b' : 'none')
           .attr('stroke-width', layer.significant ? 2 : 0);
       }
     }
 
     const legend = g.append('g').attr('transform', `translate(${width - 120}, 0)`);
     data.labels.forEach((label, i) => {
-      legend.append('rect').attr('x', 0).attr('y', i * 20).attr('width', 12).attr('height', 12).attr('fill', color(label));
-      legend.append('text').attr('x', 18).attr('y', i * 20 + 10).text(label).style('font-size', '12px');
+      legend.append('rect').attr('x', 0).attr('y', i * 20).attr('width', 12).attr('height', 12).attr('fill', color(label)).attr('rx', 2);
+      legend.append('text').attr('x', 18).attr('y', i * 20 + 10).text(label).style('font-size', '12px').style('fill', '#4b5563');
     });
   }, [data]);
 
   return (
     <div className="flex-1 overflow-auto min-h-0 p-4 space-y-6">
+      {/* Summary Cards */}
       <div className="grid grid-cols-3 gap-4">
-        {cards.map(c => (
-          <div key={c.label} className="border rounded p-3">
-            <div className="text-sm text-gray-500">{c.label}</div>
-            <div className="flex justify-between mt-1">
-              <span>{c.values[0].toFixed(1)}ms</span>
-              <span>{c.values[1].toFixed(1)}ms</span>
+        {cards.map(c => {
+          const isSig = Math.abs(c.diff) > 10;
+          return (
+            <div key={c.label} className="bg-white border border-gray-100 rounded-xl p-4 shadow-sm"
+              style={{ borderLeftWidth: 4, borderLeftColor: isSig ? '#ef4444' : '#4f46e5' }}>
+              <div className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">{c.label}</div>
+              <div className="flex justify-between mt-2 text-lg font-semibold text-gray-800">
+                <span>{c.values[0].toFixed(1)}<span className="text-sm text-gray-400 ml-0.5">ms</span></span>
+                <span>{c.values[1].toFixed(1)}<span className="text-sm text-gray-400 ml-0.5">ms</span></span>
+              </div>
+              <div className="flex justify-between mt-1 text-[11px] text-gray-400">
+                <span>{data.labels[0]}</span>
+                <span>{data.labels[1]}</span>
+              </div>
+              <div className={`text-sm mt-2 font-mono tabular-nums ${isSig ? 'font-bold text-red-600' : 'text-gray-500'}`}>
+                {c.diff > 0 ? '+' : ''}{c.diff.toFixed(1)}%
+              </div>
             </div>
-            <div className={`text-sm mt-1 ${Math.abs(c.diff) > 10 ? 'font-bold text-red-600' : 'text-gray-500'}`}>
-              {c.diff > 0 ? '+' : ''}{c.diff.toFixed(1)}%
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      <div>
-        <div className="flex gap-2 mb-2">
-          <button className={`text-sm px-2 py-1 rounded ${sortKey === 'diff' ? 'bg-gray-800 text-white' : 'bg-gray-200'}`} onClick={() => setSortKey('diff')}>Sort by diff</button>
-          <button className={`text-sm px-2 py-1 rounded ${sortKey === 'op' ? 'bg-gray-800 text-white' : 'bg-gray-200'}`} onClick={() => setSortKey('op')}>Sort by name</button>
+      {/* Op Diff Table */}
+      <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="flex items-center gap-2 px-4 py-3 border-b bg-gray-50/50">
+          <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Op Comparison</span>
+          <div className="flex gap-0.5 ml-auto bg-gray-100 rounded-md p-0.5">
+            <button
+              className={`px-2.5 py-1 rounded-md text-xs transition-colors ${sortKey === 'diff' ? 'bg-indigo-600 text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200'}`}
+              onClick={() => setSortKey('diff')}
+            >Sort by diff</button>
+            <button
+              className={`px-2.5 py-1 rounded-md text-xs transition-colors ${sortKey === 'op' ? 'bg-indigo-600 text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200'}`}
+              onClick={() => setSortKey('op')}
+            >Sort by name</button>
+          </div>
         </div>
-        <table className="w-full text-sm border-collapse">
+        <table className="w-full text-sm">
           <thead>
-            <tr className="border-b">
-              <th className="text-left p-2">Op</th>
-              <th className="text-right p-2">{data.labels[0]} (ms)</th>
-              <th className="text-right p-2">{data.labels[1]} (ms)</th>
-              <th className="text-right p-2">Diff</th>
-              <th className="text-center p-2">Sig.</th>
+            <tr className="border-b bg-gray-50/30 text-[11px] uppercase tracking-wider text-gray-400">
+              <th className="text-left px-4 py-2 font-semibold">Op</th>
+              <th className="text-right px-4 py-2 font-semibold">{data.labels[0]}</th>
+              <th className="text-right px-4 py-2 font-semibold">{data.labels[1]}</th>
+              <th className="text-right px-4 py-2 font-semibold">Diff</th>
+              <th className="text-center px-4 py-2 font-semibold">Sig.</th>
             </tr>
           </thead>
           <tbody>
             {sorted.map(o => (
-              <tr key={o.op} style={{ backgroundColor: diffColor(o.diff_pct) }}>
-                <td className="p-2 font-mono">{o.op}</td>
-                <td className="p-2 text-right">{(o.values[0].total_ns / 1e6).toFixed(1)}</td>
-                <td className="p-2 text-right">{(o.values[1].total_ns / 1e6).toFixed(1)}</td>
-                <td className="p-2 text-right">{o.diff_pct > 0 ? '+' : ''}{o.diff_pct.toFixed(1)}%</td>
-                <td className="p-2 text-center">{o.significant ? 'Yes' : ''}</td>
+              <tr key={o.op} className="border-b border-gray-50 hover:bg-gray-50/50 transition-colors" style={{ backgroundColor: diffColor(o.diff_pct) }}>
+                <td className="px-4 py-2 font-mono text-gray-700">{o.op}</td>
+                <td className="px-4 py-2 text-right font-mono tabular-nums text-gray-600">{(o.values[0].total_ns / 1e6).toFixed(1)}</td>
+                <td className="px-4 py-2 text-right font-mono tabular-nums text-gray-600">{(o.values[1].total_ns / 1e6).toFixed(1)}</td>
+                <td className="px-4 py-2 text-right font-mono tabular-nums font-medium">{o.diff_pct > 0 ? '+' : ''}{o.diff_pct.toFixed(1)}%</td>
+                <td className="px-4 py-2 text-center">{o.significant ? <span className="inline-block w-2 h-2 rounded-full bg-red-500" /> : ''}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
-      <div>
-        <h3 className="font-bold mb-2">Layer Comparison</h3>
+      {/* Layer Chart */}
+      <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+        <h3 className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold mb-3">Layer Comparison</h3>
         <svg ref={chartRef} className="w-full" />
       </div>
     </div>

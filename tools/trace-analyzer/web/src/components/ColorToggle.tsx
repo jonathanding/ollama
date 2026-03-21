@@ -1,5 +1,5 @@
 import type { ColorMode } from '../utils/dagLayout';
-import { BACKEND_COLORS, OP_COLORS } from '../utils/colorScale';
+import { BACKEND_COLORS, OP_COLORS, HEATMAP_STOPS } from '../utils/colorScale';
 
 interface Props {
   mode: ColorMode;
@@ -33,7 +33,7 @@ export function ColorToggle({ mode, onChange, visibleOps }: Props) {
         {(['backend', 'op', 'heatmap'] as ColorMode[]).map(m => (
           <button
             key={m}
-            className={`px-2 py-1 rounded text-xs ${mode === m ? 'bg-white shadow font-medium' : 'text-gray-600'}`}
+            className={`px-2.5 py-1 rounded-md text-xs transition-colors ${mode === m ? 'bg-indigo-600 text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200'}`}
             onClick={() => onChange(m)}
           >{m === 'op' ? 'Op Type' : m === 'backend' ? 'Backend' : 'Heatmap'}</button>
         ))}
@@ -46,6 +46,15 @@ export function ColorToggle({ mode, onChange, visibleOps }: Props) {
               {label}
             </span>
           ))}
+        </div>
+      )}
+      {mode === 'heatmap' && (
+        <div className="flex items-center gap-0.5">
+          <span className="text-[10px] text-gray-400 mr-0.5">fast</span>
+          {HEATMAP_STOPS.map((s, i) => (
+            <div key={i} className="w-3 h-2.5 first:rounded-l-sm last:rounded-r-sm" style={{ backgroundColor: s.color }} />
+          ))}
+          <span className="text-[10px] text-gray-400 ml-0.5">slow</span>
         </div>
       )}
     </div>

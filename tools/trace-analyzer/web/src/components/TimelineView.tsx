@@ -312,40 +312,42 @@ export function TimelineView({ data, onSelectOp }: Props) {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {totalPasses > MAX_PASSES && (
-        <div className="flex items-center gap-3 p-2 border-b bg-white shrink-0 text-sm">
+        <div className="flex items-center gap-3 px-3 py-2 border-b bg-white shrink-0 text-sm">
           <button
-            className="px-2 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-30"
+            className="px-3 py-1 rounded-md bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-30 text-xs transition-colors"
             disabled={startPass === 0}
             onClick={() => setStartPass(Math.max(0, startPass - MAX_PASSES))}
           >Prev</button>
-          <span className="text-gray-600">
+          <span className="text-gray-500 text-xs">
             Pass {startPass}–{Math.min(startPass + MAX_PASSES - 1, totalPasses - 1)} of {totalPasses}
           </span>
           <button
-            className="px-2 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-30"
+            className="px-3 py-1 rounded-md bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-30 text-xs transition-colors"
             disabled={startPass + MAX_PASSES >= totalPasses}
             onClick={() => setStartPass(Math.min(totalPasses - MAX_PASSES, startPass + MAX_PASSES))}
           >Next</button>
         </div>
       )}
-      <div className="flex items-center gap-3 px-2 py-1 shrink-0 text-xs text-gray-500">
-        <span>Color:</span>
-        <button
-          className={`px-2 py-0.5 rounded ${colorBy === 'backend' ? 'bg-gray-800 text-white' : 'bg-gray-200'}`}
-          onClick={() => setColorBy('backend')}
-        >Backend</button>
-        <button
-          className={`px-2 py-0.5 rounded ${colorBy === 'op' ? 'bg-gray-800 text-white' : 'bg-gray-200'}`}
-          onClick={() => setColorBy('op')}
-        >Op Type</button>
-        <div className="w-px h-4 bg-gray-300 mx-1" />
+      <div className="flex items-center gap-2 px-3 py-1.5 shrink-0 text-xs bg-white border-b">
+        <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Color</span>
+        <div className="flex gap-0.5 bg-gray-100 rounded-md p-0.5">
+          <button
+            className={`px-2.5 py-1 rounded-md text-xs transition-colors ${colorBy === 'backend' ? 'bg-indigo-600 text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200'}`}
+            onClick={() => setColorBy('backend')}
+          >Backend</button>
+          <button
+            className={`px-2.5 py-1 rounded-md text-xs transition-colors ${colorBy === 'op' ? 'bg-indigo-600 text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-200'}`}
+            onClick={() => setColorBy('op')}
+          >Op Type</button>
+        </div>
+        <div className="w-px h-4 bg-gray-200 mx-1" />
         {legend.map(([label, color]) => (
           <span key={label} className="inline-flex items-center gap-1">
-            <span className="inline-block w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: color }} />
-            <span className="text-gray-600">{label}</span>
+            <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: color }} />
+            <span className="text-gray-500">{label}</span>
           </span>
         ))}
-        <span className="text-gray-400 ml-auto">Ctrl+Scroll to zoom · Drag or Shift+Scroll to pan</span>
+        <span className="text-gray-400 ml-auto text-[11px]">Ctrl+Scroll to zoom · Drag to pan</span>
       </div>
       <div ref={containerRef} className="flex-1 overflow-auto min-h-0 relative">
         <canvas ref={canvasRef} className="min-h-[300px]" />

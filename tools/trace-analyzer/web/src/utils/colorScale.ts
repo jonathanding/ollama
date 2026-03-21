@@ -41,23 +41,48 @@ export function opColor(op: string): string {
   return FALLBACK_OP_COLORS[Math.abs(hash) % FALLBACK_OP_COLORS.length];
 }
 
-/** Blue (cold, ratio=0) -> Yellow (mid) -> Red (hot, ratio=1) */
+/**
+ * Heatmap: cool-to-warm with light tones for black text readability.
+ * Light blue (cold/fast, 0) → Light purple → Light yellow → Light orange (hot/slow, 1).
+ * All stops keep lightness high enough for WCAG AA black text contrast.
+ */
 export function heatmapColor(ratio: number): string {
   const t = Math.max(0, Math.min(1, ratio));
+  // 5-stop: light-blue → light-purple → light-yellow → light-orange → warm-coral
   let r: number, g: number, b: number;
-  if (t < 0.5) {
-    const s = t * 2;
-    r = Math.round(s * 255);
-    g = Math.round(s * 255);
-    b = Math.round((1 - s) * 200);
+  if (t < 0.25) {
+    // #dbeafe (blue-100) → #e9d5ff (purple-200)
+    const s = t / 0.25;
+    r = Math.round(219 + s * (233 - 219));
+    g = Math.round(234 - s * (234 - 213));
+    b = Math.round(254 - s * (254 - 255));
+  } else if (t < 0.5) {
+    // #e9d5ff (purple-200) → #fef9c3 (yellow-100)
+    const s = (t - 0.25) / 0.25;
+    r = Math.round(233 + s * (254 - 233));
+    g = Math.round(213 + s * (249 - 213));
+    b = Math.round(255 - s * (255 - 195));
+  } else if (t < 0.75) {
+    // #fef9c3 (yellow-100) → #fed7aa (orange-200)
+    const s = (t - 0.5) / 0.25;
+    r = Math.round(254);
+    g = Math.round(249 - s * (249 - 215));
+    b = Math.round(195 - s * (195 - 170));
   } else {
-    const s = (t - 0.5) * 2;
-    r = 255;
-    g = Math.round((1 - s) * 255);
-    b = 0;
+    // #fed7aa (orange-200) → #fca5a5 (red-300)
+    const s = (t - 0.75) / 0.25;
+    r = Math.round(254 - s * (254 - 252));
+    g = Math.round(215 - s * (215 - 165));
+    b = Math.round(170 - s * (170 - 165));
   }
   return `rgb(${r},${g},${b})`;
 }
+
+/** Precomputed heatmap stops for legend / histogram display */
+export const HEATMAP_STOPS = [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0].map(t => ({
+  ratio: t,
+  color: heatmapColor(t),
+}));
 
 export function diffColor(diffPct: number, threshold: number = 10): string {
   if (diffPct > threshold) return '#fee2e2';
