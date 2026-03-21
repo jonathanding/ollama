@@ -5,6 +5,28 @@ import click
 from pathlib import Path
 
 
+def _fmt_num(n: int | float) -> str:
+    """Format large numbers with K/M suffixes."""
+    if isinstance(n, float):
+        return f"{n:,.1f}"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:,.1f}M"
+    if n >= 10_000:
+        return f"{n / 1_000:,.1f}K"
+    return f"{n:,}"
+
+
+def _fmt_size(b: int) -> str:
+    """Format byte sizes as KB/MB/GB."""
+    if b >= 1_073_741_824:
+        return f"{b / 1_073_741_824:.1f} GB"
+    if b >= 1_048_576:
+        return f"{b / 1_048_576:.1f} MB"
+    if b >= 1024:
+        return f"{b / 1024:.1f} KB"
+    return f"{b} B"
+
+
 @click.group()
 def main():
     """Ollama Trace Analyzer — post-process and visualize inference traces."""
@@ -23,19 +45,19 @@ def summary(trace_file: Path, output: Path | None, model: str | None, dag_pass: 
 
     click.echo(f"Parsing {trace_file.name}...")
     ops, passes = parse_trace(trace_file)
-    click.echo(f"  {len(ops)} ops across {len(passes)} passes")
+    click.echo(f"  {_fmt_num(len(ops))} ops across {_fmt_num(len(passes))} passes")
 
     result = build_summary(ops, passes, source_file=trace_file.name, model=model, dag_pass=dag_pass)
 
     n_layers = len(result["layer_stats"])
     top_op = result["op_stats"][0]["op"] if result["op_stats"] else "N/A"
-    click.echo(f"  {n_layers} layers, top op: {top_op}, wall time: {result['timing']['total_ms']:.1f}ms")
+    click.echo(f"  {_fmt_num(n_layers)} layers, top op: {top_op}, wall time: {_fmt_num(result['timing']['total_ms'])}ms")
 
     text = json.dumps(result, indent=2)
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text)
-        click.echo(click.style(f"  -> {output} ({len(text)} bytes)", fg="green"))
+        click.echo(click.style(f"  -> {output} ({_fmt_size(len(text))})", fg="green"))
     else:
         click.echo(text)
 
@@ -59,24 +81,24 @@ def compare(trace_a: Path, trace_b: Path, labels: str, output: Path | None, mode
 
     click.echo(f"Parsing {trace_a.name} ({label_list[0]})...")
     ops_a, passes_a = parse_trace(trace_a)
-    click.echo(f"  {len(ops_a)} ops across {len(passes_a)} passes")
+    click.echo(f"  {_fmt_num(len(ops_a))} ops across {_fmt_num(len(passes_a))} passes")
 
     click.echo(f"Parsing {trace_b.name} ({label_list[1]})...")
     ops_b, passes_b = parse_trace(trace_b)
-    click.echo(f"  {len(ops_b)} ops across {len(passes_b)} passes")
+    click.echo(f"  {_fmt_num(len(ops_b))} ops across {_fmt_num(len(passes_b))} passes")
 
     sa = build_summary(ops_a, passes_a, source_file=trace_a.name, model=model)
     sb = build_summary(ops_b, passes_b, source_file=trace_b.name, model=model)
     result = build_compare(sa, sb, labels=label_list, threshold=threshold)
 
     sig_ops = sum(1 for o in result["op_diff"] if o["significant"])
-    click.echo(f"Compared: {len(result['op_diff'])} ops, {sig_ops} significant (>{threshold}%)")
+    click.echo(f"Compared: {_fmt_num(len(result['op_diff']))} ops, {_fmt_num(sig_ops)} significant (>{threshold}%)")
 
     text = json.dumps(result, indent=2)
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text)
-        click.echo(click.style(f"  -> {output} ({len(text)} bytes)", fg="green"))
+        click.echo(click.style(f"  -> {output} ({_fmt_size(len(text))})", fg="green"))
     else:
         click.echo(text)
 
@@ -112,7 +134,7 @@ def report(trace_file: Path, output: Path | None, model: str | None, trace_b: Pa
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(md)
-        click.echo(click.style(f"  -> {output} ({len(md)} bytes)", fg="green"))
+        click.echo(click.style(f"  -> {output} ({_fmt_size(len(md))})", fg="green"))
     else:
         click.echo(md)
 
