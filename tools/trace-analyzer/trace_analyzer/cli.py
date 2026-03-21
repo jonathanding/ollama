@@ -104,3 +104,7 @@ def serve(data_dir: Path, port: int):
     from .serve import run_server
     web_dir = Path(__file__).parent.parent / "web" / "dist"
     run_server(data_dir, port, web_dir if web_dir.is_dir() else None)
+
+
+if __name__ == "__main__":
+    main()
