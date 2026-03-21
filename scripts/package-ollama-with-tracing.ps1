@@ -1,11 +1,11 @@
 #
-# Ollama Trace Analyzer — Release Packaging Script
+# Ollama with Tracing — Release Packaging Script
 #
 # Usage (from repo root):
-#   powershell -ExecutionPolicy Bypass -File scripts\package-trace-analyzer.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\package-ollama-with-tracing.ps1
 #
 # Output:
-#   release\ollama-trace-<VERSION>\
+#   release\ollama-with-tracing-<VERSION>\
 #     ├── ollama.exe
 #     ├── tools\trace-analyzer\
 #     │   ├── trace_analyzer\       (Python CLI)
@@ -15,16 +15,16 @@
 #     │   └── tests\
 #     └── VERSION
 #
-# Then just zip release\ollama-trace-<VERSION>\ and upload.
+# Then just zip the directory and upload.
 #
 
 $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path "$PSScriptRoot\..").Path
 $Version = Get-Date -Format "yyyyMMdd-HHmmss"
-$ReleaseDir = Join-Path $Root "release\ollama-trace-$Version"
+$ReleaseDir = Join-Path $Root "release\ollama-with-tracing-$Version"
 
-Write-Host "=== Ollama Trace Analyzer Release ===" -ForegroundColor Cyan
+Write-Host "=== Ollama with Tracing — Release ===" -ForegroundColor Cyan
 Write-Host "Version: $Version"
 Write-Host "Output:  $ReleaseDir"
 Write-Host ""
