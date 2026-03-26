@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Bash(find /c/workspace/myollama/model/models -name \"*.go\" -exec grep -l \"Forward\" {})",
+      "Bash(find /c/workspace/myollama -name \"*.h\" -exec grep -l \"trace\\\\|profile\\\\|debug\\\\|callback\" {})",
+      "Bash(grep -n \"func Test\" /c/workspace/myollama/integration/*.go)",
+      "Bash(/tmp/test_summary.txt:*)",
+      "Read(//tmp/**)",
+      "Bash(grep -n \"type Context struct\\\\|profilerHandle\\\\|cgo.Handle\\\\|//export\" /c/workspace/myollama/llama/llama.go)",
+      "Bash(grep -r MSVC /c/workspace/myollama/ml/backend/ggml/ggml/src --include=*.txt --include=*.cmake)",
+      "Bash(grep -r \"preprocessor\\\\|Zc:\" /c/workspace/myollama/ml/backend/ggml/ggml --include=*.cmake --include=*.cu --include=*.cuh)",
+      "Bash(git checkout:*)",
+      "Bash(go build:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(go test:*)",
+      "Read(//c/workspace/myollama/build/lib/ollama/**)",
+      "Read(//c/workspace/myollama/build/**)",
+      "Read(//c//**)",
+      "Read(//c/tmp/**)",
+      "Bash(python3 -m json.tool)",
+      "Read(//c/workspace/myollama/tools/trace-analyzer/**)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(python -c \"from trace_analyzer.cli import main; import sys; sys.argv = [''''cli'''', ''''summary'''', ''''tests/fixtures/sample_trace.jsonl'''']; main\\(\\)\")",
+      "Bash(python -c \"from trace_analyzer.cli import main; import sys; sys.argv = [''''cli'''', ''''report'''', ''''tests/fixtures/sample_trace.jsonl'''']; main\\(\\)\")",
+      "Bash(mkdir -p test-data)",
+      "Bash(python -c \":*)",
+      "Bash(rm -rf test-data)",
+      "Bash(cd:*)",
+      "Read(//c/workspace/myollama/docs/**)",
+      "Read(//c/workspace/myollama/**)",
+      "Bash(ollama-trace-analyzer:*)",
+      "Bash(find /c/workspace/myollama -maxdepth 2 -type f \\\\\\(-name Makefile -o -name Dockerfile* -o -name .goreleaser* -o -name build.sh -o -name *.mk \\\\\\))",
+      "Skill(update-config)",
+      "Bash(chmod +x /c/workspace/myollama/scripts/build-release.sh)"
+    ]
+  }
+}
