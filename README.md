@@ -52,14 +52,26 @@ At runtime, CUDA is automatically preferred over Vulkan — no configuration nee
 
 ## Inference Profiling & Tracing
 
-An opt-in per-operator execution tracing system for LlamaRunner. When enabled, it captures every GGML compute node (operator) dispatched during inference and writes a JSONL trace file per request, suitable for DAG visualization and performance analysis.
+An opt-in per-operator tracing system that captures every GGML compute node dispatched during inference, writing a JSONL trace file per request. Designed for **model structure analysis** and **approximate performance ranking**, not precision GPU profiling.
+
+### What this tool is for
+
+- **Understanding model execution** — see every op (MUL_MAT, RMS_NORM, ROPE, ...), its tensor name (`blk.3.attn_q`), shape, dtype, and data flow (DAG edges)
+- **Finding expensive ops** — rank ops by approximate cost to identify bottlenecks (e.g., which `MUL_MAT` is largest)
+- **Backend placement analysis** — see which ops land on CPU vs CUDA vs Vulkan
+- **Cross-configuration comparison** — compare the same model under different settings (ngl, backend, quantization)
+
+### What this tool is NOT for
+
+- **Precise GPU timing** — tracing forces per-node synchronization, destroying GPU pipeline overlap (see [Performance impact](#performance-impact) below)
+- **Production latency estimation** — traced inference is significantly slower than normal inference
 
 ### How it works
 
 - Hooks into GGML's existing `ggml_backend_sched_eval_callback` mechanism via a minimal C++ patch (~10 lines) and a CGO bridge
 - Zero overhead when disabled — uses a `NoopCollector` that compiles away
 - Events are buffered in memory during inference and flushed asynchronously after each request completes
-- Captures per-operator: op type, tensor name, input tensor names (DAG edges), output shape, data type, backend device (CPU/CUDA/Vulkan), and CPU-side dispatch timestamps
+- Captures per-operator: op type, tensor name, input tensor names (DAG edges), output shape, data type, backend device (CPU/CUDA/Vulkan), and approximate timestamps
 
 ### Usage
 
@@ -111,7 +123,7 @@ Each line is a JSON object. Two event types:
 {"type":"op","pass":0,"seq":42,"op":"MUL_MAT","name":"blk.3.attn_q","srcs":["blk.3.attn_norm","blk.3.attn_q.weight"],"shape":[4096,512],"dtype":"f16","backend":"CUDA0","t_start":1742123456790123456,"t_end":1742123456790234567}
 ```
 
-Fields: `pass` = batch index, `seq` = operator sequence number within the pass, `srcs` = source tensor names (DAG edges), `t_start`/`t_end` = CPU-side nanoseconds (approximate for GPU ops — captures dispatch time, not actual GPU execution time).
+Fields: `pass` = batch index, `seq` = operator sequence number within the pass, `srcs` = source tensor names (DAG edges), `t_start`/`t_end` = CPU-side nanoseconds. See [Performance impact on GPU models](#performance-impact-on-gpu-models) for how to interpret these timestamps.
 
 ### Architecture
 
@@ -127,10 +139,49 @@ Fields: `pass` = batch index, `seq` = operator sequence number within the pass, 
 | `envconfig/config.go` | `OLLAMA_TRACE_DIR` env var |
 | `runner/llamarunner/runner.go` | Hooks into `loadModel`, `processBatch`, `completion` |
 
-### Known caveats
+### Performance impact
 
-- **Phase 1 only (LlamaRunner):** The native Go OllamaRunner path is not yet instrumented
-- **GPU timing:** `t_start`/`t_end` are CPU-side dispatch times, not actual GPU execution times. Accurate for large ops (e.g. matmul), approximate for small ops
+When tracing is enabled, the GGML scheduler switches from **full-graph dispatch** to **per-node dispatch** with a forced `synchronize` after every node:
+
+```
+Normal:   CPU submits entire graph → GPU pipelines all kernels → done
+Tracing:  for each node: submit → GPU execute → sync → callback → next node
+```
+
+**GPU (CUDA/Vulkan):** Expect **2x+ slowdown** for models with 500+ nodes. GPU kernel overlap and memory transfer pipelining are completely lost. Each node runs in isolation.
+
+**CPU:** Each node becomes a separate `graph_compute` call (503 calls instead of 1), each creating/destroying a threadpool. Multi-threading **within** each call works normally — per-op compute times are accurate. The overhead is threadpool management between ops.
+
+### How to interpret the data
+
+Per-op times measure each op's cost **in isolation** (no other kernels running). This is close to the op's true compute cost, especially for large ops like `MUL_MAT`.
+
+However, `sum(per_op) > actual_total` because normal execution pipelines many ops in parallel. A small op that takes 0.1ms in isolation may cost effectively nothing in pipelined execution because it overlaps with a 2ms `MUL_MAT`.
+
+**Bottom line:** Use for relative ranking and structural analysis. Do not use for absolute wall-clock budgeting.
+
+### Comparison with GPU profiling tools
+
+| | Ollama Trace | GGML_VK_PERF_LOGGER | Nsight Systems |
+|---|---|---|---|
+| **What it shows** | Every op instance with full metadata | Op type averages (all MUL_MAT pooled) | Per CUDA kernel timeline |
+| **Tensor name** | ✅ `blk.3.attn_q` | ❌ | ❌ |
+| **Shape / dtype** | ✅ `[4096,512] f16` | ❌ | ❌ |
+| **DAG edges** | ✅ src tensor names | ❌ | ❌ |
+| **Backend placement** | ✅ CPU / CUDA / Vulkan | Vulkan only | CUDA only |
+| **Per-op timing** | ⚠️ Approximate (forced sync) | ✅ Accurate (GPU timestamps) | ✅ Accurate (driver-level) |
+| **Affects execution** | ⚠️ Yes — breaks GPU pipeline | ✅ No | ✅ No |
+| **Setup** | `OLLAMA_TRACE_DIR=dir` | `GGML_VK_PERF_LOGGER=1` | Install Nsight, `nsys profile ...` |
+
+**Key distinction:** `GGML_VK_PERF_LOGGER` averages all ops of the same type together (e.g., 32 `MUL_MAT` of different sizes into one average), losing per-instance detail. Ollama Trace shows every individual op with its specific tensor name, shape, and DAG context.
+
+**Recommended workflow:**
+1. **Ollama Trace** first — understand model structure, find which specific ops/layers are candidates for optimization
+2. **Nsight / VK_PERF_LOGGER** — get accurate timing for those ops without affecting execution
+
+### Other caveats
+
+- **LlamaRunner only:** The native Go OllamaRunner path has basic pass-level tracing but not full per-op instrumentation
 - **Op fusion:** Flash attention appears as a single `FLASH_ATTN_EXT` node; SwiGLU may appear as `SWIGLU`. The trace reflects the actual fused execution graph
 - **Backend DLLs:** `ggml-cuda.dll`, `ggml-vulkan.dll` etc. do **not** need recompilation — the eval callback hooks at the scheduler level, above the backend DLLs
 

@@ -222,9 +222,43 @@ cparams.cb_eval = [](struct ggml_tensor * t, bool ask, void * user_data) -> bool
 cparams.cb_eval_user_data = nullptr;
 ```
 
-**局限：** 回调在 CPU 侧被调用，GPU 节点的时间不准确（需要插入 GPU 同步点才能精确计时，但这会显著拖慢推理）。
+**Ollama 当前状态：** Ollama 的 LlamaRunner 通过 `OLLAMA_TRACE_DIR` 启用此回调，生成 JSONL trace 文件。OllamaRunner 有基础 pass 级别 tracing。
 
-**Ollama 当前状态：** Ollama 的 runner 层没有设置 `cb_eval`，该接口处于未使用状态。
+### GPU 性能影响（重要）
+
+当 eval callback 被设置时，scheduler 的行为发生根本性改变：
+
+| | 无 callback（正常） | 有 callback（tracing） |
+|---|---|---|
+| **dispatch 方式** | 一次提交整个 graph | 逐 node 提交 |
+| **GPU 同步** | 仅在 graph 结束时 | 每个 node 后强制 `synchronize` |
+| **GPU 流水线** | kernel 之间可 overlap | 完全串行，无 overlap |
+| **推理速度** | 正常 | GPU 模型慢 2x+（500 node × ~50µs sync） |
+| **CPU 影响** | 1 次 graph_compute | 503 次 graph_compute，每次创建/销毁线程池 |
+| **CPU 多线程** | 正常 | 每次 graph_compute 内部多线程正常工作，per-op 计算时间准确 |
+
+### 数据解读指南
+
+eval callback 测到的 per-op 时间是**每个 op 在隔离执行下的耗时**（GPU 上没有其他 kernel 并行）。
+
+- **有效用途：** 相对排序（找最慢的 op）、模型结构分析（DAG/shape/dtype）、跨模型比较
+- **无效用途：** 绝对耗时占比分析（`sum(per_op) > 实际总时间`，因为正常执行中小 op 与大 op 并行）
+- **准确性：** 大 op（如 `MUL_MAT`）的测量值接近真实值；小 op 因 sync 开销被放大
+
+### 工具对比与推荐工作流
+
+| | Ollama Trace | GGML_VK_PERF_LOGGER | Nsight Systems |
+|---|---|---|---|
+| **信息粒度** | 每个 op 实例（tensor name, shape, DAG） | 按 op 类型汇总平均 | 每个 CUDA kernel |
+| **GPU 时间准确性** | ⚠️ 近似（强制同步） | ✅ 准确（GPU timestamp） | ✅ 准确（驱动层） |
+| **影响执行** | ⚠️ 破坏 GPU 流水线 | ✅ 不影响 | ✅ 不影响 |
+| **适用 backend** | 所有 | 仅 Vulkan | 仅 CUDA |
+
+**注意：** `GGML_VK_PERF_LOGGER` 把所有同类 op 混在一起算平均（如 32 个不同大小的 `MUL_MAT` → 一个平均值），丢失了每个具体 op 的 tensor name、shape 等上下文。
+
+**推荐工作流：**
+1. **Ollama Trace** — 先跑一次，理解模型结构、找到关键 op / 层
+2. **Nsight / VK_PERF_LOGGER** — 对关键 op 做精确 GPU 计时（不影响执行）
 
 ---
 
