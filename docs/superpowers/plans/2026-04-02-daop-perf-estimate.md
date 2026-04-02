@@ -8,6 +8,46 @@
 
 **Tech Stack:** Go 1.24, CGo (GGML C API), Cobra CLI, testify
 
+**Spec:** `docs/superpowers/specs/2026-04-02-perf-predict-design.md` — 14 sections, 完整设计文档
+
+---
+
+## Agent Context (必读)
+
+执行此计划前请确认以下背景知识。如果从新 session 恢复，先读此节。
+
+### 核心概念
+- **Roofline 模型**: `T = max(FLOPs/peak_FLOPS, bytes/peak_BW)`，实际延迟用校准因子 η 修正: `T_actual = T_predicted / η`
+- **三模块**: Benchmark (硬件 profiling + 算子校准 → raw.json) → Profile (处理 raw → profile.json，存 η) → Estimate (构图 → 遍历节点 → Roofline 估算 tok/s)
+- **两层校准**: Layer 1 用预定义算子集 (无需模型)，Layer 2 从模型计算图发现缺失算子 (`--update`)
+- **GGUF header**: 构图需要 GGUF 文件头 (几十 KB，含 tensor name/shape/dtype)，不需要权重数据 (GB 级)
+
+### 关键 codebase 文件
+| 文件 | 用途 | 关键行 |
+|------|------|--------|
+| `ml/backend.go` | Backend/Context/Tensor 接口定义 | Context:94-128, Tensor:130-241 |
+| `ml/backend/ggml/ggml.go` | GGML backend 实现，CGo 调用 | initDevices:47, NewContextSize:667, Reserve:845, ComputeWithNotify:814 |
+| `model/model.go` | model.New() 入口 | New:113, modelForArch:161 |
+| `runner/ollamarunner/runner.go` | reserveWorstCaseGraph 参考 | :1069-1168 |
+| `types/model/name.go` | Model ID 解析 | ParseName() |
+| `manifest/manifest.go` | Manifest → GGUF blob 路径 | ParseNamedManifest() |
+| `manifest/paths.go` | Digest → 文件路径 | BlobsPath() |
+| `fs/ggml/gguf.go` | GGUF 文件解析 | Decode() |
+| `ggml/include/ggml-backend.h` | CGo 可用的 C API | :337 ggml_backend_sched_get_tensor_backend |
+
+### 已验证的 CGo API
+| 函数 | 存在? | 头文件 |
+|------|-------|--------|
+| `ggml_backend_sched_get_tensor_backend(sched, node)` | **YES** | ggml-backend.h:337 |
+| `ggml_backend_sched_get_node_backend_id(sched, i)` | **NO** | — |
+| `ggml_graph_node(cgraph, i)` / `ggml_graph_n_nodes(cgraph)` | **YES** | ggml.h:2594-2596 |
+| `ggml_op_name(op)` / `ggml_type_name(type)` / `ggml_get_name(tensor)` | **YES** | ggml.h:731-846 |
+| `ggml_backend_name(backend)` | **YES** | ggml-backend.h:78 |
+
+### Backend 初始化约束
+`ml.NewBackend(modelPath, params)` 内部调 `os.Open(modelPath)` + `fsggml.Decode()` — **必须传有效 GGUF 文件**。
+`daop-bench` 不针对特定模型，需要独立的 backend 初始化路径。方案见 Task 5a。
+
 ---
 
 ## File Structure
@@ -28,13 +68,15 @@
 | `perf/estimate.go` | Graph-based estimation: build graph, traverse, estimate per-node |
 | `perf/estimate_test.go` | Unit tests for estimation logic |
 | `perf/viewer.go` | Profile viewer (human-readable output) |
+| `perf/resolve.go` | Model ID → local GGUF path resolution |
+| `perf/resolve_test.go` | Tests for model resolution |
 
 ### Existing files to modify
 
 | File | Change |
 |------|--------|
 | `ml/backend.go` | Add `GraphNode` type and `GraphNodes() []GraphNode` to Context interface |
-| `ml/backend/ggml/ggml.go` | Implement `GraphNodes()` — capture node info from GGML graph via CGo |
+| `ml/backend/ggml/ggml.go` | Implement `GraphNodes()` + `NewForBench()` |
 | `cmd/cmd.go` | Register `daop-bench` and `daop-estimate` subcommands |
 
 ---
@@ -1388,12 +1430,11 @@ func (c *Context) captureGraphNodes() {
 			int64(node.ne[2]), int64(node.ne[3]),
 		}
 
-		// Determine backend from scheduler's node_backend_ids
+		// Determine backend via public API (ggml-backend.h:337)
 		backendName := "unknown"
-		backendID := C.ggml_backend_sched_get_node_backend_id(c.b.sched, C.int(i))
-		if backendID >= 0 && int(backendID) < len(c.b.schedBackends) {
-			be := c.b.schedBackends[backendID]
-			backendName = C.GoString(C.ggml_backend_name(be))
+		backendPtr := C.ggml_backend_sched_get_tensor_backend(c.b.sched, node)
+		if backendPtr != nil {
+			backendName = C.GoString(C.ggml_backend_name(backendPtr))
 		}
 
 		// Collect input shapes
@@ -1430,21 +1471,7 @@ func (c *Context) captureGraphNodes() {
 }
 ```
 
-**Important**: The function `ggml_backend_sched_get_node_backend_id` may not exist as a public C API. Check if it's available. If not, we need to access `sched->hv_tensor_backend_ids` directly. The alternative approach:
-
-```go
-// If ggml_backend_sched_get_node_backend_id is not available,
-// access the internal field via unsafe pointer arithmetic.
-// However, first check ggml-backend.h for available APIs.
-// 
-// Fallback: use ggml_backend_sched_get_tensor_backend() which IS public:
-backendPtr := C.ggml_backend_sched_get_tensor_backend(c.b.sched, node)
-if backendPtr != nil {
-    backendName = C.GoString(C.ggml_backend_name(backendPtr))
-}
-```
-
-Use `ggml_backend_sched_get_tensor_backend()` as the primary approach — it's a public API that returns the backend assigned to a tensor after split_graph.
+**Note**: Uses `ggml_backend_sched_get_tensor_backend()` (ggml-backend.h:337) — verified to exist in vendored headers. `ggml_backend_sched_get_node_backend_id()` does NOT exist as public API.
 
 - [ ] **Step 3: Verify compilation**
 
@@ -1459,6 +1486,249 @@ Run: `cd /c/workspace/daop-ollama && go build -tags cpu ./ml/...`
 ```bash
 git add ml/backend.go ml/backend/ggml/ggml.go
 git commit -m "ml: add GraphNodes() API for graph traversal without weights"
+```
+
+---
+
+### Task 5a: Benchmark Backend Initialization (`ml/backend/ggml/ggml.go`)
+
+**Files:**
+- Modify: `ml/backend/ggml/ggml.go`
+- Modify: `ml/backend.go`
+
+`ml.NewBackend()` 需要 GGUF 文件。`daop-bench` 不针对特定模型，需要独立的初始化路径。
+方案：新增 `NewBackendForBench()` 函数，复用 `initDevices()` 发现的设备，
+创建 `ggml_backend_sched` 但不解析任何模型。
+
+- [ ] **Step 1: 在 `ml/backend.go` 添加 `NewBackendForBench` 函数声明**
+
+在 `NewBackend` 函数附近添加：
+
+```go
+// NewBackendForBench initializes a backend for benchmarking without requiring a model.
+// It discovers available devices and creates a scheduler, but loads no model tensors.
+// Used by daop-bench to run standalone operator benchmarks.
+func NewBackendForBench(params BackendParams) (Backend, error) {
+	return newBackendForBench(params)
+}
+```
+
+`newBackendForBench` 是包级变量（同 `newBackend` 的模式），由 ggml 包注册。
+
+- [ ] **Step 2: 在 `ml/backend/ggml/ggml.go` 实现**
+
+在 `init()` 函数中注册（参考现有 `ml.newBackend = ggml.New` 模式）：
+
+```go
+func init() {
+	ml.SetBackendForBenchInit(NewForBench)
+}
+
+// NewForBench creates a Backend with device discovery and scheduler but no model.
+func NewForBench(params ml.BackendParams) (ml.Backend, error) {
+	initDevices()
+
+	if len(gpus) == 0 && len(cpus) == 0 {
+		return nil, fmt.Errorf("no compute devices found")
+	}
+
+	// Collect backends and buffer types (same logic as New() after GGUF parsing)
+	var schedBackends []C.ggml_backend_t
+	var schedBufts []C.ggml_backend_buffer_type_t
+
+	// Add GPU backends first
+	for dev, be := range backends {
+		devType := C.ggml_backend_dev_type(dev)
+		if devType == C.GGML_BACKEND_DEVICE_TYPE_GPU ||
+			devType == C.GGML_BACKEND_DEVICE_TYPE_ACCEL {
+			schedBackends = append(schedBackends, be)
+			schedBufts = append(schedBufts, C.ggml_backend_get_default_buffer_type(be))
+		}
+	}
+	// Always add CPU backend last
+	for dev, be := range backends {
+		if C.ggml_backend_dev_type(dev) == C.GGML_BACKEND_DEVICE_TYPE_CPU {
+			schedBackends = append(schedBackends, be)
+			schedBufts = append(schedBufts, C.ggml_backend_get_default_buffer_type(be))
+			break
+		}
+	}
+
+	if len(schedBackends) == 0 {
+		return nil, fmt.Errorf("no backends available")
+	}
+
+	// Create scheduler
+	sched := C.ggml_backend_sched_new(
+		&schedBackends[0],
+		&schedBufts[0],
+		C.int(len(schedBackends)),
+		C.size_t(8192), // default graph size
+		false,           // no parallel
+	)
+
+	b := &Backend{
+		sched:         sched,
+		schedBackends: schedBackends,
+		schedBufts:    schedBufts,
+	}
+
+	return b, nil
+}
+```
+
+**注意**：这段代码依赖 `Backend` 结构体的内部字段。实现时需要检查 `Backend` 的完整结构，
+确保必要字段都被初始化。可能需要初始化 `btDeviceMemory`, `schedMu` 等字段。
+参考 `New()` 函数中 scheduler 创建部分的代码（约 line 350-400）。
+
+- [ ] **Step 3: 验证编译**
+
+Run: `cd /c/workspace/daop-ollama && go build ./ml/...`
+Expected: BUILD SUCCESS
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add ml/backend.go ml/backend/ggml/ggml.go
+git commit -m "ml: add NewBackendForBench() for model-free backend initialization"
+```
+
+---
+
+### Task 6a: Model ID Resolution Helper (`perf/resolve.go`)
+
+**Files:**
+- Create: `perf/resolve.go`
+- Create: `perf/resolve_test.go`
+
+将 Model ID (如 `qwen3:8b-q4_0`) 解析为本地 GGUF 文件路径。不需要 Ollama server。
+
+- [ ] **Step 1: Write failing test**
+
+```go
+package perf
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestIsGGUFPath(t *testing.T) {
+	assert.True(t, IsGGUFPath("./model.gguf"))
+	assert.True(t, IsGGUFPath("/tmp/custom-model.gguf"))
+	assert.True(t, IsGGUFPath("C:\\models\\test.gguf"))
+	assert.False(t, IsGGUFPath("qwen3:8b-q4_0"))
+	assert.False(t, IsGGUFPath("llama3"))
+}
+
+func TestResolveModelPath_GGUFFile(t *testing.T) {
+	// Create a temp GGUF file
+	dir := t.TempDir()
+	ggufPath := filepath.Join(dir, "test.gguf")
+	os.WriteFile(ggufPath, []byte("dummy"), 0o644)
+
+	resolved, err := ResolveModelPath(ggufPath)
+	assert.NoError(t, err)
+	assert.Equal(t, ggufPath, resolved)
+}
+
+func TestResolveModelPath_GGUFNotFound(t *testing.T) {
+	_, err := ResolveModelPath("/nonexistent/model.gguf")
+	assert.Error(t, err)
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd /c/workspace/daop-ollama && go test ./perf/ -run "TestIsGGUF|TestResolveModel" -v`
+Expected: FAIL
+
+- [ ] **Step 3: Implement resolve.go**
+
+```go
+package perf
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/ollama/ollama/manifest"
+	"github.com/ollama/ollama/types/model"
+)
+
+// IsGGUFPath returns true if the ref looks like a file path rather than a model ID.
+func IsGGUFPath(ref string) bool {
+	return strings.HasSuffix(ref, ".gguf") ||
+		strings.Contains(ref, "/") ||
+		strings.Contains(ref, "\\")
+}
+
+// ResolveModelPath resolves a model reference to a local GGUF file path.
+//
+// If ref is a file path (contains / or \ or ends with .gguf), it's used directly.
+// Otherwise, it's treated as an Ollama model ID and resolved via the local manifest:
+//   1. Parse model ID → fully qualified name
+//   2. Load manifest from ~/.ollama/models/manifests/...
+//   3. Find the model layer (mediaType "application/vnd.ollama.image.model")
+//   4. Resolve digest → blob path
+//
+// Returns error if the model is not found locally.
+// Does NOT download — caller should handle the "not found" case.
+func ResolveModelPath(ref string) (string, error) {
+	if IsGGUFPath(ref) {
+		if _, err := os.Stat(ref); err != nil {
+			return "", fmt.Errorf("GGUF file not found: %s", ref)
+		}
+		return ref, nil
+	}
+
+	// Parse as Ollama model ID
+	name := model.ParseName(ref)
+	if !name.IsValid() {
+		return "", fmt.Errorf("invalid model reference: %s", ref)
+	}
+
+	// Load manifest
+	m, err := manifest.ParseNamedManifest(name)
+	if err != nil {
+		return "", fmt.Errorf("model %q not found locally: %w (run 'ollama pull %s' first)", ref, err, ref)
+	}
+
+	// Find model layer
+	for _, layer := range m.Layers {
+		if layer.MediaType == "application/vnd.ollama.image.model" {
+			blobPath, err := manifest.BlobsPath(layer.Digest)
+			if err != nil {
+				return "", fmt.Errorf("cannot resolve blob path: %w", err)
+			}
+			if _, err := os.Stat(blobPath); err != nil {
+				return "", fmt.Errorf("model blob missing: %s", blobPath)
+			}
+			return blobPath, nil
+		}
+	}
+
+	return "", fmt.Errorf("no GGUF model layer found in manifest for %q", ref)
+}
+```
+
+**注意**: `manifest.ParseNamedManifest` 和 `manifest.BlobsPath` 的签名需要在实现时验证。
+如果 API 不完全匹配（例如 `ParseNamedManifest` 需要额外参数），参考 `server/` 中的调用方式调整。
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd /c/workspace/daop-ollama && go test ./perf/ -run "TestIsGGUF|TestResolveModel" -v`
+Expected: PASS (at least the GGUF path tests; model ID tests may need a real manifest)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add perf/resolve.go perf/resolve_test.go
+git commit -m "perf: add model ID to GGUF path resolution"
 ```
 
 ---
@@ -1540,9 +1810,8 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/model"
 )
-
-var _ = slog.Info // suppress unused import if needed
 
 // OpSpec defines an operator to benchmark with its dtype combinations.
 type OpSpec struct {
@@ -1695,37 +1964,296 @@ func RunFullBenchmark(backend ml.Backend, cfg BenchmarkConfig) (*RawData, error)
 
 	slog.Info("starting hardware characterization", "devices", len(devices))
 
-	// TODO: Hardware characterization
-	// For each backend:
-	//   1. Peak FLOPS: large MUL_MAT (4096×4096) per dtype
-	//   2. Peak Bandwidth: large CONT/CPY
-	// Implementation requires creating single-op graphs via Backend.NewContext(),
-	// constructing tensors, calling Compute, and timing with ComputeWithNotify.
-	//
-	// The actual benchmark loop:
-	//   ctx := backend.NewContext()
-	//   a := ctx.Zeros(dtype, M, K)
-	//   b := ctx.Zeros(dtype, K, N)
-	//   out := a.Mulmat(b)
-	//   ctx.Forward(out)
-	//   // warmup
-	//   for i := 0; i < cfg.WarmupReps; i++ { ctx.Compute(out) }
-	//   // measure
-	//   start := time.Now()
-	//   for i := 0; i < cfg.MeasureReps; i++ { ctx.Compute(out) }
-	//   elapsed := time.Since(start)
-	//   latencyUs := float64(elapsed.Microseconds()) / float64(cfg.MeasureReps)
+	// --- Hardware characterization ---
+	// Peak FLOPS: large MUL_MAT per dtype
+	// Peak Bandwidth: large CONT (pure memory copy)
+	dtypes := []ml.DType{ml.DTypeF16, ml.DTypeF32}
+	for _, dev := range devices {
+		for _, dtype := range dtypes {
+			flops, err := benchPeakFLOPS(backend, dtype, cfg)
+			if err != nil {
+				slog.Warn("peak FLOPS benchmark failed", "device", dev.Name, "dtype", dtype, "error", err)
+				continue
+			}
+			raw.HardwareBenchmarks = append(raw.HardwareBenchmarks, HardwareBenchmark{
+				Backend: dev.Library, Dtype: dtype.String(), Test: "peak_flops", Value: flops, Unit: "FLOPS",
+			})
+		}
+		bw, err := benchPeakBandwidth(backend, cfg)
+		if err != nil {
+			slog.Warn("peak bandwidth benchmark failed", "device", dev.Name, "error", err)
+			continue
+		}
+		raw.HardwareBenchmarks = append(raw.HardwareBenchmarks, HardwareBenchmark{
+			Backend: dev.Library, Test: "peak_bandwidth", Value: bw, Unit: "bytes/sec",
+		})
+	}
 
 	slog.Info("starting operator calibration (Layer 1)")
 
-	// TODO: Operator calibration for predefined ops
-	// For each op in PredefinedOps(), for each dtype, for each backend:
-	//   shapes := SelectBenchmarkShapes(op, balancePoint, dtype, "")
-	//   points := benchmarkOpAtShapes(backend, op, shapes, dtype, cfg)
-	//   raw.OperatorBenchmarks = append(...)
-	//   if ShouldAdaptiveExtend(etas): add more points
+	// --- Operator calibration ---
+	// Compute balance points from hardware benchmarks
+	hwProfile := buildHWProfile(raw.HardwareBenchmarks)
+	for _, opSpec := range PredefinedOps() {
+		for _, dtypeStr := range opSpec.Dtypes {
+			for _, bp := range hwProfile {
+				balancePoint := bp.BalancePoints["f32"]
+				if v, ok := bp.BalancePoints[dtypeStr]; ok {
+					balancePoint = v
+				}
+				shapes := SelectBenchmarkShapes(opSpec.Op, balancePoint, dtypeStr, dtypeStr)
+				ob := OperatorBenchmark{
+					Op: opSpec.Op, Backend: bp.Name, ComputeDtype: dtypeStr,
+				}
+				if opSpec.Op == "MUL_MAT" || opSpec.Op == "MUL_MAT_ID" {
+					ob.WeightDtype = dtypeStr
+				}
+				for _, shape := range shapes {
+					pt, err := benchSingleOp(backend, opSpec.Op, shape, dtypeStr, cfg)
+					if err != nil {
+						slog.Warn("op benchmark failed", "op", opSpec.Op, "error", err)
+						continue
+					}
+					ob.Points = append(ob.Points, pt)
+				}
+				// Adaptive extension
+				if len(ob.Points) >= 3 {
+					etas := computePointEtas(ob.Points, bp, dtypeStr)
+					if ShouldAdaptiveExtend(etas) {
+						// Insert additional points in highest-variance region
+						for extra := 0; extra < cfg.MaxAdaptive && len(ob.Points) < 10; extra++ {
+							midShape := interpolateShapes(shapes, etas)
+							pt, err := benchSingleOp(backend, opSpec.Op, midShape, dtypeStr, cfg)
+							if err != nil {
+								break
+							}
+							ob.Points = append(ob.Points, pt)
+						}
+					}
+				}
+				raw.OperatorBenchmarks = append(raw.OperatorBenchmarks, ob)
+			}
+		}
+	}
 
 	return raw, nil
+}
+
+// benchPeakFLOPS measures peak FLOPS via large MUL_MAT.
+func benchPeakFLOPS(backend ml.Backend, dtype ml.DType, cfg BenchmarkConfig) (float64, error) {
+	const M, K, N = 4096, 4096, 4096
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	a := ctx.Zeros(dtype, M, K)
+	b := ctx.Zeros(dtype, K, N)
+	out := a.Mulmat(b)
+	ctx.Forward(out)
+
+	// Warmup
+	for i := 0; i < cfg.WarmupReps; i++ {
+		ctx.Compute(out)
+	}
+	// Measure
+	start := time.Now()
+	for i := 0; i < cfg.MeasureReps; i++ {
+		ctx.Compute(out)
+	}
+	elapsed := time.Since(start)
+
+	latencySec := elapsed.Seconds() / float64(cfg.MeasureReps)
+	flops := 2.0 * M * K * N
+	return flops / latencySec, nil
+}
+
+// benchPeakBandwidth measures peak memory bandwidth via large CONT (copy).
+func benchPeakBandwidth(backend ml.Backend, cfg BenchmarkConfig) (float64, error) {
+	const size = 64 * 1024 * 1024 // 64M elements
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	src := ctx.Zeros(ml.DTypeF32, size)
+	dst := src.Contiguous(ctx)
+	ctx.Forward(dst)
+
+	for i := 0; i < cfg.WarmupReps; i++ {
+		ctx.Compute(dst)
+	}
+	start := time.Now()
+	for i := 0; i < cfg.MeasureReps; i++ {
+		ctx.Compute(dst)
+	}
+	elapsed := time.Since(start)
+
+	latencySec := elapsed.Seconds() / float64(cfg.MeasureReps)
+	bytesTotal := 2.0 * size * 4 // read + write, f32 = 4 bytes
+	return bytesTotal / latencySec, nil
+}
+
+// benchSingleOp benchmarks one op at one shape.
+func benchSingleOp(backend ml.Backend, op string, shapes [][]int64, dtype string, cfg BenchmarkConfig) (BenchmarkPoint, error) {
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	dt := parseDType(dtype)
+
+	// Build single-op graph based on op type
+	var out ml.Tensor
+	switch op {
+	case "MUL_MAT":
+		a := ctx.Zeros(dt, int(shapes[0][0]), int(shapes[0][1]))
+		b := ctx.Zeros(dt, int(shapes[1][0]), int(shapes[1][1]))
+		out = a.Mulmat(b)
+	case "ADD":
+		a := ctx.Zeros(dt, int(shapes[0][0]))
+		b := ctx.Zeros(dt, int(shapes[0][0]))
+		out = a.Add(ctx, b)
+	case "SILU":
+		a := ctx.Zeros(dt, int(shapes[0][0]))
+		out = a.SILU(ctx)
+	case "GELU":
+		a := ctx.Zeros(dt, int(shapes[0][0]))
+		out = a.GELU(ctx)
+	case "RMS_NORM":
+		a := ctx.Zeros(dt, int(shapes[0][0]))
+		out = a.RMSNorm(ctx, nil, 1e-5)
+	case "SOFTMAX":
+		a := ctx.Zeros(dt, int(shapes[0][0]))
+		out = a.Softmax(ctx)
+	case "ROPE":
+		a := ctx.Zeros(dt, int(shapes[0][0]))
+		// ROPE needs position info — use basic rotation
+		out = a.RoPE(ctx, nil, nil, nil, 0, 0)
+	case "CONT":
+		a := ctx.Zeros(dt, int(shapes[0][0]))
+		out = a.Contiguous(ctx)
+	default:
+		return BenchmarkPoint{}, fmt.Errorf("benchmark not implemented for op %s", op)
+	}
+
+	ctx.Forward(out)
+
+	for i := 0; i < cfg.WarmupReps; i++ {
+		ctx.Compute(out)
+	}
+
+	var latencies []float64
+	for i := 0; i < cfg.MeasureReps; i++ {
+		start := time.Now()
+		ctx.Compute(out)
+		latencies = append(latencies, float64(time.Since(start).Microseconds()))
+	}
+
+	mean := 0.0
+	for _, l := range latencies {
+		mean += l
+	}
+	mean /= float64(len(latencies))
+
+	stddev := 0.0
+	for _, l := range latencies {
+		d := l - mean
+		stddev += d * d
+	}
+	stddev = math.Sqrt(stddev / float64(len(latencies)))
+
+	flops := ComputeFLOPs(op, shapes)
+	bytes := ComputeBytes(op, shapes, dtype, dtype)
+	intensity := 0.0
+	if bytes > 0 {
+		intensity = flops / bytes
+	}
+
+	outputShape := shapes[0] // simplified
+	return BenchmarkPoint{
+		InputShapes: shapes,
+		OutputShape: outputShape,
+		FLOPs:       flops,
+		BytesMoved:  bytes,
+		Intensity:   intensity,
+		LatencyUs:   mean,
+		Reps:        cfg.MeasureReps,
+		StddevUs:    stddev,
+	}, nil
+}
+
+// parseDType converts string dtype to ml.DType.
+func parseDType(s string) ml.DType {
+	switch s {
+	case "f16":
+		return ml.DTypeF16
+	case "f32":
+		return ml.DTypeF32
+	case "bf16":
+		return ml.DTypeBF16
+	default:
+		return ml.DTypeF32
+	}
+}
+
+// buildHWProfile extracts backend profiles from hardware benchmarks for balance point calculation.
+func buildHWProfile(hbs []HardwareBenchmark) []BackendProfile {
+	byBackend := make(map[string]*BackendProfile)
+	for _, hb := range hbs {
+		bp, ok := byBackend[hb.Backend]
+		if !ok {
+			bp = &BackendProfile{
+				Name:          hb.Backend,
+				PeakFLOPS:     make(map[string]float64),
+				BalancePoints: make(map[string]float64),
+			}
+			byBackend[hb.Backend] = bp
+		}
+		switch hb.Test {
+		case "peak_flops":
+			bp.PeakFLOPS[hb.Dtype] = hb.Value
+		case "peak_bandwidth":
+			bp.PeakBandwidth = hb.Value
+		}
+	}
+	var result []BackendProfile
+	for _, bp := range byBackend {
+		for dtype, flops := range bp.PeakFLOPS {
+			if bp.PeakBandwidth > 0 {
+				bp.BalancePoints[dtype] = flops / bp.PeakBandwidth
+			}
+		}
+		result = append(result, *bp)
+	}
+	return result
+}
+
+// computePointEtas computes per-point η values from benchmark results.
+func computePointEtas(points []BenchmarkPoint, bp BackendProfile, dtype string) []float64 {
+	peakFLOPS := bp.PeakFLOPS[dtype]
+	if peakFLOPS == 0 {
+		peakFLOPS = bp.PeakFLOPS["f32"]
+	}
+	peakBW := bp.PeakBandwidth
+	etas := make([]float64, 0, len(points))
+	for _, pt := range points {
+		tComp := pt.FLOPs / peakFLOPS
+		tMem := pt.BytesMoved / peakBW
+		tPred := math.Max(tComp, tMem)
+		tMeas := pt.LatencyUs * 1e-6
+		if tMeas > 0 && tPred > 0 {
+			eta := tPred / tMeas
+			if eta > 0 && eta <= 2.0 {
+				etas = append(etas, eta)
+			}
+		}
+	}
+	return etas
+}
+
+// interpolateShapes picks a shape between existing shapes where η variance is highest.
+// Simplified: returns the midpoint between first and last shape.
+func interpolateShapes(shapes [][][]int64, etas []float64) [][]int64 {
+	if len(shapes) < 2 {
+		return shapes[0]
+	}
+	mid := len(shapes) / 2
+	return shapes[mid]
 }
 
 // RunUpdateBenchmark executes Layer 2 graph-driven discovery.
@@ -1741,10 +2269,17 @@ func RunUpdateBenchmark(backend ml.Backend, existingProfile *Profile,
 	// Collect all (op, backend, compute_dtype, weight_dtype) from model graphs
 	needed := make(map[OpKey]bool)
 	for _, modelPath := range modelPaths {
-		// Build prefill + decode graphs, collect op keys
-		// Uses model.New() + Forward() + Reserve() + GraphNodes()
-		_ = modelPath
-		// TODO: implement graph-driven discovery
+		nodes, err := buildModelGraphNodes(modelPath)
+		if err != nil {
+			slog.Warn("failed to build graph for model", "path", modelPath, "error", err)
+			continue
+		}
+		for _, node := range nodes {
+			if IsZeroCostOp(node.Op) {
+				continue
+			}
+			needed[OpKey{node.Op, node.Backend, node.ComputeDtype, node.WeightDtype}] = true
+		}
 	}
 
 	// Filter out already-calibrated ops
@@ -1752,23 +2287,89 @@ func RunUpdateBenchmark(backend ml.Backend, existingProfile *Profile,
 		delete(needed, OpKey{op.Op, op.Backend, op.ComputeDtype, op.WeightDtype})
 	}
 
+	if len(needed) == 0 {
+		slog.Info("all operators already calibrated")
+		return raw, nil
+	}
+
 	slog.Info("operator calibration (Layer 2)", "missing_ops", len(needed))
 
-	// TODO: Benchmark missing ops
-	// Similar to Layer 1 but with shapes derived from actual graph nodes
+	// Benchmark missing ops
+	hwProfile := buildHWProfile(raw.HardwareBenchmarks)
+	for key := range needed {
+		bp := findBackendProfile(hwProfile, key.Backend)
+		if bp == nil {
+			// Use existing profile's hardware data
+			bp2, _ := LookupBackend(existingProfile, key.Backend)
+			if bp2 != nil {
+				bp = bp2
+			} else {
+				continue
+			}
+		}
+		balancePoint := bp.BalancePoints[key.ComputeDtype]
+		shapes := SelectBenchmarkShapes(key.Op, balancePoint, key.ComputeDtype, key.WeightDtype)
+		ob := OperatorBenchmark{
+			Op: key.Op, Backend: key.Backend,
+			ComputeDtype: key.ComputeDtype, WeightDtype: key.WeightDtype,
+		}
+		for _, shape := range shapes {
+			pt, err := benchSingleOp(backend, key.Op, shape, key.ComputeDtype, cfg)
+			if err != nil {
+				continue
+			}
+			ob.Points = append(ob.Points, pt)
+		}
+		if len(ob.Points) > 0 {
+			raw.OperatorBenchmarks = append(raw.OperatorBenchmarks, ob)
+		}
+	}
 
 	return raw, nil
 }
+
+// buildModelGraphNodes loads a model, builds prefill+decode graphs, returns all graph nodes.
+func buildModelGraphNodes(modelPath string) ([]ml.GraphNode, error) {
+	m, err := model.New(modelPath, ml.BackendParams{})
+	if err != nil {
+		return nil, fmt.Errorf("load model: %w", err)
+	}
+	defer m.Backend().Close()
+
+	var allNodes []ml.GraphNode
+	for _, batchSize := range []int{512, 1} { // prefill + decode
+		ctx := m.Backend().NewContext()
+		batch := createFakeBatch(ctx, batchSize, batchSize)
+		output, err := m.Forward(ctx, batch)
+		if err != nil {
+			ctx.Close()
+			continue
+		}
+		ctx.Forward(output)
+		ctx.Reserve()
+		allNodes = append(allNodes, ctx.GraphNodes()...)
+		ctx.Close()
+	}
+	return allNodes, nil
+}
+
+func findBackendProfile(profiles []BackendProfile, name string) *BackendProfile {
+	for i := range profiles {
+		if profiles[i].Name == name {
+			return &profiles[i]
+		}
+	}
+	return nil
+}
 ```
 
-**Note**: The `RunFullBenchmark` and `RunUpdateBenchmark` functions contain TODO sections for the actual benchmark execution. These require running GGML compute operations and timing them. The exact implementation depends on the Tensor/Context API methods available. The key pattern is:
-1. Create context via `backend.NewContext()`
-2. Create tensors via `ctx.Zeros(dtype, shapes...)`
-3. Build single-op graph via tensor methods (e.g., `a.Mulmat(b)`)
-4. Call `ctx.Forward(output)` then `ctx.Compute(output)` for warmup
-5. Time repeated `ctx.Compute(output)` calls
+**实现注意**: `benchSingleOp` 中的 Tensor API 调用 (`a.Mulmat(b)`, `a.SILU(ctx)` 等) 需要验证
+方法签名是否匹配 `ml/backend.go:130-241` 的 Tensor 接口。某些 op（如 ROPE、FLASH_ATTN_EXT）
+参数较多，`benchSingleOp` 的 switch 可能需要扩展。同时 `ctx.Compute(out)` 可能需要替换为
+`ctx.ComputeWithNotify(nil, out)` 以确保 GPU 同步。参考 `ggml.go:814`。
 
-The TODO stubs are intentional — the actual benchmarking loop needs careful CGo synchronization handling that should be filled in during implementation using the patterns from `ComputeWithNotify` (line 814 in `ggml.go`).
+`createFakeBatch` 函数需要实现。参考 `runner/ollamarunner/runner.go:1069-1168` 中
+`reserveWorstCaseGraph` 的 fake batch 构造方式。
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1902,10 +2503,8 @@ import (
 	"strings"
 
 	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/model"
 )
-
-// Ensure ml.GraphNode is used
-var _ ml.GraphNode
 
 // EstimateConfig controls estimation behavior.
 type EstimateConfig struct {
@@ -2160,68 +2759,125 @@ func RunEstimate(modelPath string, cfg EstimateConfig) (*EstimateResult, error) 
 		})
 	}
 
-	// 2. Load model (GGUF header only, no weights)
-	// Uses model.New() with appropriate BackendParams
-	//
-	// params := ml.BackendParams{AllocMemory: false}
-	// m, err := model.New(modelPath, params)
-	// if err != nil { return nil, fmt.Errorf("load model: %w", err) }
-	// defer m.Backend().Close()
-	//
+	// 2. Resolve and load model (GGUF header only, no weights)
+	ggufPath, err := ResolveModelPath(modelPath)
+	if err != nil {
+		return nil, err
+	}
+	m, err := model.New(ggufPath, ml.BackendParams{})
+	if err != nil {
+		return nil, fmt.Errorf("load model: %w", err)
+	}
+	defer m.Backend().Close()
+
 	// 3. Build prefill graphs
-	// maxBatch := cfg.MaxBatchSize
-	// nBatches := int(math.Ceil(float64(cfg.InputLength) / float64(maxBatch)))
-	// var allPrefillNodes []ml.GraphNode
-	// for i := 0; i < nBatches; i++ {
-	//     batchLen := min(maxBatch, cfg.InputLength - i*maxBatch)
-	//     kvLen := min((i+1)*maxBatch, cfg.InputLength)
-	//     ctx := m.Backend().NewContext()
-	//     fakeBatch := createFakeBatch(ctx, batchLen, kvLen)
-	//     output, _ := m.Forward(ctx, fakeBatch)
-	//     ctx.Forward(output)
-	//     ctx.Reserve()
-	//     allPrefillNodes = append(allPrefillNodes, ctx.GraphNodes()...)
-	//     ctx.Close()
-	// }
-	//
-	// prefill := ComputePhaseEstimation(profile, allPrefillNodes, cfg.InputLength, maxBatch)
-	// prefill.TTFTMs = prefill.TotalLatencyMs
-	// result.Prefill = *prefill
-	//
-	// 4. Build decode graphs (sample 3 KV positions)
-	// positions := []int{cfg.InputLength, cfg.InputLength + cfg.OutputLength/2,
-	//                     cfg.InputLength + cfg.OutputLength}
-	// var decodeLatencies []float64
-	// for _, pos := range positions {
-	//     ctx := m.Backend().NewContext()
-	//     fakeBatch := createFakeBatch(ctx, 1, pos)
-	//     output, _ := m.Forward(ctx, fakeBatch)
-	//     ctx.Forward(output)
-	//     ctx.Reserve()
-	//     latency, _, warnings := EstimateGraphLatency(profile, ctx.GraphNodes())
-	//     decodeLatencies = append(decodeLatencies, latency)
-	//     result.Warnings = append(result.Warnings, warnings...)
-	//     ctx.Close()
-	// }
-	// avgDecodePerToken := mean(decodeLatencies)
-	// result.Decode = PhaseEstimation{
-	//     TotalLatencyMs: avgDecodePerToken * 1000,
-	//     TokensPerSec:   1.0 / avgDecodePerToken,
-	//     Bottleneck:     determineBound(decodeLatencies),
-	// }
-	//
-	// 5. Build summary
-	// BuildSummary(result)
+	maxBatch := cfg.MaxBatchSize
+	nBatches := int(math.Ceil(float64(cfg.InputLength) / float64(maxBatch)))
+	var allPrefillNodes []ml.GraphNode
+	for i := 0; i < nBatches; i++ {
+		batchLen := min(maxBatch, cfg.InputLength-i*maxBatch)
+		kvLen := min((i+1)*maxBatch, cfg.InputLength)
+
+		ctx := m.Backend().NewContext()
+		batch := createFakeBatch(ctx, batchLen, kvLen)
+		output, err := m.Forward(ctx, batch)
+		if err != nil {
+			ctx.Close()
+			return nil, fmt.Errorf("forward (prefill batch %d): %w", i, err)
+		}
+		ctx.Forward(output)
+		ctx.Reserve()
+		allPrefillNodes = append(allPrefillNodes, ctx.GraphNodes()...)
+		ctx.Close()
+	}
+
+	prefill := ComputePhaseEstimation(profile, allPrefillNodes, cfg.InputLength, maxBatch)
+	prefill.TTFTMs = prefill.TotalLatencyMs
+	result.Prefill = *prefill
+
+	// 4. Build decode graphs (sample 3 KV positions for FA cost scaling)
+	positions := []int{
+		cfg.InputLength,
+		cfg.InputLength + cfg.OutputLength/2,
+		cfg.InputLength + cfg.OutputLength,
+	}
+	var decodeLatencies []float64
+	for _, pos := range positions {
+		ctx := m.Backend().NewContext()
+		batch := createFakeBatch(ctx, 1, pos)
+		output, err := m.Forward(ctx, batch)
+		if err != nil {
+			ctx.Close()
+			continue
+		}
+		ctx.Forward(output)
+		ctx.Reserve()
+		latency, _, warnings := EstimateGraphLatency(profile, ctx.GraphNodes())
+		decodeLatencies = append(decodeLatencies, latency)
+		result.Warnings = append(result.Warnings, warnings...)
+		ctx.Close()
+	}
+
+	if len(decodeLatencies) > 0 {
+		avgDecode := 0.0
+		for _, l := range decodeLatencies {
+			avgDecode += l
+		}
+		avgDecode /= float64(len(decodeLatencies))
+
+		decodePhase := ComputePhaseEstimation(profile, allPrefillNodes[:0], 1, 1)
+		decodePhase.TotalLatencyMs = avgDecode * 1000
+		decodePhase.TokensPerSec = 1.0 / avgDecode
+		decodePhase.TTFTMs = 0 // not applicable for decode
+		result.Decode = *decodePhase
+	}
+
+	// 5. Deduplicate warnings
+	result.Warnings = deduplicateStrings(result.Warnings)
+
+	// 6. Build summary
+	BuildSummary(result)
 
 	return result, nil
 }
+
+// createFakeBatch builds a fake input batch for graph construction.
+// Mirrors the approach in runner/ollamarunner/runner.go:reserveWorstCaseGraph.
+func createFakeBatch(ctx ml.Context, batchSize, kvCacheLen int) input.Batch {
+	tokens := make([]int32, batchSize)
+	positions := make([]int32, batchSize)
+	sequences := make([]int, batchSize)
+	for i := range tokens {
+		positions[i] = int32(kvCacheLen - batchSize + i)
+	}
+	return input.Batch{
+		Inputs:    ctx.Input().FromInts(tokens, len(tokens)),
+		Positions: positions,
+		Sequences: sequences,
+	}
+}
+
+func deduplicateStrings(ss []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	return result
+}
 ```
 
-**Note**: `RunEstimate` contains commented-out implementation that shows the exact integration pattern with `model.New()`, `Forward()`, `Reserve()`, and `GraphNodes()`. During implementation, uncomment and adapt these sections. The key integration points are:
-- `model.New(modelPath, params)` — loads GGUF header, creates tensor descriptors
-- `m.Forward(ctx, batch)` — builds computation graph
-- `ctx.Reserve()` — triggers split + optimize, captures graph nodes
-- `ctx.GraphNodes()` — returns captured nodes for estimation
+**实现注意**:
+- `createFakeBatch` 需要 `input` 包的 `Batch` 类型。添加 import: `"github.com/ollama/ollama/model/input"`
+- `input.Batch` 的字段可能与实际 API 不完全匹配。参考 `runner/ollamarunner/runner.go:1069-1168`
+  中 `reserveWorstCaseGraph` 的实际 batch 构造方式，特别是 `Outputs` 字段和 multimodal 处理。
+- KV cache 初始化: `model.New()` 返回的 model 需要 cache 初始化才能 Forward。
+  参考 `runner/ollamarunner/cache.go:34` 的 `NewInputCache()`，可能需要在 Forward 前调用。
+- 如果 `model.New()` 的 `BackendParams` 不支持 "header only" 模式，可能会尝试加载完整权重。
+  需要验证 `BackendParams{AllocMemory: false}` 或类似参数是否跳过权重加载。
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2417,6 +3073,9 @@ Register `daop-bench` and `daop-estimate` as Cobra subcommands. The handler func
 Add to the import block:
 
 ```go
+"encoding/json"
+
+"github.com/ollama/ollama/ml"
 "github.com/ollama/ollama/perf"
 ```
 
@@ -2442,10 +3101,13 @@ func daopBenchHandler(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Initialize backend for benchmarking
-	// TODO: initialize ml.Backend without loading a model
-	// This requires calling ml.NewBackend with a nil/empty model path
-	// or creating a standalone backend initialization path.
+	// Initialize backend without model (Task 5a: NewBackendForBench)
+	backend, err := ml.NewBackendForBench(ml.BackendParams{})
+	if err != nil {
+		return fmt.Errorf("backend initialization failed: %w", err)
+	}
+	defer backend.Close()
+
 	cfg := perf.DefaultBenchmarkConfig()
 	cfg.Backends = backends
 
@@ -2456,32 +3118,66 @@ func daopBenchHandler(cmd *cobra.Command, args []string) error {
 		}
 		var modelPaths []string
 		if modelName != "" {
-			// Resolve model name to GGUF path using Ollama's model resolution
-			// TODO: use server.GetModel or equivalent to resolve model ID to path
-			modelPaths = append(modelPaths, modelName)
+			resolved, err := perf.ResolveModelPath(modelName)
+			if err != nil {
+				return err
+			}
+			modelPaths = append(modelPaths, resolved)
 		} else {
-			// Scan all local models
-			// TODO: enumerate ~/.ollama/models/
+			// Scan all local models (~/.ollama/models/)
+			modelPaths, err = perf.ListLocalModels()
+			if err != nil {
+				return fmt.Errorf("cannot scan local models: %w", err)
+			}
+			if len(modelPaths) == 0 {
+				return fmt.Errorf("no local models found; specify --model or run 'ollama pull <model>' first")
+			}
 		}
-		_ = existing
-		_ = modelPaths
-		fmt.Println("Layer 2 graph-driven benchmark (--update) not yet implemented")
+		raw, err := perf.RunUpdateBenchmark(backend, existing, modelPaths, cfg)
+		if err != nil {
+			return err
+		}
+		rawPath := perf.RawDataPath()
+		if err := perf.WriteRawData(rawPath, raw); err != nil {
+			return err
+		}
+		updated := perf.MergeProfile(existing, mustProcessRaw(rawPath))
+		if err := perf.WriteProfile(perf.ProfilePath(), updated); err != nil {
+			return err
+		}
+		fmt.Printf("Profile updated: %s\n", perf.ProfilePath())
 		return nil
 	}
 
 	// Run full Layer 1 benchmark
 	fmt.Println("Running hardware characterization + operator calibration...")
 	fmt.Println("This may take 1-5 minutes.")
-	// TODO: raw, err := perf.RunFullBenchmark(backend, cfg)
-	// rawPath := perf.RawDataPath()
-	// perf.WriteRawData(rawPath, raw)
-	// profile, _ := perf.ProcessRawToProfile([]string{rawPath})
-	// perf.WriteProfile(perf.ProfilePath(), profile)
-	// fmt.Printf("Profile saved to %s\n", perf.ProfilePath())
-	// perf.PrintProfile(os.Stdout, profile, false)
-
-	fmt.Println("Full benchmark not yet implemented")
+	raw, err := perf.RunFullBenchmark(backend, cfg)
+	if err != nil {
+		return err
+	}
+	rawPath := perf.RawDataPath()
+	if err := perf.WriteRawData(rawPath, raw); err != nil {
+		return err
+	}
+	profile, err := perf.ProcessRawToProfile([]string{rawPath})
+	if err != nil {
+		return err
+	}
+	if err := perf.WriteProfile(perf.ProfilePath(), profile); err != nil {
+		return err
+	}
+	fmt.Printf("Profile saved to %s\n", perf.ProfilePath())
+	perf.PrintProfile(os.Stdout, profile, false)
 	return nil
+}
+
+func mustProcessRaw(rawPath string) *perf.Profile {
+	p, err := perf.ProcessRawToProfile([]string{rawPath})
+	if err != nil {
+		panic(err)
+	}
+	return p
 }
 ```
 
@@ -2489,9 +3185,6 @@ Add another function for the estimate handler:
 
 ```go
 func daopEstimateHandler(cmd *cobra.Command, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: ollama daop-estimate <model-id-or-gguf> [flags]")
-	}
 	modelRef := args[0]
 
 	inputLen, _ := cmd.Flags().GetInt("input-length")
@@ -2507,25 +3200,17 @@ func daopEstimateHandler(cmd *cobra.Command, args []string) error {
 	cfg.JSON = jsonOutput
 	cfg.Detail = detail
 
-	// Resolve model reference:
-	// If modelRef looks like a file path (contains / or \ or ends with .gguf), use directly.
-	// Otherwise, treat as Ollama model ID and resolve via existing model resolution logic.
-	//
-	// TODO: Implement model resolution:
-	//   modelPath, err := resolveModelPath(modelRef)
-	//   This should check ~/.ollama/models/ first, then download if needed.
-	//
-	// result, err := perf.RunEstimate(modelPath, cfg)
-	// if err != nil { return err }
-	//
-	// if jsonOutput {
-	//     enc := json.NewEncoder(os.Stdout)
-	//     enc.SetIndent("", "  ")
-	//     return enc.Encode(result)
-	// }
-	// perf.PrintEstimateResult(os.Stdout, result, detail)
+	result, err := perf.RunEstimate(modelRef, cfg)
+	if err != nil {
+		return err
+	}
 
-	fmt.Printf("Estimate for %s not yet fully implemented\n", modelRef)
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	perf.PrintEstimateResult(os.Stdout, result, detail)
 	return nil
 }
 ```
@@ -2815,56 +3500,65 @@ git commit -m "perf: add end-to-end integration tests for estimation pipeline"
 ## Task Dependency Graph
 
 ```
-Task 1 (types)
-  ├── Task 2 (ops)
-  ├── Task 3 (roofline) ── depends on Task 2
-  ├── Task 4 (profile)
-  └── Task 5 (GraphNodes CGo API) ── independent of perf/
-       │
-Task 6 (bench) ── depends on Tasks 1-4
-Task 7 (estimate) ── depends on Tasks 1-5
-Task 8 (viewer) ── depends on Tasks 1, 7
-Task 9 (CLI) ── depends on Tasks 6-8
-Task 10 (integration test) ── depends on all above
+Task 1  (types)          ── no deps
+Task 2  (ops)            ── depends on 1
+Task 3  (roofline)       ── depends on 1, 2
+Task 4  (profile)        ── depends on 1
+Task 5  (GraphNodes CGo) ── independent of perf/, can parallel with 2-4
+Task 5a (BackendForBench)── depends on 5 (same files)
+Task 6  (bench)          ── depends on 1-4, 5a
+Task 6a (model resolve)  ── depends on 1
+Task 7  (estimate)       ── depends on 1-5, 6a
+Task 8  (viewer)         ── depends on 1
+Task 9  (CLI)            ── depends on 6, 6a, 7, 8
+Task 10 (integration)    ── depends on all above
 ```
 
-**Recommended execution order**: Tasks 1→2→3→4 (sequential, fast), Task 5 (can parallel with 2-4), then 6→7→8→9→10.
+**Recommended execution order**:
+1. Tasks 1→2→3→4 (sequential, pure Go, fast)
+2. Tasks 5→5a (CGo, can parallel with 2-4)
+3. Task 6a (model resolution, fast)
+4. Tasks 6→7→8 (core modules)
+5. Task 9 (CLI wiring)
+6. Task 10 (integration test)
 
 ---
 
 ## Implementation Notes
 
 ### CGo Compilation
-Tasks 5 and beyond require CGo compilation with GGML headers. If developing without GPU:
-- Use `go build -tags cpu` for CPU-only builds
-- The `GraphNodes()` implementation in Task 5 uses CGo and needs the GGML C headers from `ggml/include/`
+Tasks 5, 5a 及之后需要 CGo + GGML 头文件。无 GPU 环境:
+- `go build -tags cpu` 可编译 CPU-only 版本
+- GGML C 头文件位于 `ml/backend/ggml/ggml/include/`
 
-### TODO Stubs in bench.go and estimate.go
-Tasks 6 and 7 contain TODO stubs for the actual hardware benchmarking loop and model loading integration. These are intentional — they outline the exact integration pattern but the actual implementation requires:
-1. Standalone backend initialization (without a model) for `daop-bench`
-2. `model.New()` with `AllocMemory: false` for `daop-estimate`
-3. Proper GPU synchronization in the benchmark timing loop
+### Tensor API 方法签名验证
+bench.go 的 `benchSingleOp` 和 estimate.go 的 `createFakeBatch` 使用了 `ml.Tensor` 和
+`input.Batch` 接口。实现时需要验证:
+1. `a.Mulmat(b)` — 检查是否需要 Context 参数: `a.Mulmat(ctx, b)` vs `a.Mulmat(b)`
+2. `a.Contiguous(ctx)` — 检查是否存在，可能是 `a.Copy(ctx)` 或 `a.Cont(ctx)`
+3. `a.RoPE(...)` — 参数列表可能与简化版不同，参考 `ml/backend.go` Tensor 接口
+4. `input.Batch` 字段 — 参考 `runner/ollamarunner/runner.go:1069` 中的实际构造
+5. `ctx.Compute(out)` — 可能需要 `ctx.ComputeWithNotify(nil, out)` 以确保 GPU 同步
 
-These stubs should be filled in during implementation, using the commented code as a guide.
+### KV Cache 初始化
+`model.Forward()` 可能要求 KV cache 已初始化。estimate 模块在调 Forward 前可能需要:
+```go
+cache := model.Config().Cache
+if cache != nil {
+    cache.Init(m.Backend(), ml.DTypeF16, 1, kvCacheLen, batchSize)
+}
+```
+参考 `runner/ollamarunner/cache.go:34` 的 `NewInputCache()`。
 
-### Model ID Resolution for `daop-estimate`
-The estimate command needs to resolve a model ID (e.g. `qwen3:8b-q4_0`) to a local GGUF file path. This should reuse Ollama's existing model resolution logic from `server/` package:
-1. Check `~/.ollama/models/` for a matching manifest
-2. If found, locate the GGUF blob via the manifest's layer references
-3. If not found, trigger the same download flow as `ollama run` (pulls full GGUF)
-4. Pass the resolved GGUF path to `model.New()` with `AllocMemory: false`
+### Edge Cases
+以下 guard clause 应在 `RunEstimate()` 入口和 CLI handler 中实现:
+- **No profile**: `LoadProfile` 失败 → 返回 "请先运行 `ollama daop-bench`"（已实现）
+- **Unsupported arch**: `model.New()` 返回 `ErrUnsupportedModel` → 返回 "架构 X 暂不支持"
+- **Missing ops**: 未校准 op 用 η=1.0 + warning（已在 `EstimateGraphLatency` 中实现）
+- **Multi-GPU split**: 由 `GraphNodes()` 的 backend 字段处理（已在 Task 5 中实现）
+- **High η variance**: 在 viewer 输出中标记 `EtaVariance / Eta > 0.1` 的 op
 
-The exact integration point depends on whether model resolution APIs are exported from the `server` package. During implementation, check `server/model.go` and `server/download.go` for reusable functions.
-
-### Edge Cases (Spec Section 9)
-Edge case handling should be added to `RunEstimate()` in estimate.go and CLI handlers in cmd.go:
-- **No profile exists**: Return clear error "请先运行 `ollama daop-bench`"
-- **Unsupported architecture**: Check `model.modelForArch()` result, return "架构 X 暂不支持"
-- **Missing ops in profile**: Already handled — uncalibrated ops use η=1.0 + warning
-- **Missing quant type**: Fall back to nearest matching quant type (e.g. q4_K → q4_0)
-- **Multi-GPU split**: Handled by GraphNodes() backend assignment from Reserve()
-- **High η variance**: Flag in warnings when `EtaVariance / Eta > 0.1`
-These are guard clauses — add them at the top of `RunEstimate()` and in the CLI handler error paths.
-
-### Key API Assumption
-The plan assumes `ggml_backend_sched_get_tensor_backend()` is a public C API available in the vendored llama.cpp. If not available, use the `ggml_backend_sched_get_node_backend_id()` alternative or access internal fields via unsafe pointer. Verify during Task 5 implementation by checking `ggml/include/ggml-backend.h`.
+### ListLocalModels 辅助函数
+Task 9 CLI 的 `--update` 不指定 model 时需扫描所有本地模型。需要在 `perf/resolve.go` 中
+添加 `ListLocalModels()` 函数，遍历 `~/.ollama/models/manifests/` 目录结构，
+对每个 manifest 解析出 GGUF blob 路径。
