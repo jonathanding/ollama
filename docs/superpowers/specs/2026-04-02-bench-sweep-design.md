@@ -295,9 +295,25 @@ After computing statistics for each size, if `cv_pct > cv_threshold` for **eithe
 
 ---
 
+## Runner Path Selection
+
+bench-sweep sends requests through the standard Ollama HTTP API and is agnostic to which runner path is used. The runner is selected by `ollama serve` based on the model and environment, not by bench-sweep.
+
+To benchmark a specific runner, set the environment variable before starting `ollama serve`:
+
+| Env var | Effect |
+|---|---|
+| (unset, default) | LlamaRunner — vendored llama.cpp via CGO |
+| `OLLAMA_NEW_ENGINE=1` | OllamaRunner — Go-native engine; falls back to LlamaRunner automatically if the model is not yet supported (logged as `model not yet supported by Ollama engine, switching to compatibility mode`) |
+
+Qwen3-coder-next is a GGUF model and uses LlamaRunner by default. Whether OllamaRunner supports it depends on the model architecture implementation in `model/models/`.
+
+bench-sweep records `hardware.vram_used_bytes` from `/api/ps` after warmup, which will reflect whichever runner is loaded. Two runs using different runners can be diff'd normally — the runner in use is not captured in the history file, so annotate the run name accordingly (e.g., `baseline-llama` vs `baseline-ollama-engine`).
+
+---
+
 ## Non-Goals
 
 - Concurrent request benchmarking (single-user latency focus, not throughput)
 - Integration with `trace-analyzer` (future work)
-- Benchmarking the OllamaRunner path (targets LlamaRunner / llama.cpp only)
 - Accuracy or quality evaluation
