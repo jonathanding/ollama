@@ -759,6 +759,9 @@ type Context struct {
 
 	// layer is the graph layer that this context is allocating for - assumed to be cache
 	layer int
+
+	// graphNodes stores node info captured during Reserve for performance estimation
+	graphNodes []ml.GraphNode
 }
 
 func (c *Context) Input() ml.Context {
@@ -849,6 +852,9 @@ func (c *Context) Reserve() {
 
 	reserved := C.ggml_backend_sched_reserve(c.b.sched, c.graph)
 
+	// Capture graph nodes for performance estimation (before reset clears backend assignments)
+	c.captureGraphNodes()
+
 	slog.Debug("compute graph", "nodes", C.ggml_graph_n_nodes(c.graph), "splits", C.ggml_backend_sched_get_n_splits(c.b.sched))
 
 	// Reserve may get called multiple times for different graphs - we just want the last run, which will contain the max allocations
@@ -866,6 +872,66 @@ func (c *Context) Reserve() {
 
 	if !reserved {
 		panic(ml.ErrNoMem{BackendMemory: *c.b.requiredMemory})
+	}
+}
+
+func (c *Context) GraphNodes() []ml.GraphNode {
+	return c.graphNodes
+}
+
+func (c *Context) captureGraphNodes() {
+	nNodes := int(C.ggml_graph_n_nodes(c.graph))
+	c.graphNodes = make([]ml.GraphNode, 0, nNodes)
+
+	for i := 0; i < nNodes; i++ {
+		node := C.ggml_graph_node(c.graph, C.int(i))
+
+		opName := C.GoString(C.ggml_op_name(node.op))
+		tensorName := C.GoString(C.ggml_get_name(node))
+		typeName := C.GoString(C.ggml_type_name(node._type))
+
+		shape := [4]int64{
+			int64(node.ne[0]), int64(node.ne[1]),
+			int64(node.ne[2]), int64(node.ne[3]),
+		}
+
+		// Determine backend via ggml_backend_sched_get_tensor_backend (ggml-backend.h:337)
+		backendName := "unknown"
+		backendPtr := C.ggml_backend_sched_get_tensor_backend(c.b.sched, node)
+		if backendPtr != nil {
+			backendName = C.GoString(C.ggml_backend_name(backendPtr))
+		}
+
+		// Collect input shapes
+		var inputShapes [][]int64
+		for j := 0; j < C.GGML_MAX_SRC; j++ {
+			src := node.src[j]
+			if src == nil {
+				break
+			}
+			inputShapes = append(inputShapes, []int64{
+				int64(src.ne[0]), int64(src.ne[1]),
+				int64(src.ne[2]), int64(src.ne[3]),
+			})
+		}
+
+		// Determine weight dtype (for MUL_MAT, src[0] is weight)
+		weightDtype := ""
+		if opName == "MUL_MAT" || opName == "MUL_MAT_ID" {
+			if node.src[0] != nil {
+				weightDtype = C.GoString(C.ggml_type_name(node.src[0]._type))
+			}
+		}
+
+		c.graphNodes = append(c.graphNodes, ml.GraphNode{
+			Op:           opName,
+			Name:         tensorName,
+			Backend:      backendName,
+			Shape:        shape,
+			ComputeDtype: typeName,
+			WeightDtype:  weightDtype,
+			InputShapes:  inputShapes,
+		})
 	}
 }
 

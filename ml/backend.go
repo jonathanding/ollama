@@ -91,6 +91,18 @@ func NewBackend(modelPath string, params BackendParams) (Backend, error) {
 	return nil, fmt.Errorf("unsupported backend")
 }
 
+// GraphNode represents a single node in a GGML computation graph.
+// Used by the performance estimation system to traverse fused graphs.
+type GraphNode struct {
+	Op           string    // GGML op name: "MUL_MAT", "RMS_NORM", etc.
+	Name         string    // Tensor name: "blk.0.attn_q", etc.
+	Backend      string    // Assigned backend: "cuda", "cpu", etc.
+	Shape        [4]int64  // Output tensor shape (ne[0..3])
+	ComputeDtype string    // Compute data type: "f32", "f16", etc.
+	WeightDtype  string    // Weight data type (for MUL_MAT): "q4_0", etc.
+	InputShapes  [][]int64 // Shapes of input tensors (src[0..])
+}
+
 type Context interface {
 	Empty(dtype DType, shape ...int) Tensor
 	Zeros(dtype DType, shape ...int) Tensor
@@ -115,6 +127,7 @@ type Context interface {
 	// worst case graph to ensure all resources are available for
 	// for future inference.
 	Reserve()
+	GraphNodes() []GraphNode // Returns graph nodes captured during Reserve
 
 	MaxGraphNodes() int
 	Close()
