@@ -159,7 +159,7 @@ func TestPrintRunTable_ContainsExpectedColumns(t *testing.T) {
 		},
 	}
 	var sb strings.Builder
-	printRunTable(&sb, "test-model", results, RunConfig{Epochs: 6, Warmup: 2})
+	printRunTable(&sb, "test-model", results, RunConfig{Epochs: 6, Warmup: 2}, true)
 	out := sb.String()
 	for _, want := range []string{"512", "4850", "28", "37", "1.8", "2.3", "✓"} {
 		if !strings.Contains(out, want) {
@@ -181,7 +181,7 @@ func TestPrintRunTable_UnstableFlag(t *testing.T) {
 		},
 	}
 	var sb strings.Builder
-	printRunTable(&sb, "test-model", results, RunConfig{Epochs: 6, Warmup: 2})
+	printRunTable(&sb, "test-model", results, RunConfig{Epochs: 6, Warmup: 2}, true)
 	out := sb.String()
 	if !strings.Contains(out, "⚠") {
 		t.Errorf("expected ⚠ for unstable result, got:\n%s", out)
@@ -206,6 +206,9 @@ func TestFetchVRAM_ReturnsValues(t *testing.T) {
 	hw := fetchVRAM(context.Background(), client, "qwen3")
 	if hw.VRAMUsedBytes != 22e9 {
 		t.Errorf("VRAMUsedBytes: got %d, want 22e9", hw.VRAMUsedBytes)
+	}
+	if hw.VRAMTotalBytes != 0 {
+		t.Errorf("VRAMTotalBytes should be 0 (m.Size is model weight size, not GPU capacity), got %d", hw.VRAMTotalBytes)
 	}
 }
 

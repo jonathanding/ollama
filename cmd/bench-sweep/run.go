@@ -31,11 +31,11 @@ func sendRequest(ctx context.Context, client *api.Client, model, prompt string, 
 	start := time.Now()
 
 	err := client.Generate(ctx, req, func(resp api.GenerateResponse) error {
-		ttftOnce.Do(func() {
-			if resp.Response != "" || resp.Thinking != "" {
+		if resp.Response != "" || resp.Thinking != "" {
+			ttftOnce.Do(func() {
 				result.TTFTMs = float64(time.Since(start).Nanoseconds()) / 1e6
-			}
-		})
+			})
+		}
 		if resp.Done {
 			m := resp.Metrics
 			result.PromptEvalCount = m.PromptEvalCount
@@ -66,7 +66,8 @@ func fetchVRAM(ctx context.Context, client *api.Client, model string) Hardware {
 	for _, m := range resp.Models {
 		if strings.HasPrefix(m.Name, model) || strings.HasPrefix(m.Model, model) {
 			hw.VRAMUsedBytes = m.SizeVRAM
-			hw.VRAMTotalBytes = m.Size
+			// VRAMTotalBytes intentionally not set — api.ProcessModelResponse.Size is
+			// model weight size, not device VRAM capacity. No API field exposes GPU total VRAM.
 			return hw
 		}
 	}
@@ -79,14 +80,15 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 	hwFetched := false
 
 	var allResults []SizeResult
-	for _, size := range cfg.Sizes {
+	firstRow := true
+	for sizeIdx, size := range cfg.Sizes {
 		chars := initialChars(size)
 
 		// Warmup phase: calibrate on first request, track tps for adequacy check
 		var warmupTPS []float64
 		for i := 0; i < cfg.Warmup; i++ {
 			wCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			result, err := sendRequest(wCtx, client, model, promptText(chars, cfg.Epochs+i+1), cfg.MaxTokens)
+			result, err := sendRequest(wCtx, client, model, promptText(chars, (sizeIdx+1)*1000+i), cfg.MaxTokens)
 			cancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: warmup %d/%d for size=%d failed: %v\n", i+1, cfg.Warmup, size, err)
@@ -121,7 +123,7 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 		var epochResults []EpochResult
 		for epoch := 0; epoch < cfg.Epochs; epoch++ {
 			eCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			result, err := sendRequest(eCtx, client, model, promptText(chars, epoch), cfg.MaxTokens)
+			result, err := sendRequest(eCtx, client, model, promptText(chars, sizeIdx*10000+epoch), cfg.MaxTokens)
 			cancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: epoch %d/%d for size=%d failed: %v\n", epoch+1, cfg.Epochs, size, err)
@@ -157,7 +159,8 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 		})
 
 		// Print row immediately so the user sees progress
-		printRunTable(os.Stdout, model, allResults[len(allResults)-1:], cfg)
+		printRunTable(os.Stdout, model, allResults[len(allResults)-1:], cfg, firstRow)
+		firstRow = false
 
 		// Warn if unstable
 		if !stable {
@@ -174,12 +177,12 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 }
 
 // printRunTable writes a formatted result row. Pass a single-element slice to
-// print one row at a time; the header is printed automatically on the first row.
-func printRunTable(w io.Writer, model string, results []SizeResult, cfg RunConfig) {
+// print one row at a time; pass first=true to print the header above the first row.
+func printRunTable(w io.Writer, model string, results []SizeResult, cfg RunConfig, first bool) {
 	if len(results) == 0 {
 		return
 	}
-	if len(results) == 1 {
+	if first {
 		fmt.Fprintf(w, "\nModel: %s  |  Epochs: %d  |  Warmup: %d\n\n", model, cfg.Epochs, cfg.Warmup)
 		fmt.Fprintf(w, "%-13s │ %-18s │ %-18s │ %6s │ %-10s │ %-10s │ %6s │ %-8s │ %s\n",
 			"prompt_tokens",
