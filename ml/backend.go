@@ -74,6 +74,7 @@ type BackendParams struct {
 }
 
 var backends = make(map[string]func(string, BackendParams) (Backend, error))
+var benchBackends = make(map[string]func(BackendParams) (Backend, error))
 
 func RegisterBackend(name string, f func(string, BackendParams) (Backend, error)) {
 	if _, ok := backends[name]; ok {
@@ -83,9 +84,23 @@ func RegisterBackend(name string, f func(string, BackendParams) (Backend, error)
 	backends[name] = f
 }
 
+func RegisterBenchBackend(name string, f func(BackendParams) (Backend, error)) {
+	benchBackends[name] = f
+}
+
 func NewBackend(modelPath string, params BackendParams) (Backend, error) {
 	if backend, ok := backends["ggml"]; ok {
 		return backend(modelPath, params)
+	}
+
+	return nil, fmt.Errorf("unsupported backend")
+}
+
+// NewBackendForBench initializes a backend for benchmarking without requiring a model.
+// It discovers available devices and creates a scheduler, but loads no model tensors.
+func NewBackendForBench(params BackendParams) (Backend, error) {
+	if f, ok := benchBackends["ggml"]; ok {
+		return f(params)
 	}
 
 	return nil, fmt.Errorf("unsupported backend")

@@ -450,6 +450,62 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 
 func init() {
 	ml.RegisterBackend("ggml", New)
+	ml.RegisterBenchBackend("ggml", NewForBench)
+}
+
+// NewForBench creates a Backend with device discovery and scheduler but no model.
+// Used by daop-bench to run standalone operator benchmarks without a GGUF file.
+func NewForBench(params ml.BackendParams) (ml.Backend, error) {
+	initDevices()
+
+	// Collect all available backends and buffer types
+	var schedBackends []C.ggml_backend_t
+	var schedBufts []C.ggml_backend_buffer_type_t
+
+	// GPU/accel backends first, then CPU
+	for _, d := range append(gpus, append(accels, cpus...)...) {
+		b := backends[d]
+		bt := C.ggml_backend_get_default_buffer_type(b)
+		schedBackends = append(schedBackends, b)
+		schedBufts = append(schedBufts, bt)
+
+		if C.ggml_backend_is_cpu(b) {
+			C.ggml_backend_cpu_set_n_threads(b, C.int(Threads(params.NumThreads)))
+		}
+	}
+
+	if len(schedBackends) == 0 {
+		return nil, fmt.Errorf("no compute devices found")
+	}
+
+	maxGraphNodes := 8192
+
+	sched := C.ggml_backend_sched_new_ext(
+		(*C.ggml_backend_t)(unsafe.Pointer(&schedBackends[0])),
+		(*C.ggml_backend_buffer_type_t)(unsafe.Pointer(&schedBufts[0])),
+		C.int(len(schedBackends)),
+		C.size_t(maxGraphNodes),
+		C._Bool(false),
+		C._Bool(true),
+		C._Bool(true), // allocate memory
+	)
+
+	requiredMemory := ml.BackendMemory{}
+	btDeviceMemory := make(map[C.ggml_backend_buffer_type_t]*ml.DeviceMemory)
+	for _, bt := range schedBufts {
+		btDeviceMemory[bt] = &ml.DeviceMemory{}
+	}
+
+	return &Backend{
+		sched:          sched,
+		schedBackends:  schedBackends,
+		schedBufts:     schedBufts,
+		maxGraphNodes:  maxGraphNodes,
+		requiredMemory: &requiredMemory,
+		btDeviceMemory: btDeviceMemory,
+		tensors:        make(map[string]*C.struct_ggml_tensor),
+		weightBuffers:  make(map[*C.struct_ggml_context]C.ggml_backend_buffer_t),
+	}, nil
 }
 
 func (b *Backend) Close() {
