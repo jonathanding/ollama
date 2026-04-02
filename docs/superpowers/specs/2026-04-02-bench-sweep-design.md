@@ -292,6 +292,7 @@ After computing statistics for each size, if `cv_pct > cv_threshold` for **eithe
 | `cmd/bench-sweep/stats.go` | Statistics: mean, median, p99, stddev, CV% |
 | `cmd/bench-sweep/history.go` | JSON read/write, run-name conflict resolution (_1, _2 suffix) |
 | `cmd/bench-sweep/corpus.txt` | Embedded ~50 KB public-domain English text |
+| `cmd/bench-sweep/README.md` | User-facing documentation: build from source, usage, flags, output format, design rationale |
 
 ---
 
