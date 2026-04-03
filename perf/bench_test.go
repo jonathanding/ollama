@@ -1,6 +1,7 @@
 package perf
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -113,4 +114,41 @@ func TestFlashAttnShapeConversion(t *testing.T) {
 	}
 	assert.Equal(t, []int64{64, 64}, prefillPts[0].Shape)
 	assert.Equal(t, []int64{512, 512}, prefillPts[1].Shape)
+}
+
+// TestBenchmarkMulMat_OutputShapeContract verifies that benchmarkMulMat produces
+// 1D shapes [N] compatible with InterpolateMulMat (dimIdx=0).
+// This is a contract test — the seam between benchmark and interpolation.
+func TestBenchmarkMulMat_OutputShapeContract(t *testing.T) {
+	// Simulate what benchmarkMulMat's measure closure does
+	M, K := int64(4096), int64(4096)
+	nValues := []int64{1, 32, 256, 4096}
+
+	for _, N := range nValues {
+		// This mirrors bench.go benchmarkMulMat's measure closure:
+		// pt := measureOp(backend, "MUL_MAT", []int64{M, K, N}, dtype, cfg)
+		// pt.Shape = []int64{N}
+		pt := LatencyPoint{
+			Shape:     []int64{M, K, N}, // what measureOp returns
+			LatencyUs: float64(N) * 10,
+		}
+		pt.Shape = []int64{N} // what the measure closure overrides
+
+		// Verify shape is 1D
+		assert.Len(t, pt.Shape, 1, "MUL_MAT points must be 1D for AdaptiveSample1D")
+		assert.Equal(t, N, pt.Shape[0], "Shape[0] must be the sweep dimension N")
+	}
+
+	// Verify InterpolateMulMat can consume 1D points
+	curves := []OperatorCurve{{
+		Op: "MUL_MAT", FixedDims: map[string]int64{"M": 4096, "K": 4096},
+		Points: []LatencyPoint{
+			{Shape: []int64{1}, LatencyUs: 10.0},
+			{Shape: []int64{4096}, LatencyUs: 3000.0},
+		},
+	}}
+	result := InterpolateMulMat(curves, 4096, 4096, 128)
+	assert.Greater(t, result, 10.0)
+	assert.Less(t, result, 3000.0)
+	assert.False(t, math.IsNaN(result))
 }

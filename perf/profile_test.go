@@ -113,6 +113,26 @@ func TestLoadProfile_InvalidJSON(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestLoadProfile_V1Rejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v1.json")
+	v1 := `{"version": 1, "timestamp": "2024-01-01T00:00:00Z"}`
+	require.NoError(t, writeFile(path, []byte(v1)))
+	_, err := LoadProfile(path)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported profile version")
+}
+
+func TestLoadProfile_V0Rejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v0.json")
+	v0 := `{"timestamp": "2024-01-01T00:00:00Z"}`
+	require.NoError(t, writeFile(path, []byte(v0)))
+	_, err := LoadProfile(path)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported profile version")
+}
+
 func TestMergeProfile(t *testing.T) {
 	existing := newTestProfile()
 	update := &Profile{

@@ -169,3 +169,31 @@ func TestInsertSorted(t *testing.T) {
 	assert.Equal(t, int64(1000), result[2].Shape[0])
 	assert.Equal(t, int64(10000), result[3].Shape[0])
 }
+
+func TestAdaptiveSample1D_ZeroLatency(t *testing.T) {
+	// If measure returns zero latency, adaptive sampling should not panic or produce NaN
+	measure := func(shape []int64) LatencyPoint {
+		return LatencyPoint{Shape: shape, LatencyUs: 0.0}
+	}
+	cfg := BenchmarkConfig{ErrorThreshold: 0.05, MaxPointsPerOp: 10}
+	points := AdaptiveSample1D(measure, 100, 10000, 4, cfg)
+	assert.GreaterOrEqual(t, len(points), 4)
+	for _, pt := range points {
+		assert.False(t, math.IsNaN(pt.LatencyUs))
+		assert.False(t, math.IsInf(pt.LatencyUs, 0))
+	}
+}
+
+func TestFindMaxInterpolationError_ZeroLatency(t *testing.T) {
+	// Points with zero latency should not cause NaN/Inf
+	pts := []LatencyPoint{
+		{Shape: []int64{100}, LatencyUs: 0.0},
+		{Shape: []int64{1000}, LatencyUs: 0.0},
+	}
+	measure := func(shape []int64) LatencyPoint {
+		return LatencyPoint{Shape: shape, LatencyUs: 0.0}
+	}
+	maxErr, _ := findMaxInterpolationError(pts, measure)
+	assert.False(t, math.IsNaN(maxErr))
+	assert.False(t, math.IsInf(maxErr, 0))
+}

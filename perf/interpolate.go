@@ -21,23 +21,37 @@ func Interpolate1D(points []LatencyPoint, queryN int64) float64 {
 
 	logQ := math.Log(float64(queryN))
 
+	// Filter out points with non-positive latency (can't take log)
+	valid := make([]LatencyPoint, 0, len(points))
+	for _, p := range points {
+		if p.LatencyUs > 0 && p.Shape[0] > 0 {
+			valid = append(valid, p)
+		}
+	}
+	if len(valid) == 0 {
+		return 0
+	}
+	if len(valid) == 1 {
+		return valid[0].LatencyUs
+	}
+
 	// Search for the interval containing queryN
-	for i := 0; i < len(points)-1; i++ {
-		logX1 := math.Log(float64(points[i].Shape[0]))
-		logX2 := math.Log(float64(points[i+1].Shape[0]))
+	for i := 0; i < len(valid)-1; i++ {
+		logX1 := math.Log(float64(valid[i].Shape[0]))
+		logX2 := math.Log(float64(valid[i+1].Shape[0]))
 		if logQ >= logX1 && logQ <= logX2 {
-			logY1 := math.Log(points[i].LatencyUs)
-			logY2 := math.Log(points[i+1].LatencyUs)
+			logY1 := math.Log(valid[i].LatencyUs)
+			logY2 := math.Log(valid[i+1].LatencyUs)
 			t := (logQ - logX1) / (logX2 - logX1)
 			return math.Exp(logY1 + t*(logY2-logY1))
 		}
 	}
 
 	// Extrapolate left or right
-	if logQ < math.Log(float64(points[0].Shape[0])) {
-		return extrapolateLeft(points, logQ)
+	if logQ < math.Log(float64(valid[0].Shape[0])) {
+		return extrapolateLeft(valid, logQ)
 	}
-	return extrapolateRight(points, logQ)
+	return extrapolateRight(valid, logQ)
 }
 
 func extrapolateLeft(points []LatencyPoint, logQ float64) float64 {
@@ -78,32 +92,44 @@ func Interpolate1DByDim(points []LatencyPoint, dimIdx int, queryVal int64) float
 		return points[0].LatencyUs
 	}
 
+	// Filter out points with non-positive latency or shape (can't take log)
+	valid := make([]LatencyPoint, 0, len(points))
+	for _, p := range points {
+		if p.LatencyUs > 0 && len(p.Shape) > dimIdx && p.Shape[dimIdx] > 0 {
+			valid = append(valid, p)
+		}
+	}
+	if len(valid) == 0 {
+		return 0
+	}
+	if len(valid) == 1 {
+		return valid[0].LatencyUs
+	}
+
 	// Sort by the specified dimension
-	sorted := make([]LatencyPoint, len(points))
-	copy(sorted, points)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Shape[dimIdx] < sorted[j].Shape[dimIdx]
+	sort.Slice(valid, func(i, j int) bool {
+		return valid[i].Shape[dimIdx] < valid[j].Shape[dimIdx]
 	})
 
 	logQ := math.Log(float64(queryVal))
 
 	// Search for the interval containing queryVal
-	for i := 0; i < len(sorted)-1; i++ {
-		logX1 := math.Log(float64(sorted[i].Shape[dimIdx]))
-		logX2 := math.Log(float64(sorted[i+1].Shape[dimIdx]))
+	for i := 0; i < len(valid)-1; i++ {
+		logX1 := math.Log(float64(valid[i].Shape[dimIdx]))
+		logX2 := math.Log(float64(valid[i+1].Shape[dimIdx]))
 		if logQ >= logX1 && logQ <= logX2 {
-			logY1 := math.Log(sorted[i].LatencyUs)
-			logY2 := math.Log(sorted[i+1].LatencyUs)
+			logY1 := math.Log(valid[i].LatencyUs)
+			logY2 := math.Log(valid[i+1].LatencyUs)
 			t := (logQ - logX1) / (logX2 - logX1)
 			return math.Exp(logY1 + t*(logY2-logY1))
 		}
 	}
 
 	// Extrapolate left or right
-	if logQ < math.Log(float64(sorted[0].Shape[dimIdx])) {
-		return extrapolateLeftByDim(sorted, dimIdx, logQ)
+	if logQ < math.Log(float64(valid[0].Shape[dimIdx])) {
+		return extrapolateLeftByDim(valid, dimIdx, logQ)
 	}
-	return extrapolateRightByDim(sorted, dimIdx, logQ)
+	return extrapolateRightByDim(valid, dimIdx, logQ)
 }
 
 func extrapolateLeftByDim(points []LatencyPoint, dimIdx int, logQ float64) float64 {
@@ -186,6 +212,17 @@ func InterpolateFlashAttn(curve *OperatorCurve, querySeqQ, querySeqKV int64) flo
 		} else if pt.Shape[0] == pt.Shape[1] {
 			prefillPts = append(prefillPts, pt)
 		}
+	}
+
+	// Guard against empty regimes — fall back to whichever has data
+	if len(decodePts) == 0 && len(prefillPts) == 0 {
+		return 0
+	}
+	if len(decodePts) == 0 {
+		return Interpolate1DByDim(prefillPts, 1, querySeqKV)
+	}
+	if len(prefillPts) == 0 {
+		return Interpolate1DByDim(decodePts, 1, querySeqKV)
 	}
 
 	// Pure decode regime

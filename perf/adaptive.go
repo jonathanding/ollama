@@ -63,6 +63,11 @@ func findMaxInterpolationError(points []LatencyPoint, measure MeasureFunc) (floa
 	maxIdx := 0
 
 	for i := 0; i < len(points)-1; i++ {
+		// Skip intervals with zero or negative latency (can't take log)
+		if points[i].LatencyUs <= 0 || points[i+1].LatencyUs <= 0 {
+			continue
+		}
+
 		logX1 := math.Log(float64(points[i].Shape[0]))
 		logX2 := math.Log(float64(points[i+1].Shape[0]))
 		logY1 := math.Log(points[i].LatencyUs)
@@ -75,6 +80,9 @@ func findMaxInterpolationError(points []LatencyPoint, measure MeasureFunc) (floa
 		// Actual measurement at midpoint
 		midN := int64(math.Round(math.Exp(logMid)))
 		actual := measure([]int64{midN})
+		if actual.LatencyUs <= 0 {
+			continue
+		}
 		actualLogY := math.Log(actual.LatencyUs)
 
 		// Relative error in log space

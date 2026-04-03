@@ -342,3 +342,46 @@ func TestEstimatePhase_LlamaLikeDecodeLayer(t *testing.T) {
 	assert.Greater(t, result.TopOps[0].Percentage, 0.5,
 		"MUL_MAT should be >50%% of decode latency")
 }
+
+func TestLookupLatency_MulMat_InsufficientShape(t *testing.T) {
+	p := makeTestProfileForEstimation()
+	_, err := lookupLatency(p, "MUL_MAT", []int64{4096, 4096}, "f16", "q4_0", "cuda")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "requires 3 shape dims")
+}
+
+func TestLookupLatency_FlashAttn_InsufficientShape(t *testing.T) {
+	p := makeTestProfileForEstimation()
+	_, err := lookupLatency(p, "FLASH_ATTN_EXT", []int64{1}, "f16", "", "cuda")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "requires 2 shape dims")
+}
+
+func TestEstimatePhase_AllNodesUncalibrated(t *testing.T) {
+	p := makeTestProfileForEstimation()
+	nodes := []ml.GraphNode{
+		{Op: "GELU", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
+		{Op: "TANH", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
+		{Op: "RELU", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
+	}
+	var warnings []string
+	result := estimatePhase(p, nodes, &warnings)
+	assert.Len(t, warnings, 3, "should warn for each uncalibrated op")
+	assert.InDelta(t, 0.0, result.TotalLatencyMs, 0.001)
+	assert.Empty(t, result.TopOps)
+}
+
+func TestEstimatePhase_PartialUncalibrated(t *testing.T) {
+	p := makeTestProfileForEstimation()
+	nodes := []ml.GraphNode{
+		{Op: "SILU", Backend: "cuda", Shape: [4]int64{65536, 1, 1, 1}, ComputeDtype: "f32"},
+		{Op: "GELU", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
+	}
+	var warnings []string
+	result := estimatePhase(p, nodes, &warnings)
+	assert.Len(t, warnings, 1, "only GELU should warn")
+	assert.Contains(t, warnings[0], "GELU")
+	assert.Greater(t, result.TotalLatencyMs, 0.0)
+	require.Len(t, result.TopOps, 1)
+	assert.Equal(t, "SILU", result.TopOps[0].Op)
+}

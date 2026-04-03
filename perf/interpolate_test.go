@@ -177,6 +177,38 @@ func TestInterpolate1D_NonPowerLaw(t *testing.T) {
 	assert.Less(t, result, 450.0)
 }
 
+func TestInterpolate1D_EmptyPoints(t *testing.T) {
+	result := Interpolate1D(nil, 100)
+	assert.Equal(t, 0.0, result)
+}
+
+func TestInterpolate1D_ZeroLatencyPoints(t *testing.T) {
+	pts := []LatencyPoint{
+		{Shape: []int64{100}, LatencyUs: 0.0},
+		{Shape: []int64{1000}, LatencyUs: 5.0},
+	}
+	result := Interpolate1D(pts, 500)
+	// Zero-latency point is filtered; only the valid point remains → returns it
+	assert.False(t, math.IsNaN(result))
+	assert.False(t, math.IsInf(result, 0))
+	assert.Greater(t, result, 0.0)
+}
+
+func TestInterpolate1D_AllZeroLatency(t *testing.T) {
+	pts := []LatencyPoint{
+		{Shape: []int64{100}, LatencyUs: 0.0},
+		{Shape: []int64{1000}, LatencyUs: 0.0},
+	}
+	result := Interpolate1D(pts, 500)
+	assert.Equal(t, 0.0, result)
+}
+
+func TestInterpolate1D_QueryZero(t *testing.T) {
+	pts := makePoints([][2]float64{{10, 100}, {100, 1000}})
+	result := Interpolate1D(pts, 0)
+	assert.Equal(t, 100.0, result) // returns first point's latency
+}
+
 // --- Part 4b: Interpolate1DByDim tests ---
 
 func TestInterpolate1DByDim_DimIdx0_MatchesInterpolate1D(t *testing.T) {
@@ -419,6 +451,48 @@ func TestInterpolateFlashAttn_PrefillHighSeqQ(t *testing.T) {
 	prefillBase := InterpolateFlashAttn(curve, 256, 256)
 	// At seqKV=384 (extrapolated), latency should be higher than at seqKV=256
 	assert.Greater(t, result, prefillBase)
+}
+
+func TestInterpolateFlashAttn_EmptyDecodePoints(t *testing.T) {
+	// Curve with only prefill points (no seqQ=1)
+	curve := &OperatorCurve{
+		Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+		Points: []LatencyPoint{
+			{Shape: []int64{128, 128}, LatencyUs: 20.0},
+			{Shape: []int64{256, 256}, LatencyUs: 80.0},
+		},
+	}
+	// Should not panic, falls back to prefill points
+	result := InterpolateFlashAttn(curve, 1, 200)
+	assert.Greater(t, result, 0.0)
+	assert.False(t, math.IsNaN(result))
+}
+
+func TestInterpolateFlashAttn_EmptyPrefillPoints(t *testing.T) {
+	// Curve with only decode points (no seqQ=seqKV)
+	curve := &OperatorCurve{
+		Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+		Points: []LatencyPoint{
+			{Shape: []int64{1, 128}, LatencyUs: 5.0},
+			{Shape: []int64{1, 256}, LatencyUs: 10.0},
+		},
+	}
+	// Should not panic, falls back to decode points
+	result := InterpolateFlashAttn(curve, 128, 128)
+	assert.Greater(t, result, 0.0)
+	assert.False(t, math.IsNaN(result))
+}
+
+func TestInterpolateFlashAttn_EmptyBothRegimes(t *testing.T) {
+	// Curve with points that are neither decode nor prefill
+	curve := &OperatorCurve{
+		Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+		Points: []LatencyPoint{
+			{Shape: []int64{32, 128}, LatencyUs: 50.0},
+		},
+	}
+	result := InterpolateFlashAttn(curve, 1, 200)
+	assert.Equal(t, 0.0, result) // no matching regime
 }
 
 func TestInterpolateFlashAttn_BlendMonotonicity(t *testing.T) {
