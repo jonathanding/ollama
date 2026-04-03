@@ -29,6 +29,7 @@ import (
 	"unicode"
 	"unsafe"
 
+	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/fs"
 	fsggml "github.com/ollama/ollama/fs/ggml"
@@ -360,10 +361,15 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 		b := backends[d]
 		bt := C.ggml_backend_get_default_buffer_type(b)
 
-		// Always include CPU as a fallback but otherwise, just use the devices where we assigned layers
+		// Always include CPU as a fallback but otherwise, just use the devices where we assigned layers.
+		// Exception: when OLLAMA_IGPU_OFFLOAD is set, inject iGPU Vulkan into the scheduler even if it
+		// has no assigned layers — this allows op_offload to route prefill matmuls (ne[1]>=32) to iGPU.
 		if !slices.Contains(cpuDeviceBufferType.bts, bt) {
-			if c, ok := ctxs[bt]; !ok || C.ggml_get_first_tensor(c) == nil {
-				continue
+			isIGPU := envconfig.IGPUOffload() && C.ggml_backend_dev_type(d) == C.GGML_BACKEND_DEVICE_TYPE_IGPU
+			if !isIGPU {
+				if c, ok := ctxs[bt]; !ok || C.ggml_get_first_tensor(c) == nil {
+					continue
+				}
 			}
 		}
 
