@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DAOP Benchmark Viewer</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 20px; background: #f8f9fa; }
+  .header { margin-bottom: 20px; }
+  .header h1 { margin: 0; color: #333; }
+  .header .meta { color: #666; font-size: 14px; }
+  .controls { margin: 15px 0; display: flex; gap: 15px; align-items: center; }
+  .controls select, .controls button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; }
+  .controls button { cursor: pointer; background: #fff; }
+  .controls button.active { background: #007bff; color: #fff; border-color: #007bff; }
+  #chart-container { background: #fff; border-radius: 8px; padding: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .hw-info { background: #fff; border-radius: 8px; padding: 15px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .hw-info table { border-collapse: collapse; }
+  .hw-info td { padding: 4px 12px 4px 0; }
+  .hw-info td:first-child { font-weight: 600; color: #555; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>DAOP Benchmark Viewer</h1>
+  <div class="meta" id="profile-meta"></div>
+</div>
+
+<div class="hw-info" id="hw-info"></div>
+
+<div class="controls">
+  <label>Op: <select id="op-select"></select></label>
+  <button id="btn-log" class="active" onclick="toggleScale('log')">Log Scale</button>
+  <button id="btn-linear" onclick="toggleScale('linear')">Linear Scale</button>
+</div>
+
+<div id="chart-container"></div>
+
+<script>
+const PROFILE_DATA = __PROFILE_JSON__;
+
+let currentScale = 'log';
+
+function init() {
+  const meta = document.getElementById('profile-meta');
+  meta.textContent = `Version ${PROFILE_DATA.version} | ${PROFILE_DATA.timestamp || 'N/A'}`;
+
+  renderHWInfo();
+  populateOpSelect();
+  renderChart();
+}
+
+function renderHWInfo() {
+  const hw = PROFILE_DATA.hardware;
+  if (!hw) return;
+  let html = '<table>';
+  if (hw.backends) {
+    hw.backends.forEach(b => {
+      html += `<tr><td>Backend</td><td>${escapeHtml(b.name)} (${escapeHtml(b.device)})</td></tr>`;
+    });
+  }
+  if (hw.peak_tops) {
+    Object.entries(hw.peak_tops).forEach(([dt, v]) => {
+      html += `<tr><td>Peak TOPS (${dt})</td><td>${formatSI(v, 'OPS')}</td></tr>`;
+    });
+  }
+  if (hw.peak_bandwidth_bytes_sec) {
+    html += `<tr><td>Peak BW</td><td>${formatSI(hw.peak_bandwidth_bytes_sec, 'B/s')}</td></tr>`;
+  }
+  html += '</table>';
+  document.getElementById('hw-info').innerHTML = html;
+}
+
+function populateOpSelect() {
+  const ops = new Set();
+  (PROFILE_DATA.operators || []).forEach(c => ops.add(c.op));
+  const select = document.getElementById('op-select');
+  select.innerHTML = '';
+  ops.forEach(op => {
+    const opt = document.createElement('option');
+    opt.value = op; opt.textContent = op;
+    select.appendChild(opt);
+  });
+  select.onchange = renderChart;
+}
+
+function renderChart() {
+  const op = document.getElementById('op-select').value;
+  const curves = (PROFILE_DATA.operators || []).filter(c => c.op === op);
+  if (curves.length === 0) {
+    Plotly.purge('chart-container');
+    return;
+  }
+
+  const traces = curves.map((curve, idx) => {
+    let label = curve.op;
+    if (curve.weight_dtype) label += ` ${curve.weight_dtype}`;
+    if (curve.fixed_dims) {
+      const dims = Object.entries(curve.fixed_dims).map(([k,v]) => `${k}=${v}`).join(',');
+      label += ` [${dims}]`;
+    }
+
+    const xs = curve.points.map(p => p.shape[p.shape.length - 1]);
+    const ys = curve.points.map(p => p.latency_us);
+    const texts = curve.points.map(p =>
+      `Shape: [${p.shape.join(', ')}]<br>Latency: ${p.latency_us.toFixed(2)} us` +
+      (p.stddev_us ? `<br>Stddev: ${p.stddev_us.toFixed(2)} us` : '')
+    );
+
+    return {
+      x: xs, y: ys, text: texts,
+      mode: 'lines+markers', name: label,
+      hovertemplate: '%{text}<extra></extra>',
+    };
+  });
+
+  const xLabel = curves[0].dimensions ? curves[0].dimensions[curves[0].dimensions.length - 1] : 'N';
+  const layout = {
+    title: `${op} Latency Curves`,
+    xaxis: { title: xLabel, type: currentScale },
+    yaxis: { title: 'Latency (us)', type: currentScale },
+    hovermode: 'closest',
+    height: 500,
+  };
+
+  Plotly.newPlot('chart-container', traces, layout, {responsive: true});
+}
+
+function toggleScale(scale) {
+  currentScale = scale;
+  document.getElementById('btn-log').classList.toggle('active', scale === 'log');
+  document.getElementById('btn-linear').classList.toggle('active', scale === 'linear');
+  renderChart();
+}
+
+function formatSI(val, unit) {
+  if (val >= 1e12) return (val/1e12).toFixed(1) + ' T' + unit;
+  if (val >= 1e9) return (val/1e9).toFixed(1) + ' G' + unit;
+  if (val >= 1e6) return (val/1e6).toFixed(1) + ' M' + unit;
+  if (val >= 1e3) return (val/1e3).toFixed(1) + ' K' + unit;
+  return val.toFixed(1) + ' ' + unit;
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(s));
+  return div.innerHTML;
+}
+
+init();
+</script>
+</body>
+</html>
