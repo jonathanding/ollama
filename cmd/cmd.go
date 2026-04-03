@@ -39,8 +39,6 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cmd/config"
-	"github.com/ollama/ollama/ml"
-	"github.com/ollama/ollama/perf"
 	"github.com/ollama/ollama/cmd/launch"
 	"github.com/ollama/ollama/cmd/tui"
 	"github.com/ollama/ollama/envconfig"
@@ -2077,120 +2075,13 @@ func runLauncherAction(cmd *cobra.Command, action tui.TUIAction, deps launcherDe
 	}
 }
 
+// TODO(daop-v2): daopBenchHandler and daopEstimateHandler are stubbed pending v2 rewrite (Task 15).
 func daopBenchHandler(cmd *cobra.Command, args []string) error {
-	viewMode := len(args) > 0 && args[0] == "view"
-	detail, _ := cmd.Flags().GetBool("detail")
-
-	if viewMode {
-		profilePath := perf.ProfilePath()
-		p, err := perf.LoadProfile(profilePath)
-		if err != nil {
-			return fmt.Errorf("cannot load profile: %w\nHave you run 'ollama daop-bench'?", err)
-		}
-		perf.PrintProfile(os.Stdout, p, detail)
-		return nil
-	}
-
-	backends, _ := cmd.Flags().GetStringSlice("backends")
-	update, _ := cmd.Flags().GetBool("update")
-	modelName, _ := cmd.Flags().GetString("model")
-
-	// Initialize backend without model
-	backend, err := ml.NewBackendForBench(ml.BackendParams{})
-	if err != nil {
-		return fmt.Errorf("backend initialization failed: %w", err)
-	}
-	defer backend.Close()
-
-	cfg := perf.DefaultBenchmarkConfig()
-	cfg.Backends = backends
-
-	if update {
-		existing, err := perf.LoadProfile(perf.ProfilePath())
-		if err != nil {
-			return fmt.Errorf("cannot load existing profile for update: %w", err)
-		}
-		var modelPaths []string
-		if modelName != "" {
-			resolved, err := perf.ResolveModelPath(modelName)
-			if err != nil {
-				return err
-			}
-			modelPaths = append(modelPaths, resolved)
-		} else {
-			return fmt.Errorf("--model is required with --update")
-		}
-		raw, err := perf.RunUpdateBenchmark(backend, existing, modelPaths, cfg)
-		if err != nil {
-			return err
-		}
-		rawPath := perf.RawDataPath()
-		if err := perf.WriteRawData(rawPath, raw); err != nil {
-			return err
-		}
-		updateProfile, err := perf.ProcessRawToProfile([]string{rawPath})
-		if err != nil {
-			return err
-		}
-		merged := perf.MergeProfile(existing, updateProfile)
-		if err := perf.WriteProfile(perf.ProfilePath(), merged); err != nil {
-			return err
-		}
-		fmt.Printf("Profile updated: %s\n", perf.ProfilePath())
-		return nil
-	}
-
-	// Run full Layer 1 benchmark
-	fmt.Println("Running hardware characterization + operator calibration...")
-	fmt.Println("This may take 1-5 minutes.")
-	raw, err := perf.RunFullBenchmark(backend, cfg)
-	if err != nil {
-		return err
-	}
-	rawPath := perf.RawDataPath()
-	if err := perf.WriteRawData(rawPath, raw); err != nil {
-		return err
-	}
-	profile, err := perf.ProcessRawToProfile([]string{rawPath})
-	if err != nil {
-		return err
-	}
-	if err := perf.WriteProfile(perf.ProfilePath(), profile); err != nil {
-		return err
-	}
-	fmt.Printf("Profile saved to %s\n", perf.ProfilePath())
-	perf.PrintProfile(os.Stdout, profile, false)
-	return nil
+	return fmt.Errorf("daop-bench is being rewritten for v2 — not yet available")
 }
 
 func daopEstimateHandler(cmd *cobra.Command, args []string) error {
-	modelRef := args[0]
-
-	inputLen, _ := cmd.Flags().GetInt("input-length")
-	outputLen, _ := cmd.Flags().GetInt("output-length")
-	batchSize, _ := cmd.Flags().GetInt("batch-size")
-	jsonOutput, _ := cmd.Flags().GetBool("json")
-	detail, _ := cmd.Flags().GetBool("detail")
-
-	cfg := perf.DefaultEstimateConfig()
-	cfg.InputLength = inputLen
-	cfg.OutputLength = outputLen
-	cfg.MaxBatchSize = batchSize
-	cfg.JSON = jsonOutput
-	cfg.Detail = detail
-
-	result, err := perf.RunEstimate(modelRef, cfg)
-	if err != nil {
-		return err
-	}
-
-	if jsonOutput {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(result)
-	}
-	perf.PrintEstimateResult(os.Stdout, result, detail)
-	return nil
+	return fmt.Errorf("daop-estimate is being rewritten for v2 — not yet available")
 }
 
 func NewCLI() *cobra.Command {
