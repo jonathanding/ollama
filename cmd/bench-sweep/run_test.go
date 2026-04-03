@@ -230,6 +230,38 @@ func TestFetchVRAM_PrefixMatch(t *testing.T) {
 	}
 }
 
+func TestRunBenchmark_FiltersEarlyEOS(t *testing.T) {
+	// Return eval_count=1 (early EOS) for every request — should fall back to all epochs.
+	eosResp := []api.GenerateResponse{
+		{
+			Done: true,
+			Metrics: api.Metrics{
+				PromptEvalCount:    512,
+				PromptEvalDuration: 200 * time.Millisecond,
+				EvalCount:          1,
+				EvalDuration:       10 * time.Millisecond,
+			},
+		},
+	}
+	srv := mockGenServer(t, eosResp, 0, 0)
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+
+	client, _ := api.ClientFromEnvironment()
+	cfg := RunConfig{Epochs: 3, Warmup: 1, MaxTokens: 16, CVThreshPct: 5.0, Sizes: []int{512}}
+	results, _, err := runBenchmark(context.Background(), client, "test-model", cfg)
+	if err != nil {
+		t.Fatalf("runBenchmark: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	// All 3 epochs should still be stored in JSON even though all hit early EOS.
+	if len(results[0].Epochs) != 3 {
+		t.Errorf("expected 3 epochs stored in JSON, got %d", len(results[0].Epochs))
+	}
+}
+
 // Suppress unused import warnings from mock helpers
 var _ = fmt.Sprintf
 var _ = io.Discard

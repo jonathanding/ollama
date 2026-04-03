@@ -135,11 +135,30 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 			return nil, hw, fmt.Errorf("all timed epochs failed for size=%d", size)
 		}
 
-		// Compute stats
-		prefillVals := make([]float64, len(epochResults))
-		ttftVals := make([]float64, len(epochResults))
-		genVals := make([]float64, len(epochResults))
-		for i, r := range epochResults {
+		// Filter degenerate epochs where the model hit EOS well before max_tokens.
+		// These epochs have inflated gen_tps and may have ttft_ms=0, both of which
+		// corrupt CV% statistics. Degenerate epochs are still saved to JSON for inspection.
+		statsEpochs := make([]EpochResult, 0, len(epochResults))
+		for _, r := range epochResults {
+			if r.EvalCount*2 < cfg.MaxTokens {
+				continue
+			}
+			statsEpochs = append(statsEpochs, r)
+		}
+		if skipped := len(epochResults) - len(statsEpochs); skipped > 0 {
+			fmt.Fprintf(os.Stderr, "  note: %d epoch(s) excluded from stats for size=%d (early EOS)\n", skipped, size)
+		}
+		if len(statsEpochs) == 0 {
+			// All epochs hit early EOS; fall back to using all epochs rather than failing.
+			statsEpochs = epochResults
+			fmt.Fprintf(os.Stderr, "Warning: all timed epochs hit early EOS for size=%d, stats may be unreliable\n", size)
+		}
+
+		// Compute stats from valid epochs only.
+		prefillVals := make([]float64, len(statsEpochs))
+		ttftVals := make([]float64, len(statsEpochs))
+		genVals := make([]float64, len(statsEpochs))
+		for i, r := range statsEpochs {
 			prefillVals[i] = r.PrefillTPS
 			ttftVals[i] = r.TTFTMs
 			genVals[i] = r.GenTPS
@@ -184,7 +203,9 @@ func printRunTable(w io.Writer, model string, results []SizeResult, cfg RunConfi
 	}
 	if first {
 		fmt.Fprintf(w, "\nModel: %s  |  Epochs: %d  |  Warmup: %d\n\n", model, cfg.Epochs, cfg.Warmup)
-		fmt.Fprintf(w, "%-13s │ %-18s │ %-18s │ %6s │ %-10s │ %-10s │ %6s │ %-8s │ %s\n",
+		// Column widths (content between │ separators):
+		//   prompt_tokens: 13  prefill mean/p99: 18  CV%: 6  TTFT mean/p99: 10  gen_tps: 9  status: var
+		fmt.Fprintf(w, "%-13s │ %-18s │ %-18s │ %6s │ %-10s │ %-10s │ %6s │ %-9s │ %s\n",
 			"prompt_tokens",
 			"prefill_tps (mean)",
 			"prefill_tps (p99)",
@@ -195,14 +216,15 @@ func printRunTable(w io.Writer, model string, results []SizeResult, cfg RunConfi
 			"gen_tps",
 			"status",
 		)
-		fmt.Fprintln(w, strings.Repeat("─", 110))
+		fmt.Fprintln(w, strings.Repeat("─", 120))
 	}
 	r := results[len(results)-1]
 	status := "✓"
 	if !r.Stable {
 		status = "⚠"
 	}
-	fmt.Fprintf(w, "%-13d │ %15.0f t/s    │ %15.0f t/s    │ %5.1f%% │ %7.0f ms │ %7.0f ms │ %5.1f%% │ %5.0f t/s │ %s\n",
+	// Data column widths must match header: prefill=14+4=18, TTFT=7+3=10, gen_tps=5+4=9
+	fmt.Fprintf(w, "%-13d │ %14.0f t/s │ %14.0f t/s │ %5.1f%% │ %7.0f ms │ %7.0f ms │ %5.1f%% │ %5.0f t/s │ %s\n",
 		r.PromptTokens,
 		r.Stats.PrefillTPS.Mean,
 		r.Stats.PrefillTPS.P99,
