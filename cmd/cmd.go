@@ -39,6 +39,9 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cmd/config"
+	_ "github.com/ollama/ollama/ml/backend" // register backends for daop-bench
+	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/perf"
 	"github.com/ollama/ollama/cmd/launch"
 	"github.com/ollama/ollama/cmd/tui"
 	"github.com/ollama/ollama/envconfig"
@@ -2075,13 +2078,33 @@ func runLauncherAction(cmd *cobra.Command, action tui.TUIAction, deps launcherDe
 	}
 }
 
-// TODO(daop-v2): daopBenchHandler and daopEstimateHandler are stubbed pending v2 rewrite (Task 15).
 func daopBenchHandler(cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("daop-bench is being rewritten for v2 — not yet available")
+	// "ollama daop-bench view" opens the HTML viewer
+	if len(args) == 1 && args[0] == "view" {
+		return perf.RunViewerCLI(perf.ViewerCLIOptions{})
+	}
+
+	backend, err := ml.NewBackendForBench(ml.BackendParams{AllocMemory: true})
+	if err != nil {
+		return fmt.Errorf("no compute backend available: %w", err)
+	}
+	defer backend.Close()
+
+	verbose, _ := cmd.Flags().GetBool("detail")
+	opts := perf.BenchmarkCLIOptions{
+		Verbose: verbose,
+		Viewer:  true, // always generate HTML viewer
+	}
+	return perf.RunBenchmarkCLI(backend, opts)
 }
 
 func daopEstimateHandler(cmd *cobra.Command, args []string) error {
-	return fmt.Errorf("daop-estimate is being rewritten for v2 — not yet available")
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+	verbose, _ := cmd.Flags().GetBool("detail")
+	return perf.RunEstimateCLI(args[0], perf.EstimateCLIOptions{
+		JSON:    jsonOutput,
+		Verbose: verbose,
+	})
 }
 
 func NewCLI() *cobra.Command {
