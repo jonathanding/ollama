@@ -85,19 +85,36 @@ func historyDir() (string, error) {
 	return dir, nil
 }
 
-// resolveRunName returns name if <dir>/<name>.json does not exist.
-// Otherwise returns name_1, name_2, etc. and renamed=true.
-func resolveRunName(dir, name string) (chosen string, renamed bool) {
+// sanitizeModelName converts a model name to a safe filename component.
+// "qwen3:latest" → "qwen3", "qwen3-coder:7b" → "qwen3-coder_7b",
+// "namespace/model:tag" → "namespace_model_tag".
+func sanitizeModelName(model string) string {
+	// Strip :latest suffix (redundant noise in filenames)
+	s := strings.TrimSuffix(model, ":latest")
+	// Replace path separators and colons with underscores
+	s = strings.NewReplacer(":", "_", "/", "_", " ", "_").Replace(s)
+	return s
+}
+
+// runFileName returns the filename stem (without .json) for a given model + run name.
+func runFileName(model, name string) string {
+	return sanitizeModelName(model) + "_" + name
+}
+
+// resolveRunName returns the chosen run name (without model prefix or .json).
+// If <dir>/<model>_<name>.json does not exist the name is returned unchanged.
+// Otherwise appends _1, _2, etc. until a free slot is found, and sets renamed=true.
+func resolveRunName(dir, model, name string) (chosen string, renamed bool) {
 	candidate := name
 	for i := 1; ; i++ {
-		if _, err := os.Stat(filepath.Join(dir, candidate+".json")); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dir, runFileName(model, candidate)+".json")); os.IsNotExist(err) {
 			return candidate, candidate != name
 		}
 		candidate = fmt.Sprintf("%s_%d", name, i)
 	}
 }
 
-// saveRun writes rec to <historyDir>/<rec.Name>.json.
+// saveRun writes rec to <historyDir>/<sanitized_model>_<name>.json.
 func saveRun(rec RunRecord) error {
 	dir, err := historyDir()
 	if err != nil {
@@ -107,7 +124,7 @@ func saveRun(rec RunRecord) error {
 	if err != nil {
 		return fmt.Errorf("marshal run record: %w", err)
 	}
-	return os.WriteFile(filepath.Join(dir, rec.Name+".json"), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, runFileName(rec.Model, rec.Name)+".json"), data, 0o644)
 }
 
 // loadRun reads and parses <historyDir>/<name>.json.

@@ -16,9 +16,25 @@ func withTempHistoryDir(t *testing.T) string {
 	return historyDirOverride
 }
 
+func TestSanitizeModelName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"qwen3", "qwen3"},
+		{"qwen3:latest", "qwen3"},
+		{"qwen3-coder:7b", "qwen3-coder_7b"},
+		{"namespace/model:tag", "namespace_model_tag"},
+		{"my model", "my_model"},
+	}
+	for _, c := range cases {
+		got := sanitizeModelName(c.in)
+		if got != c.want {
+			t.Errorf("sanitizeModelName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestResolveRunName_NoConflict(t *testing.T) {
 	dir := t.TempDir()
-	chosen, renamed := resolveRunName(dir, "baseline")
+	chosen, renamed := resolveRunName(dir, "qwen3", "baseline")
 	if chosen != "baseline" {
 		t.Errorf("got %q, want %q", chosen, "baseline")
 	}
@@ -29,8 +45,8 @@ func TestResolveRunName_NoConflict(t *testing.T) {
 
 func TestResolveRunName_OneConflict(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "baseline.json"), []byte("{}"), 0644)
-	chosen, renamed := resolveRunName(dir, "baseline")
+	os.WriteFile(filepath.Join(dir, "qwen3_baseline.json"), []byte("{}"), 0644)
+	chosen, renamed := resolveRunName(dir, "qwen3", "baseline")
 	if chosen != "baseline_1" {
 		t.Errorf("got %q, want baseline_1", chosen)
 	}
@@ -41,9 +57,9 @@ func TestResolveRunName_OneConflict(t *testing.T) {
 
 func TestResolveRunName_MultipleConflicts(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "baseline.json"), []byte("{}"), 0644)
-	os.WriteFile(filepath.Join(dir, "baseline_1.json"), []byte("{}"), 0644)
-	chosen, _ := resolveRunName(dir, "baseline")
+	os.WriteFile(filepath.Join(dir, "qwen3_baseline.json"), []byte("{}"), 0644)
+	os.WriteFile(filepath.Join(dir, "qwen3_baseline_1.json"), []byte("{}"), 0644)
+	chosen, _ := resolveRunName(dir, "qwen3", "baseline")
 	if chosen != "baseline_2" {
 		t.Errorf("got %q, want baseline_2", chosen)
 	}
@@ -67,7 +83,7 @@ func TestSaveAndLoadRun(t *testing.T) {
 		t.Fatalf("saveRun: %v", err)
 	}
 
-	loaded, err := loadRun("test-run")
+	loaded, err := loadRun("qwen3_test-run")
 	if err != nil {
 		t.Fatalf("loadRun: %v", err)
 	}

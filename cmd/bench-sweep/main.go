@@ -63,7 +63,7 @@ USAGE
 
 SUBCOMMANDS
   run     Run a benchmark sweep across multiple prompt sizes.
-          Results are saved to ~/.ollama/bench/<name>.json.
+          Results are saved to ~/.ollama/bench/<model>_<name>.json.
 
   diff    Compare two saved runs side-by-side.
           Shows Δ% for prefill_tps and TTFT mean/p99.
@@ -76,12 +76,12 @@ SUBCOMMANDS
 
 RUN FLAGS
   -model <name>         Ollama model name (required)
-  -name <name>          Run name stored as ~/.ollama/bench/<name>.json (required)
+  -name <name>          Run name stored as ~/.ollama/bench/<model>_<name>.json (required)
                         If the name already exists it is auto-renamed (_1, _2, …)
   -sizes <list>         Comma-separated prompt token sizes to sweep
                         Default: 512,1024,2048,4096
   -epochs <n>           Timed iterations per size  (default: 6)
-  -warmup <n>           Warmup iterations before timing, discarded  (default: 2)
+  -warmup <n>           Warmup iterations before timing, discarded  (default: 4)
   -max-tokens <n>       Max output tokens per request  (default: 16)
                         Keep small to isolate prefill; output is not the focus.
   -cv-threshold <pct>   CV% above which a size is flagged unstable  (default: 5.0)
@@ -139,8 +139,10 @@ EXAMPLES
   bench-sweep list
 
 HISTORY FILES
-  Runs are stored as JSON in ~/.ollama/bench/<name>.json and contain the full
-  per-epoch measurements, statistics, hardware snapshot, and run config.
+  Runs are stored as JSON in ~/.ollama/bench/<model>_<name>.json and contain
+  the full per-epoch measurements, statistics, hardware snapshot, and run config.
+  The model name is sanitized (colons and slashes replaced with underscores,
+  ":latest" suffix stripped) to produce a valid filename component.
 `)
 }
 
@@ -150,7 +152,7 @@ func runRun(args []string) error {
 	name      := fs.String("name", "", "Run name for history (required)")
 	sizesStr  := fs.String("sizes", "512,1024,2048,4096", "Comma-separated prompt token sizes to sweep")
 	epochs    := fs.Int("epochs", 6, "Number of timed iterations per size")
-	warmup    := fs.Int("warmup", 2, "Warmup iterations before timing (>=2 recommended)")
+	warmup    := fs.Int("warmup", 4, "Warmup iterations before timing (>=2 recommended)")
 	maxTokens := fs.Int("max-tokens", 16, "Max output tokens per request")
 	cvThresh  := fs.Float64("cv-threshold", 5.0, "CV% threshold above which a result is flagged unstable")
 	host      := fs.String("host", "", "Ollama host URL (default: $OLLAMA_HOST or http://localhost:11434)")
@@ -195,7 +197,7 @@ func runRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	chosen, renamed := resolveRunName(dir, *name)
+	chosen, renamed := resolveRunName(dir, *model, *name)
 	if renamed {
 		fmt.Fprintf(os.Stderr, "Warning: run name %q already exists, renamed to %q\n", *name, chosen)
 	}
@@ -219,6 +221,6 @@ func runRun(args []string) error {
 	if err := saveRun(rec); err != nil {
 		return fmt.Errorf("save run: %w", err)
 	}
-	fmt.Printf("\nRun %q saved to %s\n", chosen, filepath.Join(dir, chosen+".json"))
+	fmt.Printf("\nRun %q saved to %s\n", chosen, filepath.Join(dir, runFileName(*model, chosen)+".json"))
 	return nil
 }
