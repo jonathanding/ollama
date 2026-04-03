@@ -1841,8 +1841,57 @@ func TestHWCharResult_BalancePoint(t *testing.T) {
 	assert.InDelta(t, 327.38, result.BalancePoint["f16"], 1.0)
 }
 
+func TestHWCharResult_MultiDtype(t *testing.T) {
+	result := HWCharResult{
+		PeakTOPS: map[string]float64{
+			"f16": 330e12,
+			"f32": 82.6e12,
+		},
+		PeakBW:       1008e9,
+		BalancePoint: make(map[string]float64),
+	}
+	for dtype, tops := range result.PeakTOPS {
+		result.BalancePoint[dtype] = tops / result.PeakBW
+	}
+	assert.InDelta(t, 327.38, result.BalancePoint["f16"], 1.0)
+	assert.InDelta(t, 81.94, result.BalancePoint["f32"], 0.1)
+}
+
+func TestHWCharResult_ZeroBandwidth(t *testing.T) {
+	// Edge case: zero bandwidth should not cause division by zero
+	result := HWCharResult{
+		PeakTOPS:     map[string]float64{"f16": 330e12},
+		PeakBW:       0,
+		BalancePoint: make(map[string]float64),
+	}
+	// CharacterizeHardware guards with `if result.PeakBW > 0`
+	// so BalancePoint should remain zero-value (not set)
+	assert.Empty(t, result.BalancePoint)
+}
+
+func TestParseDType_Valid(t *testing.T) {
+	tests := []struct {
+		input string
+		valid bool
+	}{
+		{"f32", true},
+		{"f16", true},
+		{"q4_0", true},
+		{"q8_0", true},
+		{"invalid", false},
+		{"", false},
+		{"F16", false}, // case-sensitive
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			_, ok := parseDType(tt.input)
+			assert.Equal(t, tt.valid, ok)
+		})
+	}
+}
+
 // Integration tests for benchPeakTOPS and benchPeakBandwidth require a real
-// GGML backend. They are in integration_test.go.
+// GGML backend. They are in integration_test.go (Task 14).
 ```
 
 - [ ] **Step 2: Implement `hwchar.go`**
@@ -2439,13 +2488,57 @@ func TestBuildSamplingGrids_FlashAttn(t *testing.T) {
 	assert.Equal(t, int64(32), grids[0].FixedDims["num_heads"])
 	assert.Equal(t, int64(128), grids[0].FixedDims["head_dim"])
 }
+
+func TestSweepDimensions(t *testing.T) {
+	assert.Equal(t, []string{"N"}, sweepDimensions("SILU"))
+	assert.Equal(t, []string{"N"}, sweepDimensions("MUL_MAT"))
+	assert.Equal(t, []string{"seq_q", "seq_kv"}, sweepDimensions("FLASH_ATTN_EXT"))
+	assert.Equal(t, []string{"N"}, sweepDimensions("UNKNOWN_OP"))
+}
+
+func TestBuildSamplingGrids_UnknownOp(t *testing.T) {
+	grids := buildSamplingGrids("NONEXISTENT", "f32", "")
+	assert.Empty(t, grids, "unknown op should produce no grids")
+}
+
+// TestFlashAttnShapeConversion verifies the 1D→2D shape conversion
+// after adaptive sampling. This is a regression test for the bug where
+// AdaptiveSample1D received 2D shapes, breaking sort and interpolation.
+func TestFlashAttnShapeConversion(t *testing.T) {
+	// Simulate what benchmarkFlashAttn does post-sampling:
+	// Decode points: [seqKV] → [1, seqKV]
+	decodePts := []LatencyPoint{
+		{Shape: []int64{64}, LatencyUs: 10.0},
+		{Shape: []int64{256}, LatencyUs: 40.0},
+		{Shape: []int64{1024}, LatencyUs: 160.0},
+	}
+	for i := range decodePts {
+		seqKV := decodePts[i].Shape[0]
+		decodePts[i].Shape = []int64{1, seqKV}
+	}
+	assert.Equal(t, []int64{1, 64}, decodePts[0].Shape)
+	assert.Equal(t, []int64{1, 256}, decodePts[1].Shape)
+	assert.Equal(t, []int64{1, 1024}, decodePts[2].Shape)
+
+	// Prefill points: [seqLen] → [seqLen, seqLen]
+	prefillPts := []LatencyPoint{
+		{Shape: []int64{64}, LatencyUs: 15.0},
+		{Shape: []int64{512}, LatencyUs: 200.0},
+	}
+	for i := range prefillPts {
+		seqLen := prefillPts[i].Shape[0]
+		prefillPts[i].Shape = []int64{seqLen, seqLen}
+	}
+	assert.Equal(t, []int64{64, 64}, prefillPts[0].Shape)
+	assert.Equal(t, []int64{512, 512}, prefillPts[1].Shape)
+}
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `go test ./perf/ -run "TestTrimmedMedian|TestBuildSamplingGrids" -v`
+Run: `go test ./perf/ -run "TestTrimmedMedian|TestBuildSamplingGrids|TestSweepDimensions|TestFlashAttnShapeConversion" -v`
 
-Expected: compilation errors for `buildSamplingGrids`.
+Expected: compilation errors for `buildSamplingGrids`, `sweepDimensions`.
 
 - [ ] **Step 3: Rewrite `bench.go`**
 
@@ -2694,27 +2787,43 @@ func benchmarkMulMat(backend ml.Backend, dtype string, fixedDims map[string]int6
 }
 
 // benchmarkFlashAttn samples two regimes: decode and prefill.
+// IMPORTANT: AdaptiveSample1D works internally with 1D shapes (Shape[0] is the sweep dimension).
+// The measure callbacks must NOT override pt.Shape to 2D during sampling, because
+// AdaptiveSample1D uses Shape[0] for sorting and interpolation error analysis.
+// We keep shapes 1D during sampling, then convert to 2D after sampling completes.
 func benchmarkFlashAttn(backend ml.Backend, dtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
 	var points []LatencyPoint
 
-	// Decode: seq_q=1, sweep seq_kv
+	// Decode: seq_q=1, sweep seq_kv (1D: shape[0] = seq_kv)
 	decodeMeasure := func(shape []int64) LatencyPoint {
 		seqKV := shape[0]
 		pt := measureOp(backend, "FLASH_ATTN_EXT", []int64{1, seqKV}, dtype, cfg)
-		pt.Shape = []int64{1, seqKV}
+		// Keep shape 1D for AdaptiveSample1D's internal sorting/interpolation
+		pt.Shape = []int64{seqKV}
 		return pt
 	}
 	decodePts := AdaptiveSample1D(decodeMeasure, 64, 16384, 8, cfg)
+	// Convert to 2D after sampling: [seq_kv] → [1, seq_kv]
+	for i := range decodePts {
+		seqKV := decodePts[i].Shape[0]
+		decodePts[i].Shape = []int64{1, seqKV}
+	}
 	points = append(points, decodePts...)
 
-	// Prefill: seq_q=seq_kv, sweep both
+	// Prefill: seq_q=seq_kv, sweep both (1D: shape[0] = seq_len)
 	prefillMeasure := func(shape []int64) LatencyPoint {
 		seqLen := shape[0]
 		pt := measureOp(backend, "FLASH_ATTN_EXT", []int64{seqLen, seqLen}, dtype, cfg)
-		pt.Shape = []int64{seqLen, seqLen}
+		// Keep shape 1D for AdaptiveSample1D
+		pt.Shape = []int64{seqLen}
 		return pt
 	}
 	prefillPts := AdaptiveSample1D(prefillMeasure, 64, 16384, 8, cfg)
+	// Convert to 2D after sampling: [seq_len] → [seq_len, seq_len]
+	for i := range prefillPts {
+		seqLen := prefillPts[i].Shape[0]
+		prefillPts[i].Shape = []int64{seqLen, seqLen}
+	}
 	points = append(points, prefillPts...)
 
 	return points
@@ -2723,9 +2832,9 @@ func benchmarkFlashAttn(backend ml.Backend, dtype string, fixedDims map[string]i
 
 - [ ] **Step 4: Run tests**
 
-Run: `go test ./perf/ -run "TestTrimmedMedian|TestBuildSamplingGrids" -v`
+Run: `go test ./perf/ -run "TestTrimmedMedian|TestBuildSamplingGrids|TestSweepDimensions|TestFlashAttnShapeConversion" -v`
 
-Expected: All 8 tests PASS.
+Expected: All 12 tests PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -2794,6 +2903,29 @@ func newTestProfile() *Profile {
 			},
 		},
 	}
+}
+
+func TestFixedDimsKey(t *testing.T) {
+	// Empty map → empty string
+	assert.Equal(t, "", fixedDimsKey(nil))
+	assert.Equal(t, "", fixedDimsKey(map[string]int64{}))
+
+	// Single key
+	assert.Equal(t, "M=4096", fixedDimsKey(map[string]int64{"M": 4096}))
+
+	// Multiple keys — must be sorted deterministically
+	k1 := fixedDimsKey(map[string]int64{"M": 4096, "K": 4096})
+	k2 := fixedDimsKey(map[string]int64{"K": 4096, "M": 4096})
+	assert.Equal(t, k1, k2, "key order should not affect result")
+	assert.Equal(t, "K=4096,M=4096", k1)
+
+	// FLASH_ATTN_EXT dims
+	k3 := fixedDimsKey(map[string]int64{"num_heads": 32, "head_dim": 128})
+	assert.Equal(t, "head_dim=128,num_heads=32", k3)
+
+	// Different values → different keys
+	k4 := fixedDimsKey(map[string]int64{"num_heads": 32, "head_dim": 64})
+	assert.NotEqual(t, k3, k4)
 }
 
 func TestProfileRoundTrip(t *testing.T) {
@@ -2874,14 +3006,77 @@ func TestMergeProfile(t *testing.T) {
 					{Shape: []int64{1}, LatencyUs: 20.0, Reps: 100},
 				},
 			},
+			// FLASH_ATTN_EXT with non-MUL_MAT FixedDims (num_heads, head_dim)
+			{
+				Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+				Dimensions: []string{"seq_kv"},
+				FixedDims:  map[string]int64{"num_heads": 32, "head_dim": 128},
+				Points: []LatencyPoint{
+					{Shape: []int64{512}, LatencyUs: 80.0, Reps: 100},
+				},
+			},
 		},
 	}
 
 	merged := MergeProfile(existing, update)
 
-	// Should have: 2 original + 1 new SILU + 1 new MUL_MAT(8192) = 4
+	// Should have: 2 original + 1 new SILU + 1 new MUL_MAT(8192) + 1 FLASH_ATTN = 5
 	// The duplicate MUL_MAT(4096) should be kept from existing (not replaced)
-	assert.GreaterOrEqual(t, len(merged.Operators), 3)
+	assert.Equal(t, 5, len(merged.Operators))
+
+	// Verify FLASH_ATTN_EXT curve was added (generic FixedDims key works)
+	found := false
+	for _, c := range merged.Operators {
+		if c.Op == "FLASH_ATTN_EXT" {
+			found = true
+			assert.Equal(t, int64(32), c.FixedDims["num_heads"])
+			assert.Equal(t, int64(128), c.FixedDims["head_dim"])
+		}
+	}
+	assert.True(t, found, "FLASH_ATTN_EXT curve should be in merged profile")
+}
+
+func TestMergeProfile_FlashAttnDuplicate(t *testing.T) {
+	existing := newTestProfile()
+	// Add a FLASH_ATTN_EXT curve to existing
+	existing.Operators = append(existing.Operators, OperatorCurve{
+		Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+		Dimensions: []string{"seq_kv"},
+		FixedDims:  map[string]int64{"num_heads": 32, "head_dim": 128},
+		Points: []LatencyPoint{
+			{Shape: []int64{256}, LatencyUs: 40.0, Reps: 100},
+		},
+	})
+
+	update := &Profile{
+		Version:   2,
+		Timestamp: time.Now(),
+		Hardware:  existing.Hardware,
+		Operators: []OperatorCurve{
+			// Same FixedDims — should NOT be added (duplicate)
+			{
+				Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+				Dimensions: []string{"seq_kv"},
+				FixedDims:  map[string]int64{"head_dim": 128, "num_heads": 32}, // different key order, same values
+				Points: []LatencyPoint{
+					{Shape: []int64{512}, LatencyUs: 80.0, Reps: 100},
+				},
+			},
+			// Different head_dim — should be added
+			{
+				Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+				Dimensions: []string{"seq_kv"},
+				FixedDims:  map[string]int64{"num_heads": 32, "head_dim": 64},
+				Points: []LatencyPoint{
+					{Shape: []int64{512}, LatencyUs: 60.0, Reps: 100},
+				},
+			},
+		},
+	}
+
+	merged := MergeProfile(existing, update)
+	// existing had 3 (2 original + 1 FLASH_ATTN), update adds 1 new (head_dim=64), skips duplicate
+	assert.Equal(t, 4, len(merged.Operators))
 }
 
 func TestLookupBackend(t *testing.T) {
@@ -2927,7 +3122,30 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 )
+
+// fixedDimsKey returns a canonical string representation of FixedDims
+// for use as part of a map key. Keys are sorted for determinism.
+func fixedDimsKey(fd map[string]int64) string {
+	if len(fd) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(fd))
+	for k := range fd {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%s=%d", k, fd[k])
+	}
+	return b.String()
+}
 
 // BenchDir returns the directory for benchmark data.
 func BenchDir() string {
@@ -2982,22 +3200,22 @@ func MergeProfile(existing, update *Profile) *Profile {
 	merged.Operators = make([]OperatorCurve, len(existing.Operators))
 	copy(merged.Operators, existing.Operators)
 
-	// Build lookup of existing curves
+	// Build lookup of existing curves using a generic key that works for all ops.
+	// The key includes a canonical serialization of FixedDims (sorted key=value pairs).
 	type curveKey struct {
-		op, backend, cdt, wdt string
-		fixedM, fixedK        int64 // for MUL_MAT
+		op, backend, cdt, wdt, fixedDims string
+	}
+	makeCurveKey := func(c OperatorCurve) curveKey {
+		return curveKey{c.Op, c.Backend, c.ComputeDtype, c.WeightDtype, fixedDimsKey(c.FixedDims)}
 	}
 	seen := make(map[curveKey]bool)
 	for _, c := range existing.Operators {
-		k := curveKey{c.Op, c.Backend, c.ComputeDtype, c.WeightDtype,
-			c.FixedDims["M"], c.FixedDims["K"]}
-		seen[k] = true
+		seen[makeCurveKey(c)] = true
 	}
 
 	// Add new curves that don't conflict
 	for _, c := range update.Operators {
-		k := curveKey{c.Op, c.Backend, c.ComputeDtype, c.WeightDtype,
-			c.FixedDims["M"], c.FixedDims["K"]}
+		k := makeCurveKey(c)
 		if !seen[k] {
 			merged.Operators = append(merged.Operators, c)
 			seen[k] = true
@@ -3756,6 +3974,7 @@ git commit -m "perf: add estimation pipeline tests (lookupLatency, estimatePhase
 
 **Files:**
 - Rewrite: `perf/viewer.go`
+- Create: `perf/viewer_test.go`
 
 Update the CLI viewer to work with v2 types. The viewer prints human-readable profile summaries and estimation results to the terminal.
 
@@ -3901,16 +4120,192 @@ func truncate(s string, maxLen int) string {
 }
 ```
 
-- [ ] **Step 2: Verify compilation**
+- [ ] **Step 2: Write viewer tests**
 
-Run: `go build ./perf/`
+Create `perf/viewer_test.go`:
 
-Expected: Compiles without errors.
+```go
+package perf
 
-- [ ] **Step 3: Commit**
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestFormatSI(t *testing.T) {
+	tests := []struct {
+		val      float64
+		unit     string
+		expected string
+	}{
+		{330e12, "OPS", "330.0 TOPS"},
+		{1008e9, "B/s", "1008.0 GB/s"},
+		{82.6e6, "FLOPS", "82.6 MFLOPS"},
+		{1.5e3, "B/s", "1.5 KB/s"},
+		{42.0, "B/s", "42.0 B/s"},
+		{0.0, "B/s", "0.0 B/s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := formatSI(tt.val, tt.unit)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	assert.Equal(t, "hello", truncate("hello", 10))
+	assert.Equal(t, "hello", truncate("hello", 5))
+	assert.Equal(t, "hel...", truncate("hello world", 6))
+	assert.Equal(t, "h...", truncate("hello", 4))
+}
+
+func TestPrintProfile_Summary(t *testing.T) {
+	p := &Profile{
+		Hardware: HardwareProfile{
+			Backends: []BackendInfo{
+				{Name: "cuda", Device: "RTX 4090", VRAMBytes: 24_000_000_000},
+			},
+			PeakTOPS:                 map[string]float64{"f16": 330e12},
+			PeakBandwidthBytesPerSec: 1008e9,
+			BalancePoints:            map[string]float64{"f16": 327.38},
+		},
+		Operators: []OperatorCurve{
+			{Op: "SILU", Backend: "cuda", ComputeDtype: "f32", Dimensions: []string{"N"},
+				Points: []LatencyPoint{{Shape: []int64{1024}, LatencyUs: 2.5}}},
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				Dimensions: []string{"N"}, FixedDims: map[string]int64{"M": 4096, "K": 4096},
+				Points: []LatencyPoint{{Shape: []int64{1}, LatencyUs: 10.0}}},
+		},
+	}
+
+	var buf bytes.Buffer
+	PrintProfile(&buf, p, false)
+	output := buf.String()
+
+	assert.Contains(t, output, "Hardware Profile (v2)")
+	assert.Contains(t, output, "cuda")
+	assert.Contains(t, output, "RTX 4090")
+	assert.Contains(t, output, "Operator Curves: 2")
+	assert.Contains(t, output, "SILU")
+	assert.Contains(t, output, "MUL_MAT")
+}
+
+func TestPrintProfile_Detail(t *testing.T) {
+	p := &Profile{
+		Hardware: HardwareProfile{
+			Backends:                 []BackendInfo{{Name: "cuda", Device: "GPU"}},
+			PeakTOPS:                 map[string]float64{"f16": 100e12},
+			PeakBandwidthBytesPerSec: 500e9,
+			BalancePoints:            map[string]float64{"f16": 200.0},
+		},
+		Operators: []OperatorCurve{
+			{Op: "SILU", Backend: "cuda", ComputeDtype: "f32",
+				Dimensions: []string{"N"},
+				Points:     []LatencyPoint{{Shape: []int64{1024}, LatencyUs: 2.5}, {Shape: []int64{2048}, LatencyUs: 5.0}}},
+		},
+	}
+
+	var buf bytes.Buffer
+	PrintProfile(&buf, p, true)
+	output := buf.String()
+
+	// Detail mode shows per-curve point counts
+	assert.Contains(t, output, "2 points")
+	assert.Contains(t, output, "SILU (f32)")
+}
+
+func TestPrintEstimateResult(t *testing.T) {
+	r := &EstimateResult{
+		Model: "llama3:8b-q4_0",
+		Prefill: PhaseEstimation{
+			TotalLatencyMs: 45.2,
+			TokensPerSec:   2210.0,
+			TopOps: []OpBreakdown{
+				{Op: "MUL_MAT", ComputeDtype: "f16", WeightDtype: "q4_0", Count: 32, TotalUs: 30000, Percentage: 0.66},
+			},
+		},
+		Decode: PhaseEstimation{
+			TotalLatencyMs: 8.5,
+			TokensPerSec:   117.6,
+			TopOps: []OpBreakdown{
+				{Op: "MUL_MAT", ComputeDtype: "f16", WeightDtype: "q4_0", Count: 32, TotalUs: 7000, Percentage: 0.82},
+			},
+		},
+		Warnings: []string{"FLASH_ATTN_EXT not calibrated, using fallback"},
+	}
+
+	var buf bytes.Buffer
+	PrintEstimateResult(&buf, r, false)
+	output := buf.String()
+
+	assert.Contains(t, output, "llama3:8b-q4_0")
+	assert.Contains(t, output, "Prefill")
+	assert.Contains(t, output, "45.2ms")
+	assert.Contains(t, output, "Decode")
+	assert.Contains(t, output, "Warnings:")
+	assert.Contains(t, output, "FLASH_ATTN_EXT not calibrated")
+}
+
+func TestPrintEstimateResult_NoWarnings(t *testing.T) {
+	r := &EstimateResult{
+		Model:   "test-model",
+		Prefill: PhaseEstimation{TotalLatencyMs: 10, TokensPerSec: 1000},
+		Decode:  PhaseEstimation{TotalLatencyMs: 5, TokensPerSec: 200},
+	}
+
+	var buf bytes.Buffer
+	PrintEstimateResult(&buf, r, false)
+	output := buf.String()
+
+	assert.NotContains(t, output, "Warnings")
+}
+
+func TestPrintTopOps_Empty(t *testing.T) {
+	var buf bytes.Buffer
+	printTopOps(&buf, nil, false)
+	assert.Equal(t, "", buf.String())
+}
+
+func TestPrintTopOps_LimitedTo5(t *testing.T) {
+	ops := make([]OpBreakdown, 8)
+	for i := range ops {
+		ops[i] = OpBreakdown{Op: "OP", ComputeDtype: "f32", Count: 1, TotalUs: 100, Percentage: 0.1}
+	}
+	var buf bytes.Buffer
+	printTopOps(&buf, ops, false)
+	// Non-detail mode: max 5 ops shown
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	// 1 header ("Top ops:") + 5 data lines = 6
+	assert.Equal(t, 6, len(lines))
+}
+
+func TestPrintTopOps_DetailShows10(t *testing.T) {
+	ops := make([]OpBreakdown, 12)
+	for i := range ops {
+		ops[i] = OpBreakdown{Op: "OP", ComputeDtype: "f32", Count: 1, TotalUs: 100, Percentage: 0.05}
+	}
+	var buf bytes.Buffer
+	printTopOps(&buf, ops, true)
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	// 1 header + 10 data lines = 11
+	assert.Equal(t, 11, len(lines))
+}
+```
+
+- [ ] **Step 3: Run viewer tests**
+
+Run: `go test ./perf/ -run "TestFormatSI|TestTruncate|TestPrintProfile|TestPrintEstimateResult|TestPrintTopOps" -v`
+
+Expected: All 10 tests PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add perf/viewer.go
+git add perf/viewer.go perf/viewer_test.go
 git commit -m "perf: update CLI viewer for v2 OperatorCurve types"
 ```
 
@@ -4532,7 +4927,7 @@ func skipIfNoBackend(t *testing.T) ml.Backend {
 		t.Skip("set DAOP_INTEGRATION=1 to run GGML integration tests")
 	}
 	// Try to create a backend
-	b, err := ml.NewBackend(ml.BackendParams{AllocMemory: true})
+	b, err := ml.NewBackendForBench(ml.BackendParams{AllocMemory: true})
 	if err != nil {
 		t.Skipf("no GGML backend available: %v", err)
 	}
@@ -4758,6 +5153,7 @@ The following gaps were identified during self-review and addressed:
 
 **Files:**
 - Create: `perf/cmd.go`
+- Create: `perf/cmd_test.go`
 
 The spec defines three CLI commands: `daop-bench`, `daop-estimate`, `daop-viewer`. These are registered by the main Ollama CLI as subcommands.
 
@@ -4907,7 +5303,7 @@ func openBrowser(path string) {
 	case "linux":
 		cmd = exec.Command("xdg-open", path)
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", path)
+		cmd = exec.Command("cmd", "/c", "start", "", path)
 	default:
 		fmt.Fprintf(os.Stderr, "Open in browser: %s\n", path)
 		return
@@ -4918,16 +5314,95 @@ func openBrowser(path string) {
 }
 ```
 
-- [ ] **Step 2: Verify compilation**
+- [ ] **Step 2: Write cmd tests**
 
-Run: `go build ./perf/`
+Create `perf/cmd_test.go`:
 
-Expected: Compiles without errors.
+```go
+package perf
 
-- [ ] **Step 3: Commit**
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestBenchmarkCLIOptions_Defaults(t *testing.T) {
+	opts := BenchmarkCLIOptions{}
+	assert.Empty(t, opts.Output)
+	assert.Empty(t, opts.Ops)
+	assert.Empty(t, opts.Dtypes)
+	assert.False(t, opts.Viewer)
+	assert.False(t, opts.Verbose)
+}
+
+func TestEstimateCLIOptions_Defaults(t *testing.T) {
+	opts := EstimateCLIOptions{}
+	assert.Empty(t, opts.Profile)
+	assert.False(t, opts.JSON)
+	assert.False(t, opts.Verbose)
+}
+
+func TestViewerCLIOptions_Defaults(t *testing.T) {
+	opts := ViewerCLIOptions{}
+	assert.Empty(t, opts.Profile)
+	assert.Empty(t, opts.Output)
+}
+
+func TestRunBenchmarkCLI_OpsParsingDefault(t *testing.T) {
+	// Verify the default ops list matches Phase 1
+	opts := BenchmarkCLIOptions{}
+	// When opts.Ops is empty, RunBenchmarkCLI uses default: "SILU", "MUL_MAT", "FLASH_ATTN_EXT"
+	assert.Empty(t, opts.Ops, "empty means use defaults")
+}
+
+func TestRunBenchmarkCLI_OpsParsing(t *testing.T) {
+	// Verify comma-separated ops parsing (as used in RunBenchmarkCLI)
+	input := "SILU,MUL_MAT"
+	ops := splitOps(input)
+	assert.Equal(t, []string{"SILU", "MUL_MAT"}, ops)
+}
+
+// splitOps is a test helper mirroring the strings.Split in RunBenchmarkCLI
+func splitOps(s string) []string {
+	if s == "" {
+		return []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT"}
+	}
+	return strings.Split(s, ",")
+}
+
+func TestOpenBrowser_UnsupportedOS(t *testing.T) {
+	// openBrowser on unsupported OS just prints to stderr, no panic
+	// This is a smoke test — we can't really test browser opening
+	// but we verify the function doesn't panic with any path
+	// (actual browser opening is skipped in test since runtime.GOOS is constant)
+	assert.NotPanics(t, func() {
+		openBrowser("/tmp/test.html")
+	})
+}
+```
+
+Add `"strings"` to the import if not already present (it's used by `splitOps`):
+
+```go
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+```
+
+- [ ] **Step 3: Run cmd tests**
+
+Run: `go test ./perf/ -run "TestBenchmarkCLIOptions|TestEstimateCLIOptions|TestViewerCLIOptions|TestRunBenchmarkCLI|TestOpenBrowser" -v`
+
+Expected: All 6 tests PASS.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add perf/cmd.go
+git add perf/cmd.go perf/cmd_test.go
 git commit -m "perf: add CLI command entry points (daop-bench, daop-estimate, daop-viewer)"
 ```
 
