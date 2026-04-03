@@ -109,6 +109,17 @@ type BenchmarkConfig struct {
 	TrimPercent    float64 // percentage of outliers to trim (e.g., 0.1 = 10%)
 }
 
+// DefaultBenchmarkConfig returns sensible defaults for production benchmarking.
+func DefaultBenchmarkConfig() BenchmarkConfig {
+	return BenchmarkConfig{
+		WarmupReps:     5,
+		MeasureReps:    50,
+		TrimPercent:    0.1,
+		ErrorThreshold: 0.05,
+		MaxPointsPerOp: 20,
+	}
+}
+
 // --- Internal helper types ---
 
 // OpKey uniquely identifies an operator configuration.
