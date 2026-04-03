@@ -6,45 +6,64 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestComputeFLOPs_MulMat(t *testing.T) {
-	f := ComputeFLOPs("MUL_MAT", [][]int64{{4096, 4096}, {4096, 1}})
-	assert.InDelta(t, 2*4096*4096*1, f, 1)
+func TestIsZeroCostOp(t *testing.T) {
+	tests := []struct {
+		op   string
+		want bool
+	}{
+		{"VIEW", true},
+		{"RESHAPE", true},
+		{"PERMUTE", true},
+		{"MUL_MAT", false},
+		{"SILU", false},
+		{"ADD", false},
+		{"FLASH_ATTN_EXT", false},
+		{"CONT", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.op, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsZeroCostOp(tt.op))
+		})
+	}
 }
 
-func TestComputeFLOPs_FlashAttn(t *testing.T) {
-	f := ComputeFLOPs("FLASH_ATTN_EXT", [][]int64{{1, 32, 512, 128}, {1, 32, 512, 128}})
-	assert.InDelta(t, 2.0*1*32*512*512*128, f, 1)
+func TestElemSize(t *testing.T) {
+	tests := []struct {
+		dtype string
+		want  float64
+	}{
+		{"f32", 4},
+		{"f16", 2},
+		{"bf16", 2},
+		{"q4_0", 0.5625},
+		{"q4_K", 0.5625},
+		{"q5_K", 0.6875},
+		{"q6_K", 0.8125},
+		{"q8_0", 1.0625},
+		{"unknown_dtype", 4}, // default fallback
+	}
+	for _, tt := range tests {
+		t.Run(tt.dtype, func(t *testing.T) {
+			assert.InDelta(t, tt.want, elemSize(tt.dtype), 0.001)
+		})
+	}
 }
 
-func TestComputeFLOPs_RMSNorm(t *testing.T) {
-	f := ComputeFLOPs("RMS_NORM", [][]int64{{4096, 512}})
-	assert.InDelta(t, 3*4096*512, f, 1)
-}
-
-func TestComputeFLOPs_Add(t *testing.T) {
-	f := ComputeFLOPs("ADD", [][]int64{{4096}})
-	assert.InDelta(t, 4096, f, 1)
-}
-
-func TestComputeFLOPs_View(t *testing.T) {
-	f := ComputeFLOPs("VIEW", [][]int64{{4096}})
-	assert.Equal(t, float64(0), f)
-}
-
-func TestComputeBytes_MulMat(t *testing.T) {
-	b := ComputeBytes("MUL_MAT", [][]int64{{4096, 4096}, {4096, 1}}, "f32", "f16")
-	expected := 2.0*4096*4096 + 4.0*4096*1 + 4.0*4096*1
-	assert.InDelta(t, expected, b, 1)
-}
-
-func TestComputeBytes_MulMat_Q4_0(t *testing.T) {
-	b := ComputeBytes("MUL_MAT", [][]int64{{4096, 4096}, {4096, 1}}, "f32", "q4_0")
-	expected := 0.5625*4096*4096 + 4.0*4096*1 + 4.0*4096*1
-	assert.InDelta(t, expected, b, 1)
-}
-
-func TestComputeBytes_RMSNorm(t *testing.T) {
-	b := ComputeBytes("RMS_NORM", [][]int64{{4096, 512}}, "f32", "")
-	expected := 2.0*4096*512*4 + 4096*4
-	assert.InDelta(t, expected, b, 1)
+func TestProduct(t *testing.T) {
+	tests := []struct {
+		name  string
+		shape []int64
+		want  float64
+	}{
+		{"scalar", []int64{}, 1},
+		{"1d", []int64{1024}, 1024},
+		{"2d", []int64{32, 128}, 4096},
+		{"4d", []int64{128, 32, 512, 1}, 2097152},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.InDelta(t, tt.want, product(tt.shape), 0.01)
+		})
+	}
 }
