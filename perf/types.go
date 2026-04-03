@@ -2,149 +2,105 @@ package perf
 
 import "time"
 
-// --- Profile types ---
+// --- Profile (v2): empirical latency curves ---
 
+// Profile stores calibrated operator latency curves for a specific hardware configuration.
+// Version 2 replaces v1's Roofline-based eta coefficients with direct latency measurements.
 type Profile struct {
-	Version       int                `json:"version"`
-	GeneratedFrom []string           `json:"generated_from"`
-	GeneratedAt   time.Time          `json:"generated_at"`
-	Hardware      HardwareProfile    `json:"hardware"`
-	Operators     []OperatorProfile  `json:"operators"`
-	Interconnects []InterconnectInfo `json:"interconnects"`
+	Version   int              `json:"version"`   // 2
+	Timestamp time.Time        `json:"timestamp"`
+	Hardware  HardwareProfile  `json:"hardware"`
+	Operators []OperatorCurve  `json:"operators"`
 }
 
+// HardwareProfile captures hardware characteristics used for initial sampling grid placement.
 type HardwareProfile struct {
-	Backends []BackendProfile `json:"backends"`
+	Backends                  []BackendInfo      `json:"backends"`
+	PeakTOPS                  map[string]float64 `json:"peak_tops"`                    // dtype -> TOPS
+	PeakBandwidthBytesPerSec  float64            `json:"peak_bandwidth_bytes_sec"`
+	InterconnectBWBytesPerSec float64            `json:"interconnect_bandwidth_bytes_sec"` // Phase 2
+	BalancePoints             map[string]float64 `json:"balance_points"`               // dtype -> FLOPs/byte
 }
 
-type BackendProfile struct {
-	Name          string             `json:"name"`
-	Device        string             `json:"device"`
-	PeakFLOPS     map[string]float64 `json:"peak_flops"`
-	PeakBandwidth float64            `json:"peak_bandwidth"`
-	BalancePoints map[string]float64 `json:"balance_points"`
+// BackendInfo identifies a compute backend (GPU, CPU, etc.).
+type BackendInfo struct {
+	Name      string `json:"name"`
+	Device    string `json:"device"`
+	VRAMBytes int64  `json:"vram_bytes"`
 }
 
-type OperatorProfile struct {
-	Op           string  `json:"op"`
-	Backend      string  `json:"backend"`
-	ComputeDtype string  `json:"compute_dtype"`
-	WeightDtype  string  `json:"weight_dtype,omitempty"`
-	Eta          float64 `json:"eta"`
-	EtaVariance  float64 `json:"eta_variance"`
-	NumPoints    int     `json:"num_points"`
-}
-
-type InterconnectInfo struct {
-	From      string  `json:"from"`
-	To        string  `json:"to"`
-	Bandwidth float64 `json:"bandwidth"`
-}
-
-// --- Raw benchmark data types ---
-
-type RawData struct {
-	Version                int                     `json:"version"`
-	Timestamp              time.Time               `json:"timestamp"`
-	Hardware               RawHardware             `json:"hardware"`
-	HardwareBenchmarks     []HardwareBenchmark     `json:"hardware_benchmarks"`
-	OperatorBenchmarks     []OperatorBenchmark     `json:"operator_benchmarks"`
-	InterconnectBenchmarks []InterconnectBenchmark `json:"interconnect_benchmarks"`
-}
-
-type RawHardware struct {
-	Backends []RawBackendInfo `json:"backends"`
-}
-
-type RawBackendInfo struct {
-	Name              string `json:"name"`
-	Device            string `json:"device"`
-	Driver            string `json:"driver,omitempty"`
-	ComputeCapability string `json:"compute_capability,omitempty"`
-	VRAMBytes         uint64 `json:"vram_bytes,omitempty"`
-	Cores             int    `json:"cores,omitempty"`
-	RAMBytes          uint64 `json:"ram_bytes,omitempty"`
-}
-
-type HardwareBenchmark struct {
-	Backend string  `json:"backend"`
-	Dtype   string  `json:"dtype,omitempty"`
-	Test    string  `json:"test"`
-	Value   float64 `json:"value"`
-	Unit    string  `json:"unit"`
-}
-
-type OperatorBenchmark struct {
+// OperatorCurve stores measured latency points for one operator configuration.
+type OperatorCurve struct {
 	Op           string           `json:"op"`
 	Backend      string           `json:"backend"`
 	ComputeDtype string           `json:"compute_dtype"`
 	WeightDtype  string           `json:"weight_dtype,omitempty"`
-	Points       []BenchmarkPoint `json:"points"`
+	Dimensions   []string         `json:"dimensions"`
+	FixedDims    map[string]int64 `json:"fixed_dims,omitempty"`
+	Points       []LatencyPoint   `json:"points"`
 }
 
-type BenchmarkPoint struct {
-	InputShapes [][]int64 `json:"input_shapes"`
-	OutputShape []int64   `json:"output_shape"`
-	FLOPs       float64   `json:"flops"`
-	BytesMoved  float64   `json:"bytes_moved"`
-	Intensity   float64   `json:"intensity"`
-	LatencyUs   float64   `json:"latency_us"`
-	Reps        int       `json:"reps"`
-	StddevUs    float64   `json:"stddev_us"`
+// LatencyPoint is one measured (shape, latency) pair.
+type LatencyPoint struct {
+	Shape     []int64 `json:"shape"`
+	LatencyUs float64 `json:"latency_us"`
+	StddevUs  float64 `json:"stddev_us"`
+	Reps      int     `json:"reps"`
 }
 
-type InterconnectBenchmark struct {
-	From          string  `json:"from"`
-	To            string  `json:"to"`
-	Bandwidth     float64 `json:"bandwidth"`
-	LatencyUs     float64 `json:"latency_us"`
-	TestSizeBytes int64   `json:"test_size_bytes"`
+// --- Operator Registry ---
+
+// OpRunner defines how to benchmark an operator (documentation only — runtime uses OpRunnerML).
+type OpRunner struct {
+	NumInputs  int
+	Dimensions []string
+	Run        func(ctx interface{}, inputs []interface{}) interface{}
 }
 
-// --- Estimate output types ---
+// SamplingGrid defines the points to benchmark for one operator.
+type SamplingGrid struct {
+	Op          string
+	Dtype       string
+	WeightDtype string
+	Dimensions  []string
+	Points      [][]int64
+}
 
+// --- Estimation output ---
+
+// EstimateResult is the output of EstimateModel().
 type EstimateResult struct {
-	Model        string          `json:"model"`
-	Backends     []BackendInfo   `json:"backends"`
-	InputLength  int             `json:"input_length"`
-	OutputLength int             `json:"output_length"`
-	MaxBatchSize int             `json:"max_batch_size"`
-	Prefill      PhaseEstimation `json:"prefill"`
-	Decode       PhaseEstimation `json:"decode"`
-	Warnings     []string        `json:"warnings,omitempty"`
-	Summary      string          `json:"summary"`
+	Model                   string          `json:"model"`
+	PrefillLatencyUs        float64         `json:"prefill_latency_us"`
+	PrefillMs               float64         `json:"prefill_ms"`
+	DecodeLatencyUsPerToken float64         `json:"decode_latency_us_per_token"`
+	DecodeTokensPerSec      float64         `json:"decode_tokens_per_sec"`
+	Prefill                 PhaseEstimation `json:"prefill"`
+	Decode                  PhaseEstimation `json:"decode"`
+	Warnings                []string        `json:"warnings,omitempty"`
 }
 
-type BackendInfo struct {
-	Name          string  `json:"name"`
-	Device        string  `json:"device"`
-	PeakFLOPS     float64 `json:"peak_flops"`
-	PeakBandwidth float64 `json:"peak_bandwidth"`
-	BalancePoint  float64 `json:"balance_point"`
-}
-
+// PhaseEstimation breaks down latency for one inference phase (prefill or decode).
 type PhaseEstimation struct {
 	TotalLatencyMs float64       `json:"total_latency_ms"`
 	TokensPerSec   float64       `json:"tokens_per_sec"`
-	TTFTMs         float64       `json:"ttft_ms,omitempty"`
-	NumBatches     int           `json:"num_batches,omitempty"`
-	Bottleneck     string        `json:"bottleneck"`
 	TopOps         []OpBreakdown `json:"top_ops"`
 }
 
+// OpBreakdown shows the contribution of one operator type to total latency.
 type OpBreakdown struct {
-	Op             string  `json:"op"`
-	Backend        string  `json:"backend"`
-	ComputeDtype   string  `json:"compute_dtype"`
-	WeightDtype    string  `json:"weight_dtype,omitempty"`
-	Count          int     `json:"count"`
-	TotalMs        float64 `json:"total_ms"`
-	Percentage     float64 `json:"percentage"`
-	BoundBreakdown string  `json:"bound_breakdown"`
+	Op           string  `json:"op"`
+	Backend      string  `json:"backend"`
+	ComputeDtype string  `json:"compute_dtype"`
+	WeightDtype  string  `json:"weight_dtype,omitempty"`
+	Count        int     `json:"count"`
+	TotalUs      float64 `json:"total_us"`
+	Percentage   float64 `json:"percentage"`
 }
 
 // --- Internal helper types ---
 
+// OpKey uniquely identifies an operator configuration.
 type OpKey struct {
 	Op           string
 	Backend      string
@@ -152,14 +108,11 @@ type OpKey struct {
 	WeightDtype  string
 }
 
-type OpCost struct {
-	FLOPs        float64
-	BytesMoved   float64
-	Intensity    float64
-	TCompute     float64
-	TMemory      float64
-	TActual      float64
-	Bound        string
-	Eta          float64
-	Uncalibrated bool
+// --- Hardware characterization results ---
+
+// HWCharResult holds hardware characterization results.
+type HWCharResult struct {
+	PeakTOPS     map[string]float64 // dtype -> TOPS
+	PeakBW       float64            // bytes/sec
+	BalancePoint map[string]float64 // dtype -> FLOPs/byte
 }
