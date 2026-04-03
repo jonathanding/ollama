@@ -77,7 +77,7 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 			for j, s := range shape {
 				intShape[j] = int(s)
 			}
-			inputs[i] = ctx.Zeros(dt, intShape...)
+			inputs[i] = ctx.Input().Zeros(dt, intShape...)
 		}
 	}
 

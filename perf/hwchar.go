@@ -65,8 +65,8 @@ func benchPeakTOPS(backend ml.Backend, dtype ml.DType, cfg BenchmarkConfig) (flo
 	ctx := backend.NewContext()
 	defer ctx.Close()
 
-	a := ctx.Zeros(dtype, M, K)
-	b := ctx.Zeros(dtype, K, N)
+	a := ctx.Input().Zeros(dtype, M, K)
+	b := ctx.Input().Zeros(dtype, K, N)
 	out := a.Mulmat(ctx, b)
 	ctx.Forward(out)
 
@@ -95,7 +95,7 @@ func benchPeakBandwidth(backend ml.Backend, cfg BenchmarkConfig) (float64, error
 	ctx := backend.NewContext()
 	defer ctx.Close()
 
-	src := ctx.Zeros(ml.DTypeF32, size)
+	src := ctx.Input().Zeros(ml.DTypeF32, size)
 	dst := src.Contiguous(ctx)
 	ctx.Forward(dst)
 

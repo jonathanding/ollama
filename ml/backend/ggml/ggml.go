@@ -461,6 +461,7 @@ func NewForBench(params ml.BackendParams) (ml.Backend, error) {
 	// Collect all available backends and buffer types
 	var schedBackends []C.ggml_backend_t
 	var schedBufts []C.ggml_backend_buffer_type_t
+	deviceBufferTypes := make(map[C.ggml_backend_dev_t]C.ggml_backend_buffer_type_t)
 
 	// GPU/accel backends first, then CPU
 	for _, d := range append(gpus, append(accels, cpus...)...) {
@@ -468,6 +469,7 @@ func NewForBench(params ml.BackendParams) (ml.Backend, error) {
 		bt := C.ggml_backend_get_default_buffer_type(b)
 		schedBackends = append(schedBackends, b)
 		schedBufts = append(schedBufts, bt)
+		deviceBufferTypes[d] = bt
 
 		if C.ggml_backend_is_cpu(b) {
 			C.ggml_backend_cpu_set_n_threads(b, C.int(Threads(params.NumThreads)))
@@ -476,6 +478,13 @@ func NewForBench(params ml.BackendParams) (ml.Backend, error) {
 
 	if len(schedBackends) == 0 {
 		return nil, fmt.Errorf("no compute devices found")
+	}
+
+	// inputs always use cpu
+	cpuDev := C.ggml_backend_dev_by_type(C.GGML_BACKEND_DEVICE_TYPE_CPU)
+	var inputBuft C.ggml_backend_buffer_type_t
+	if bt, ok := deviceBufferTypes[cpuDev]; ok {
+		inputBuft = bt
 	}
 
 	maxGraphNodes := 8192
@@ -500,6 +509,7 @@ func NewForBench(params ml.BackendParams) (ml.Backend, error) {
 		sched:          sched,
 		schedBackends:  schedBackends,
 		schedBufts:     schedBufts,
+		input:          inputBuft,
 		maxGraphNodes:  maxGraphNodes,
 		requiredMemory: &requiredMemory,
 		btDeviceMemory: btDeviceMemory,
