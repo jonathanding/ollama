@@ -98,6 +98,17 @@ type OpBreakdown struct {
 	Percentage   float64 `json:"percentage"`
 }
 
+// --- Benchmarking configuration ---
+
+// BenchmarkConfig controls adaptive sampling and measurement parameters.
+type BenchmarkConfig struct {
+	ErrorThreshold float64 // relative error threshold for adaptive refinement
+	MaxPointsPerOp int     // maximum number of sample points per operator
+	WarmupReps     int     // number of warmup iterations before measurement
+	MeasureReps    int     // number of measurement iterations
+	TrimPercent    float64 // percentage of outliers to trim (e.g., 0.1 = 10%)
+}
+
 // --- Internal helper types ---
 
 // OpKey uniquely identifies an operator configuration.
