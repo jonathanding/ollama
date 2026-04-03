@@ -52,7 +52,7 @@ bench-sweep run -model <model> -name <run-name> [options]
 | `-name` | (required) | Run name; auto-renamed `_1`, `_2`… on conflict |
 | `-sizes` | `512,1024,2048,4096` | Comma-separated prompt token sizes to sweep |
 | `-epochs` | `6` | Timed iterations per size |
-| `-warmup` | `2` | Warmup iterations before timing (≥2 recommended) |
+| `-warmup` | `4` | Warmup iterations before timing (≥2 recommended) |
 | `-max-tokens` | `16` | Max output tokens per request (keep small to isolate prefill) |
 | `-cv-threshold` | `5.0` | CV% above which a result is flagged ⚠ unstable |
 | `-host` | `$OLLAMA_HOST` | Ollama server URL |
@@ -64,9 +64,9 @@ bench-sweep run -model qwen3-coder-next -name baseline -sizes 512,1024,2048,4096
 
 **Output:**
 ```
-Starting benchmark: model=qwen3-coder-next  sizes=512,1024,2048,4096  epochs=6  warmup=2
+Starting benchmark: model=qwen3-coder-next  sizes=512,1024,2048,4096  epochs=6  warmup=4
 
-Model: qwen3-coder-next  |  Epochs: 6  |  Warmup: 2
+Model: qwen3-coder-next  |  Epochs: 6  |  Warmup: 4
 
 prompt_tokens │ prefill_tps (mean) │ prefill_tps (p99) │   CV% │ TTFT mean │ TTFT p99 │   CV% │ gen_tps │ status
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -76,9 +76,9 @@ prompt_tokens │ prefill_tps (mean) │ prefill_tps (p99) │   CV% │ TTFT me
         4,096 │         3,890 t/s  │         3,200 t/s │  8.7% │    198 ms │   240 ms │  9.2% │  36 t/s │ ⚠
 
 ⚠ [size=4096] prefill_tps CV=8.7% exceeds threshold 5.0%
-  hint: consider increasing -warmup (current: 2) or closing background processes
+  hint: consider increasing -warmup (current: 4) or closing background processes
 
-Run "baseline" saved to C:\Users\you\.ollama\bench\baseline.json
+Run "baseline" saved to C:\Users\you\.ollama\bench\qwen3-coder-next_baseline.json
 ```
 
 ### `diff` — Compare two runs
@@ -143,6 +143,66 @@ If CV% exceeds `-cv-threshold` for either `prefill_tps` or `TTFT` at a given siz
 1. Increase `-warmup` (try `-warmup 4`)
 2. Close browser tabs, background services, and other GPU workloads
 3. On Windows, check Task Manager for CPU/GPU spikes during the run
+
+---
+
+## Request Path: `/api/generate` vs `/api/chat`
+
+### How bench-sweep sends requests
+
+Every bench-sweep request uses Ollama's `/api/generate` endpoint with `Raw: true`:
+
+```
+POST /api/generate
+{ "model": "...", "prompt": "<corpus text>", "raw": true,
+  "options": { "temperature": 0, "num_predict": 16 } }
+```
+
+`Raw: true` bypasses the chat template — the prompt is sent directly to the model's tokenizer without any special tokens such as `<|im_start|>system`, role markers, or `<think>` delimiters. This is the lowest-overhead path and gives the cleanest measurement of the model's raw prefill and decode throughput.
+
+### Differences from `/api/chat`
+
+| | `/api/generate` + `Raw: true` | `/api/chat` |
+|---|---|---|
+| Chat template | Bypassed | Applied |
+| System prompt | None | Optional |
+| Thinking tokens (`<think>…</think>`) | Not triggered | Triggered on models that enable thinking by default |
+| TTFT | Time to first answer token | Time to first **visible** answer token (thinking tokens are invisible) |
+| Measured generation speed | Pure decode throughput | Decode throughput including hidden thinking tokens |
+
+### Impact on non-thinking models
+
+For models that do not use a thinking mode (e.g. most base models, instruction-tuned models without `<think>` support), there is no practical difference between the two paths except for the chat template token overhead. bench-sweep results are directly comparable to real-world `/api/chat` latency.
+
+### Impact on thinking models (e.g. Qwen3, DeepSeek-R1)
+
+Thinking models use the `<think>…</think>` delimiter in their chat template to activate a chain-of-thought reasoning phase before producing a visible answer. This phase only activates when the template is applied — it is **not** triggered by `Raw: true`.
+
+Consequences for bench-sweep measurements:
+
+- **`prefill_tps` is unaffected.** Prefill (processing the input prompt) is the same regardless of whether thinking is later triggered.
+- **`gen_tps` is higher than real-world decode.** With `Raw: true`, the model generates answer tokens directly. In actual `/api/chat` usage the model first generates potentially thousands of invisible thinking tokens, then the answer. The two decode phases have different token distributions, so their per-token throughput differs.
+- **`ttft_ms` is much lower than real-world TTFT.** In production, TTFT for a thinking model includes the full thinking phase. A model that thinks for 2 000 tokens before answering will show `TTFT ≈ 2000 / gen_tps` seconds of additional latency that bench-sweep does not capture.
+
+**Example (Qwen3.5 27B, RTX 3090):**
+
+| Metric | bench-sweep (`Raw: true`) | `/api/chat` (thinking) |
+|---|---|---|
+| prefill_tps | ~470 t/s | ~470 t/s |
+| gen_tps | ~24 t/s | ~36 t/s\* |
+| user-perceived TTFT (1 K thinking tokens) | ~35 ms | ~35 ms + ~28 s |
+
+\* Thinking-token generation is faster than answer-token generation on Qwen3 because the model's internal routing favours shorter attention spans during the reasoning phase.
+
+### When bench-sweep is the right tool
+
+bench-sweep is well-suited for:
+
+- **Comparing optimisations on the same model** — any change that affects prefill or decode throughput is correctly captured regardless of endpoint.
+- **Non-thinking models** — results directly reflect user-facing latency.
+- **Thinking models where prefill performance is the focus** — prefill_tps and TTFT attributable to the prefill phase are accurately measured.
+
+For thinking models where **end-to-end user-perceived TTFT** matters, a complementary benchmark using `/api/chat` (with the chat template applied and thinking enabled) is needed. The invisible thinking phase dominates TTFT for complex prompts and is outside bench-sweep's current scope.
 
 ---
 
