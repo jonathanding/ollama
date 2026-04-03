@@ -146,27 +146,27 @@ func makeTestProfileForEstimation() *Profile {
 					{Shape: []int64{16777216}, LatencyUs: 3000.0},
 				},
 			},
-			// MUL_MAT curve 1: (M=4096, K=4096)
+			// MUL_MAT curve 1: (M=4096, K=4096), points store [N] only
 			{
 				Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
 				Dimensions: []string{"N"},
 				FixedDims:  map[string]int64{"M": 4096, "K": 4096},
 				Points: []LatencyPoint{
-					{Shape: []int64{4096, 4096, 1}, LatencyUs: 10.0},
-					{Shape: []int64{4096, 4096, 32}, LatencyUs: 50.0},
-					{Shape: []int64{4096, 4096, 256}, LatencyUs: 200.0},
-					{Shape: []int64{4096, 4096, 4096}, LatencyUs: 3000.0},
+					{Shape: []int64{1}, LatencyUs: 10.0},
+					{Shape: []int64{32}, LatencyUs: 50.0},
+					{Shape: []int64{256}, LatencyUs: 200.0},
+					{Shape: []int64{4096}, LatencyUs: 3000.0},
 				},
 			},
-			// MUL_MAT curve 2: (M=14336, K=4096)
+			// MUL_MAT curve 2: (M=14336, K=4096), points store [N] only
 			{
 				Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
 				Dimensions: []string{"N"},
 				FixedDims:  map[string]int64{"M": 14336, "K": 4096},
 				Points: []LatencyPoint{
-					{Shape: []int64{14336, 4096, 1}, LatencyUs: 25.0},
-					{Shape: []int64{14336, 4096, 32}, LatencyUs: 120.0},
-					{Shape: []int64{14336, 4096, 4096}, LatencyUs: 8000.0},
+					{Shape: []int64{1}, LatencyUs: 25.0},
+					{Shape: []int64{32}, LatencyUs: 120.0},
+					{Shape: []int64{4096}, LatencyUs: 8000.0},
 				},
 			},
 			// FLASH_ATTN_EXT curve

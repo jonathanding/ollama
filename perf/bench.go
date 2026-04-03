@@ -232,12 +232,17 @@ func benchmarkElementwise(backend ml.Backend, op, dtype string, cfg BenchmarkCon
 }
 
 // benchmarkMulMat uses AdaptiveSample1D over N with fixed (M, K).
+// IMPORTANT: AdaptiveSample1D works with 1D shapes (Shape[0] is the sweep dimension).
+// We keep shapes 1D during sampling, matching benchmarkFlashAttn's pattern.
 func benchmarkMulMat(backend ml.Backend, dtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
 	M := fixedDims["M"]
 	K := fixedDims["K"]
 	measure := func(shape []int64) LatencyPoint {
 		N := shape[0]
-		return measureOp(backend, "MUL_MAT", []int64{M, K, N}, dtype, cfg)
+		pt := measureOp(backend, "MUL_MAT", []int64{M, K, N}, dtype, cfg)
+		// Keep shape 1D for AdaptiveSample1D's internal sorting/interpolation
+		pt.Shape = []int64{N}
+		return pt
 	}
 	// N range: 1 to 4096 (batch sizes in inference)
 	return AdaptiveSample1D(measure, 1, 4096, 8, cfg)

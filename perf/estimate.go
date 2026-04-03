@@ -2,7 +2,6 @@ package perf
 
 import (
 	"fmt"
-	"log/slog"
 	"sort"
 
 	"github.com/ollama/ollama/ml"
@@ -247,6 +246,3 @@ func RunEstimate(modelRef string, profilePath string) (*EstimateResult, error) {
 
 	return EstimateModel(profile, ggufPath)
 }
-
-// Suppress unused import warnings
-var _ = slog.Info

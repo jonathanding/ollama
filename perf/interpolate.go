@@ -15,6 +15,9 @@ func Interpolate1D(points []LatencyPoint, queryN int64) float64 {
 	if len(points) == 1 {
 		return points[0].LatencyUs
 	}
+	if queryN <= 0 {
+		return points[0].LatencyUs
+	}
 
 	logQ := math.Log(float64(queryN))
 
@@ -69,6 +72,9 @@ func Interpolate1DByDim(points []LatencyPoint, dimIdx int, queryVal int64) float
 		return 0
 	}
 	if len(points) == 1 {
+		return points[0].LatencyUs
+	}
+	if queryVal <= 0 {
 		return points[0].LatencyUs
 	}
 
@@ -154,14 +160,14 @@ func InterpolateMulMat(curves []OperatorCurve, queryM, queryK, queryN int64) flo
 	})
 
 	// Exact match or single curve
-	// For mul_mat, N is the third dimension (index 2)
+	// Points store 1D shapes [N] since M,K are fixed per curve
 	if candidates[0].logDist == 0 || len(candidates) == 1 {
-		return Interpolate1DByDim(candidates[0].curve.Points, 2, queryN)
+		return Interpolate1DByDim(candidates[0].curve.Points, 0, queryN)
 	}
 
 	// Inverse distance weighting between two nearest curves
-	lat1 := Interpolate1DByDim(candidates[0].curve.Points, 2, queryN)
-	lat2 := Interpolate1DByDim(candidates[1].curve.Points, 2, queryN)
+	lat1 := Interpolate1DByDim(candidates[0].curve.Points, 0, queryN)
+	lat2 := Interpolate1DByDim(candidates[1].curve.Points, 0, queryN)
 	w1 := 1.0 / candidates[0].logDist
 	w2 := 1.0 / candidates[1].logDist
 	return (lat1*w1 + lat2*w2) / (w1 + w2)

@@ -50,13 +50,6 @@ type LatencyPoint struct {
 
 // --- Operator Registry ---
 
-// OpRunner defines how to benchmark an operator (documentation only — runtime uses OpRunnerML).
-type OpRunner struct {
-	NumInputs  int
-	Dimensions []string
-	Run        func(ctx interface{}, inputs []interface{}) interface{}
-}
-
 // SamplingGrid defines the points to benchmark for one operator.
 type SamplingGrid struct {
 	Op          string

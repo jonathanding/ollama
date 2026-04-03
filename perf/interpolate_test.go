@@ -45,13 +45,13 @@ func makeMulMatCurves(mkPairs [][2]int64, nValues []int64, latencyFunc func(m, k
 		pts := make([]LatencyPoint, len(nValues))
 		for j, n := range nValues {
 			pts[j] = LatencyPoint{
-				Shape:     []int64{mk[0], mk[1], n},
+				Shape:     []int64{n},
 				LatencyUs: latencyFunc(mk[0], mk[1], n),
 			}
 		}
 		curves[i] = OperatorCurve{
 			Op:         "mul_mat",
-			Dimensions: []string{"M", "K", "N"},
+			Dimensions: []string{"N"},
 			FixedDims:  map[string]int64{"M": mk[0], "K": mk[1]},
 			Points:     pts,
 		}
@@ -228,7 +228,7 @@ func TestInterpolateMulMat_ExactMKMatch(t *testing.T) {
 		func(m, k, n int64) float64 { return float64(m*k*n) / 1e6 },
 	)
 	result := InterpolateMulMat(curves, 128, 4096, 16)
-	expected := Interpolate1DByDim(curves[0].Points, 2, 16)
+	expected := Interpolate1DByDim(curves[0].Points, 0, 16)
 	assert.InDelta(t, expected, result, 1e-9)
 }
 
@@ -239,8 +239,8 @@ func TestInterpolateMulMat_BetweenMKPairs(t *testing.T) {
 		func(m, k, n int64) float64 { return float64(m*k*n) / 1e6 },
 	)
 	result := InterpolateMulMat(curves, 150, 1500, 31)
-	lat1 := Interpolate1DByDim(curves[0].Points, 2, 31)
-	lat2 := Interpolate1DByDim(curves[1].Points, 2, 31)
+	lat1 := Interpolate1DByDim(curves[0].Points, 0, 31)
+	lat2 := Interpolate1DByDim(curves[1].Points, 0, 31)
 	dM := math.Log(150.0) - math.Log(100.0)
 	dK := math.Log(1500.0) - math.Log(1000.0)
 	dist1 := math.Sqrt(dM*dM + dK*dK)
@@ -260,7 +260,7 @@ func TestInterpolateMulMat_SingleCurve(t *testing.T) {
 		func(m, k, n int64) float64 { return float64(m*k*n) / 1e6 },
 	)
 	result := InterpolateMulMat(curves, 256, 8192, 16)
-	expected := Interpolate1DByDim(curves[0].Points, 2, 16)
+	expected := Interpolate1DByDim(curves[0].Points, 0, 16)
 	assert.InDelta(t, expected, result, 1e-9)
 }
 
@@ -281,8 +281,8 @@ func TestInterpolateMulMat_AsymmetricMK(t *testing.T) {
 		func(m, k, n int64) float64 { return float64(m*k*n) / 1e6 },
 	)
 	result := InterpolateMulMat(curves, 150, 1000, 50)
-	lat1 := Interpolate1DByDim(curves[0].Points, 2, 50)
-	lat2 := Interpolate1DByDim(curves[1].Points, 2, 50)
+	lat1 := Interpolate1DByDim(curves[0].Points, 0, 50)
+	lat2 := Interpolate1DByDim(curves[1].Points, 0, 50)
 	assert.Greater(t, result, 0.0)
 	assert.Greater(t, result, math.Min(lat1, lat2)*0.9)
 	assert.Less(t, result, math.Max(lat1, lat2)*1.1)
@@ -295,8 +295,8 @@ func TestInterpolateMulMat_InverseDistanceWeighting(t *testing.T) {
 		func(m, k, n int64) float64 { return float64(m*k*n) / 1e6 },
 	)
 	result := InterpolateMulMat(curves, 150, 1500, 50)
-	lat1 := Interpolate1DByDim(curves[0].Points, 2, 50)
-	lat2 := Interpolate1DByDim(curves[1].Points, 2, 50)
+	lat1 := Interpolate1DByDim(curves[0].Points, 0, 50)
+	lat2 := Interpolate1DByDim(curves[1].Points, 0, 50)
 	assert.Greater(t, result, 0.0)
 	// Result should be weighted between the two curves
 	assert.Greater(t, result, math.Min(lat1, lat2))
