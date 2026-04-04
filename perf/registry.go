@@ -2,6 +2,7 @@ package perf
 
 import (
 	"math"
+	"math/rand/v2"
 
 	"github.com/ollama/ollama/ml"
 )
@@ -13,6 +14,30 @@ type OpRunnerML struct {
 	NumInputs  int
 	Dimensions []string
 	Run        func(ctx ml.Context, inputs []ml.Tensor) ml.Tensor
+}
+
+// randomFloat32Slice generates a slice of n random float32 values in [-1, 1].
+func randomFloat32Slice(n int) []float32 {
+	data := make([]float32, n)
+	for i := range data {
+		data[i] = rand.Float32()*2 - 1
+	}
+	return data
+}
+
+// randomTensor creates a tensor with random float32 data, then casts to the target dtype.
+// This avoids benchmarking with all-zero tensors which could trigger special-case fast paths.
+func randomTensor(ctx ml.Context, dt ml.DType, shape ...int) ml.Tensor {
+	n := 1
+	for _, s := range shape {
+		n *= s
+	}
+	data := randomFloat32Slice(n)
+	t := ctx.Input().FromFloats(data, shape...)
+	if dt != ml.DTypeF32 {
+		t = t.Cast(ctx, dt)
+	}
+	return t
 }
 
 // opRegistry maps GGML op names to their benchmark definitions.

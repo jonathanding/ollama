@@ -128,6 +128,58 @@ func TestPhase1Dtypes(t *testing.T) {
 	assert.Contains(t, dtypes, "q8_0")
 }
 
+func TestRandomFloat32Slice_Range(t *testing.T) {
+	data := randomFloat32Slice(10000)
+	for i, v := range data {
+		assert.GreaterOrEqual(t, v, float32(-1.0), "index %d out of range low", i)
+		assert.LessOrEqual(t, v, float32(1.0), "index %d out of range high", i)
+	}
+}
+
+func TestRandomFloat32Slice_NotAllZeros(t *testing.T) {
+	data := randomFloat32Slice(1024)
+	allZero := true
+	for _, v := range data {
+		if v != 0 {
+			allZero = false
+			break
+		}
+	}
+	assert.False(t, allZero, "random data should not be all zeros")
+}
+
+func TestRandomFloat32Slice_MeanNearZero(t *testing.T) {
+	data := randomFloat32Slice(10000)
+	var sum float64
+	for _, v := range data {
+		sum += float64(v)
+	}
+	mean := sum / float64(len(data))
+	assert.InDelta(t, 0.0, mean, 0.1, "mean of uniform[-1,1] should be near zero")
+}
+
+func TestRandomFloat32Slice_SpreadAcrossRange(t *testing.T) {
+	data := randomFloat32Slice(1000)
+	var hasNeg, hasPos bool
+	for _, v := range data {
+		if v < -0.5 {
+			hasNeg = true
+		}
+		if v > 0.5 {
+			hasPos = true
+		}
+	}
+	assert.True(t, hasNeg, "should have values < -0.5")
+	assert.True(t, hasPos, "should have values > 0.5")
+}
+
+func TestRandomFloat32Slice_Length(t *testing.T) {
+	for _, n := range []int{0, 1, 100, 10000} {
+		data := randomFloat32Slice(n)
+		assert.Len(t, data, n)
+	}
+}
+
 func TestPhase1MulMatShapePairs(t *testing.T) {
 	pairs := Phase1MulMatFixedDims()
 	assert.NotEmpty(t, pairs)

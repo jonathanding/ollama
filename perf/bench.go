@@ -68,17 +68,14 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 	ctx := backend.NewContext()
 	defer ctx.Close()
 
-	// Create input tensors
-	inputs := make([]ml.Tensor, runner.NumInputs)
-	for i := 0; i < runner.NumInputs; i++ {
-		if i < len(tensorShapes) {
-			shape := tensorShapes[i]
-			intShape := make([]int, len(shape))
-			for j, s := range shape {
-				intShape[j] = int(s)
-			}
-			inputs[i] = ctx.Input().Zeros(dt, intShape...)
+	// Create input tensors with random data
+	inputs := make([]ml.Tensor, len(tensorShapes))
+	for i, shape := range tensorShapes {
+		intShape := make([]int, len(shape))
+		for j, s := range shape {
+			intShape[j] = int(s)
 		}
+		inputs[i] = randomTensor(ctx, dt, intShape...)
 	}
 
 	// Build computation graph
