@@ -56,8 +56,8 @@ func TestGenerateHTMLViewer_ContainsChartElements(t *testing.T) {
 	require.NoError(t, err)
 	html := string(data)
 
-	assert.Contains(t, html, "chart-container")
-	assert.Contains(t, html, "select")
+	assert.Contains(t, html, "charts-container")
+	assert.Contains(t, html, "chart-card")
 }
 
 func TestGenerateHTMLViewer_EmptyProfile(t *testing.T) {

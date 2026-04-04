@@ -89,12 +89,25 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 	}
 	ctx.Forward(out)
 
-	// Warmup
+	// Adaptive warmup: reduce for slow ops to avoid wasting minutes
+	warmupStart := time.Now()
 	for i := 0; i < cfg.WarmupReps; i++ {
 		ctx.Compute(out)
+		// After first warmup, if it took >1s, reduce remaining warmups
+		if i == 0 {
+			elapsed := float64(time.Since(warmupStart).Microseconds())
+			if elapsed > 5e6 {
+				// >5s per op: 1 warmup is enough
+				break
+			} else if elapsed > 1e6 {
+				// >1s per op: 2 warmups total
+				ctx.Compute(out)
+				break
+			}
+		}
 	}
 
-	// Measure with adaptive reps: reduce repetitions for slow ops
+	// Measure with tiered adaptive reps based on latency
 	reps := cfg.MeasureReps
 	latencies := make([]float64, 0, reps)
 	for i := 0; i < reps; i++ {
@@ -102,10 +115,22 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 		ctx.Compute(out)
 		lat := float64(time.Since(start).Microseconds())
 		latencies = append(latencies, lat)
-		// After 5 samples, if median latency > 1s, reduce to 10 reps total
-		if i == 4 && trimmedMedian(latencies, 0) > 1e6 && reps > 10 {
-			reps = 10
-			slog.Info("reducing reps for slow op", "latency_us", trimmedMedian(latencies, 0), "reps", reps)
+		// After 5 samples, check median and reduce reps for slow ops
+		if i == 4 {
+			med := trimmedMedian(latencies, 0)
+			var newReps int
+			switch {
+			case med > 5e6:
+				newReps = 5
+			case med > 1e6:
+				newReps = 10
+			case med > 1e5:
+				newReps = 20
+			}
+			if newReps > 0 && newReps < reps {
+				reps = newReps
+				slog.Info("adaptive reps", "latency_us", med, "reps", reps)
+			}
 		}
 	}
 
@@ -480,7 +505,7 @@ func benchmarkFlashAttn(backend ml.Backend, dtype string, fixedDims map[string]i
 		pt.Shape = []int64{seqLen}
 		return pt
 	}
-	prefillPts := AdaptiveSample1D(prefillMeasure, 64, 4096, 8, cfg)
+	prefillPts := AdaptiveSample1D(prefillMeasure, 64, 2048, 8, cfg)
 	// Convert to 2D after sampling: [seq_len] → [seq_len, seq_len]
 	for i := range prefillPts {
 		seqLen := prefillPts[i].Shape[0]
