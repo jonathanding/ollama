@@ -11,9 +11,17 @@ import (
 // OpRunner in types.go uses interface{} to avoid circular imports;
 // this is the real implementation.
 type OpRunnerML struct {
-	NumInputs  int
+	// Dimensions lists the performance-relevant shape dimensions for this op.
 	Dimensions []string
-	Run        func(ctx ml.Context, inputs []ml.Tensor) ml.Tensor
+
+	// CreateInputs creates input tensors for benchmarking.
+	// If nil, measureOp uses the default: randomTensor with shapes from expandShapes.
+	// Set this for ops that need non-standard tensor creation (mixed dtypes, special shapes).
+	// dtypeStr is the raw dtype string (e.g. "f32", "q4_0") — call parseDType() internally if needed.
+	CreateInputs func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor
+
+	// Run invokes the operator and returns the output tensor.
+	Run func(ctx ml.Context, inputs []ml.Tensor) ml.Tensor
 }
 
 // randomFloat32Slice generates a slice of n random float32 values in [-1, 1].
@@ -42,26 +50,23 @@ func randomTensor(ctx ml.Context, dt ml.DType, shape ...int) ml.Tensor {
 
 // opRegistry maps GGML op names to their benchmark definitions.
 // To add a new operator:
-//  1. Add an entry: "OP_NAME": {NumInputs, Dimensions, RunFunc}
-//  2. Add shape expansion in expandShapes() if not 1D
+//  1. Add an entry with Dimensions and Run (and optionally CreateInputs)
+//  2. Add shape expansion in expandShapes() if using default path
 //  3. Add tests in registry_test.go
 var opRegistry = map[string]OpRunnerML{
 	"SILU": {
-		NumInputs:  1,
 		Dimensions: []string{"N"},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
 			return in[0].SILU(ctx)
 		},
 	},
 	"MUL_MAT": {
-		NumInputs:  2,
 		Dimensions: []string{"M", "K", "N"},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
 			return in[0].Mulmat(ctx, in[1])
 		},
 	},
 	"FLASH_ATTN_EXT": {
-		NumInputs:  3,
 		Dimensions: []string{"seq_q", "seq_kv"},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
 			sdpa, ok := in[0].(ml.ScaledDotProductAttention)

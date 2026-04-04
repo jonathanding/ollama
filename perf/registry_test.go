@@ -13,7 +13,7 @@ func TestRegistryContainsPhase1Ops(t *testing.T) {
 		t.Run(op, func(t *testing.T) {
 			runner, ok := opRegistry[op]
 			assert.True(t, ok, "op %q must be in registry", op)
-			assert.Greater(t, runner.NumInputs, 0)
+			assert.NotNil(t, runner.Run)
 			assert.NotEmpty(t, runner.Dimensions)
 		})
 	}
@@ -36,20 +36,33 @@ func TestRegistryDimensions(t *testing.T) {
 	}
 }
 
-func TestRegistryNumInputs(t *testing.T) {
-	tests := []struct {
-		op   string
-		want int
-	}{
-		{"SILU", 1},
-		{"MUL_MAT", 2},
-		{"FLASH_ATTN_EXT", 3},
-	}
-	for _, tt := range tests {
-		t.Run(tt.op, func(t *testing.T) {
-			assert.Equal(t, tt.want, opRegistry[tt.op].NumInputs)
+func TestRegistryCreateInputsOrExpandShapes(t *testing.T) {
+	for name, runner := range opRegistry {
+		t.Run(name, func(t *testing.T) {
+			assert.NotNil(t, runner.Run, "op %q must have a Run function", name)
+			assert.NotEmpty(t, runner.Dimensions, "op %q must have Dimensions", name)
 		})
 	}
+}
+
+func TestRegistryCustomCreateInputs(t *testing.T) {
+	// These ops MUST have CreateInputs because they need non-standard tensor creation
+	// (None yet in this task — MUL_MAT will get CreateInputs in Task 3)
+	// For now, verify no Phase 1 ops have CreateInputs set
+	for _, op := range []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT"} {
+		t.Run(op, func(t *testing.T) {
+			runner, ok := opRegistry[op]
+			require.True(t, ok)
+			assert.Nil(t, runner.CreateInputs, "%s should not have CreateInputs yet", op)
+		})
+	}
+}
+
+func TestRegistryDefaultCreateInputs(t *testing.T) {
+	// SILU should use the default path (nil CreateInputs)
+	runner, ok := opRegistry["SILU"]
+	require.True(t, ok)
+	assert.Nil(t, runner.CreateInputs, "SILU should use default tensor creation")
 }
 
 func TestExpandShapes_SILU(t *testing.T) {

@@ -63,19 +63,23 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 		return LatencyPoint{Shape: gridPoint}
 	}
 
-	tensorShapes := expandShapes(op, gridPoint)
-
 	ctx := backend.NewContext()
 	defer ctx.Close()
 
-	// Create input tensors with random data
-	inputs := make([]ml.Tensor, len(tensorShapes))
-	for i, shape := range tensorShapes {
-		intShape := make([]int, len(shape))
-		for j, s := range shape {
-			intShape[j] = int(s)
+	// Create input tensors — use custom CreateInputs if provided, else default
+	var inputs []ml.Tensor
+	if runner.CreateInputs != nil {
+		inputs = runner.CreateInputs(ctx, computeDtype, gridPoint)
+	} else {
+		tensorShapes := expandShapes(op, gridPoint)
+		inputs = make([]ml.Tensor, len(tensorShapes))
+		for i, shape := range tensorShapes {
+			intShape := make([]int, len(shape))
+			for j, s := range shape {
+				intShape[j] = int(s)
+			}
+			inputs[i] = randomTensor(ctx, dt, intShape...)
 		}
-		inputs[i] = randomTensor(ctx, dt, intShape...)
 	}
 
 	// Build computation graph
