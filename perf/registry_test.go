@@ -255,6 +255,44 @@ func TestExpandShapes_MUL(t *testing.T) {
 	assert.Equal(t, []int64{65536}, shapes[1])
 }
 
+func TestRopeInputParams(t *testing.T) {
+	tests := []struct {
+		name       string
+		totalN     int64
+		wantShape  []int
+		wantSeqLen int64
+	}{
+		{"single_token", 128, []int{128, 1, 1, 1}, 1},
+		{"batch_8", 1024, []int{128, 1, 8, 1}, 8},
+		{"large_seq", 65536, []int{128, 1, 512, 1}, 512},
+		{"below_head_dim", 64, []int{128, 1, 1, 1}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shape, seqLen := ropeInputParams(tt.totalN)
+			assert.Equal(t, tt.wantShape, shape, "input tensor shape")
+			assert.Equal(t, tt.wantSeqLen, seqLen, "seqLen")
+		})
+	}
+}
+
+func TestRopeInputParams_PositionsAreSequential(t *testing.T) {
+	_, seqLen := ropeInputParams(1024)
+	pos := ropePositions(seqLen)
+	require.Len(t, pos, int(seqLen))
+	for i, v := range pos {
+		assert.Equal(t, int32(i), v, "position %d", i)
+	}
+}
+
+func TestRegistryROPE(t *testing.T) {
+	runner, ok := opRegistry["ROPE"]
+	assert.True(t, ok, "ROPE must be in registry")
+	assert.Equal(t, []string{"N"}, runner.Dimensions)
+	assert.NotNil(t, runner.CreateInputs, "ROPE needs custom tensor creation")
+	assert.NotNil(t, runner.Run)
+}
+
 func TestPhase1MulMatShapePairs(t *testing.T) {
 	pairs := Phase1MulMatFixedDims()
 	assert.NotEmpty(t, pairs)

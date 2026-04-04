@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 
 	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/ml/nn/rope"
 )
 
 // OpRunnerML is the concrete registry entry type using ml package types.
@@ -128,6 +129,46 @@ var opRegistry = map[string]OpRunnerML{
 			return in[0].RMSNorm(ctx, nil, 1e-5)
 		},
 	},
+	"ROPE": {
+		Dimensions: []string{"N"},
+		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+			dt, _ := parseDType(dtypeStr)
+			shape, seqLen := ropeInputParams(gridPoint[0])
+			input := randomTensor(ctx, dt, shape...)
+			pos := ropePositions(seqLen)
+			posTensor := ctx.Input().FromInts(pos, int(seqLen))
+			return []ml.Tensor{input, posTensor}
+		},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			type roper interface {
+				RoPE(ctx ml.Context, positions ml.Tensor, dim int, base, scale float32, options ...func(*rope.Options)) ml.Tensor
+			}
+			if t, ok := in[0].(roper); ok {
+				return t.RoPE(ctx, in[1], 128, 10000.0, 1.0)
+			}
+			return nil
+		},
+	},
+}
+
+// ropeInputParams computes the 4D input tensor shape and seqLen for ROPE benchmarking.
+// gridPoint[0] = N (total elements). Input shape is [headDim=128, 1, seqLen, 1].
+func ropeInputParams(totalN int64) (shape []int, seqLen int64) {
+	const headDim = 128
+	seqLen = totalN / headDim
+	if seqLen < 1 {
+		seqLen = 1
+	}
+	return []int{headDim, 1, int(seqLen), 1}, seqLen
+}
+
+// ropePositions returns sequential position indices [0, 1, ..., seqLen-1] as int32.
+func ropePositions(seqLen int64) []int32 {
+	pos := make([]int32, seqLen)
+	for i := range pos {
+		pos[i] = int32(i)
+	}
+	return pos
 }
 
 // mulMatInputShapes returns (weightShape, activationShape) for MUL_MAT benchmarking.
