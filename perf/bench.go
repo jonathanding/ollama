@@ -426,7 +426,7 @@ func benchmarkElementwise(backend ml.Backend, op, dtype string, cfg BenchmarkCon
 	measure := func(shape []int64) LatencyPoint {
 		return measureOp(backend, op, shape, dtype, cfg)
 	}
-	return AdaptiveSample1D(measure, 1024, 64*1024*1024, 8, cfg)
+	return AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
 }
 
 // benchmarkMulMat uses AdaptiveSample1D over N with fixed (M, K).

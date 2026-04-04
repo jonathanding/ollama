@@ -31,7 +31,7 @@ func TestAdaptiveSample1D_SmoothPowerLaw(t *testing.T) {
 		MaxPointsPerOp: 20,
 	}
 
-	points := AdaptiveSample1D(measure, 1024, 64*1024*1024, 8, cfg)
+	points := AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
 
 	// Should converge with relatively few points (8 initial + a few refinements)
 	assert.LessOrEqual(t, len(points), 12, "smooth function should converge quickly")
@@ -58,7 +58,7 @@ func TestAdaptiveSample1D_SharpKnee(t *testing.T) {
 		MaxPointsPerOp: 20,
 	}
 
-	points := AdaptiveSample1D(measure, 1024, 64*1024*1024, 8, cfg)
+	points := AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
 
 	// Should add extra points around the knee
 	assert.Greater(t, len(points), 8, "should refine around the knee point")
@@ -85,7 +85,7 @@ func TestAdaptiveSample1D_BudgetLimit(t *testing.T) {
 		MaxPointsPerOp: 15,
 	}
 
-	points := AdaptiveSample1D(measure, 1024, 64*1024*1024, 8, cfg)
+	points := AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
 	assert.LessOrEqual(t, len(points), cfg.MaxPointsPerOp,
 		"must respect budget limit")
 }
@@ -100,8 +100,10 @@ func TestAdaptiveSample1D_AlreadyConverged(t *testing.T) {
 		MaxPointsPerOp: 20,
 	}
 
-	points := AdaptiveSample1D(measure, 1024, 64*1024*1024, 8, cfg)
-	assert.Equal(t, 8, len(points), "pure power law needs no refinement")
+	points := AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
+	// Pure power law: initial 8 points + 1 convergence check midpoint
+	assert.LessOrEqual(t, len(points), 9, "pure power law needs minimal refinement")
+	assert.GreaterOrEqual(t, len(points), 8)
 }
 
 func TestAdaptiveSample1D_MinMaxRange(t *testing.T) {
@@ -120,28 +122,60 @@ func TestAdaptiveSample1D_MinMaxRange(t *testing.T) {
 	assert.Equal(t, int64(1048576), points[len(points)-1].Shape[0], "last point should be at max")
 }
 
-func TestFindMaxInterpolationError(t *testing.T) {
-	// Create points where interval 1-2 has the highest error.
-	// Points: (100, 1.0), (1000, 10.0), (10000, 50.0)
-	// Intervals: [100,1000] follows power law, [1000,10000] deviates
+func TestWorstInterval_FindsKnee(t *testing.T) {
+	// Points with a sharp change at index 2: 1.0, 10.0, 50.0 (should be 100.0 for power law)
 	points := makePoints([][2]float64{
 		{100, 1.0},
-		{1000, 10.0},  // consistent with power law
-		{10000, 50.0},  // deviates (should be 100.0 for power law)
+		{1000, 10.0},
+		{10000, 50.0}, // deviates from power law (expected ~100.0)
 	})
 
-	measure := mockMeasure(func(n int64) float64 {
-		// True function: different from what the points suggest
-		if n < 5000 {
-			return 0.01 * float64(n)
-		}
-		return 0.005 * float64(n) // slope change
-	})
+	idx := worstInterval(points)
+	assert.GreaterOrEqual(t, idx, 0)
+	assert.Less(t, idx, len(points)-1)
+}
 
-	maxErr, maxIdx := findMaxInterpolationError(points, measure)
-	assert.Greater(t, maxErr, 0.0, "should find some error")
-	assert.GreaterOrEqual(t, maxIdx, 0)
-	assert.Less(t, maxIdx, len(points)-1)
+func TestWorstInterval_TwoPoints(t *testing.T) {
+	points := makePoints([][2]float64{
+		{100, 1.0},
+		{10000, 100.0},
+	})
+	idx := worstInterval(points)
+	assert.Equal(t, 0, idx, "with 2 points, should return the only interval")
+}
+
+func TestWorstInterval_ZeroLatency(t *testing.T) {
+	pts := []LatencyPoint{
+		{Shape: []int64{100}, LatencyUs: 0.0},
+		{Shape: []int64{1000}, LatencyUs: 0.0},
+	}
+	idx := worstInterval(pts)
+	assert.Equal(t, -1, idx, "all-zero latencies should return -1")
+}
+
+func TestInterpolationError_ExactMatch(t *testing.T) {
+	// Midpoint exactly on the log-linear interpolation → error ≈ 0
+	left := LatencyPoint{Shape: []int64{100}, LatencyUs: 10.0}
+	right := LatencyPoint{Shape: []int64{10000}, LatencyUs: 1000.0}
+	mid := LatencyPoint{Shape: []int64{1000}, LatencyUs: 100.0} // geometric midpoint, power law
+	err := interpolationError(left, right, mid)
+	assert.InDelta(t, 0.0, err, 0.001)
+}
+
+func TestInterpolationError_Deviation(t *testing.T) {
+	left := LatencyPoint{Shape: []int64{100}, LatencyUs: 10.0}
+	right := LatencyPoint{Shape: []int64{10000}, LatencyUs: 1000.0}
+	mid := LatencyPoint{Shape: []int64{1000}, LatencyUs: 50.0} // 2x off from expected 100
+	err := interpolationError(left, right, mid)
+	assert.Greater(t, err, 0.1, "50 vs expected 100 should show significant error")
+}
+
+func TestInterpolationError_ZeroLatency(t *testing.T) {
+	left := LatencyPoint{Shape: []int64{100}, LatencyUs: 0.0}
+	right := LatencyPoint{Shape: []int64{10000}, LatencyUs: 10.0}
+	mid := LatencyPoint{Shape: []int64{1000}, LatencyUs: 5.0}
+	err := interpolationError(left, right, mid)
+	assert.Equal(t, 0.0, err, "zero-latency endpoint should return 0 error")
 }
 
 func TestLogMidpoint(t *testing.T) {
@@ -170,6 +204,15 @@ func TestInsertSorted(t *testing.T) {
 	assert.Equal(t, int64(10000), result[3].Shape[0])
 }
 
+func TestInsertSorted_Duplicate(t *testing.T) {
+	pts := makePoints([][2]float64{
+		{100, 1.0}, {1000, 10.0},
+	})
+	dup := LatencyPoint{Shape: []int64{1000}, LatencyUs: 15.0}
+	result := insertSorted(pts, dup)
+	assert.Len(t, result, 2, "should not insert duplicate")
+}
+
 func TestAdaptiveSample1D_ZeroLatency(t *testing.T) {
 	// If measure returns zero latency, adaptive sampling should not panic or produce NaN
 	measure := func(shape []int64) LatencyPoint {
@@ -184,16 +227,12 @@ func TestAdaptiveSample1D_ZeroLatency(t *testing.T) {
 	}
 }
 
-func TestFindMaxInterpolationError_ZeroLatency(t *testing.T) {
-	// Points with zero latency should not cause NaN/Inf
-	pts := []LatencyPoint{
-		{Shape: []int64{100}, LatencyUs: 0.0},
-		{Shape: []int64{1000}, LatencyUs: 0.0},
-	}
-	measure := func(shape []int64) LatencyPoint {
-		return LatencyPoint{Shape: shape, LatencyUs: 0.0}
-	}
-	maxErr, _ := findMaxInterpolationError(pts, measure)
-	assert.False(t, math.IsNaN(maxErr))
-	assert.False(t, math.IsInf(maxErr, 0))
+func TestWidestInterval(t *testing.T) {
+	// Three intervals: [100, 200], [200, 10000], [10000, 20000]
+	// [200, 10000] is widest in log space
+	points := makePoints([][2]float64{
+		{100, 1.0}, {200, 2.0}, {10000, 100.0}, {20000, 200.0},
+	})
+	idx := widestInterval(points)
+	assert.Equal(t, 1, idx, "interval [200, 10000] should be widest")
 }
