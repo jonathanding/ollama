@@ -400,6 +400,14 @@ Instead of 24 full adaptive sampling grids, the calibration measures:
 > This mapping is approximate. The primary error source is the dequantization kernel difference,
 > not the memory footprint (which is similar within each group). Phase 2 may add direct C-level
 > benchmarking to bypass the Go DType limitation.
+>
+> **Mixed-dtype tensor creation for MUL_MAT benchmarking**: GGML's `mul_mat` requires the weight
+> tensor to be the quantized dtype (e.g., q4_0) while the activation tensor must be f32 or f16.
+> This means the generic `measureOp()` function — which creates all input tensors with the same
+> dtype — cannot be used for quantized MUL_MAT benchmarks. Instead, a dedicated `measureMulMat()`
+> function creates weight tensors at `weightDtype` and activation tensors at f32. This is
+> MUL_MAT-specific: FLASH_ATTN_EXT uses uniform f16 for all inputs (Q/K/V), and element-wise ops
+> operate on f32 activations only.
 
 ### 5A.5 Efficiency Constant Extraction
 
