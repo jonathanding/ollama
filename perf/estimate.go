@@ -18,8 +18,10 @@ func nodeToQueryShape(node ml.GraphNode) (op string, shape []int64, computeDtype
 	switch op {
 	case "MUL_MAT":
 		if len(node.InputShapes) >= 2 && len(node.InputShapes[0]) >= 2 && len(node.InputShapes[1]) >= 2 {
-			M := node.InputShapes[0][0]
-			K := node.InputShapes[0][1]
+			// GGML weight tensor: ne[0]=K (inner dim), ne[1]=M (output dim)
+			// Activation tensor:  ne[0]=K (inner dim), ne[1]=N (batch/seq)
+			K := node.InputShapes[0][0]
+			M := node.InputShapes[0][1]
 			N := node.InputShapes[1][1]
 			shape = []int64{M, K, N}
 			return

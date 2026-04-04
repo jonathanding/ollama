@@ -48,9 +48,10 @@ func TestNodeToQueryShape_MulMat(t *testing.T) {
 	op, shape, cdt, wdt := nodeToQueryShape(node)
 	assert.Equal(t, "MUL_MAT", op)
 	require.Len(t, shape, 3)
-	assert.Equal(t, int64(4096), shape[0]) // M
-	assert.Equal(t, int64(4096), shape[1]) // K
-	assert.Equal(t, int64(32), shape[2])   // N
+	// InputShapes[0] = {4096, 4096}: ne[0]=K=4096, ne[1]=M=4096
+	assert.Equal(t, int64(4096), shape[0]) // M (weight ne[1])
+	assert.Equal(t, int64(4096), shape[1]) // K (weight ne[0])
+	assert.Equal(t, int64(32), shape[2])   // N (activation ne[1])
 	assert.Equal(t, "f16", cdt)
 	assert.Equal(t, "q4_0", wdt)
 }
@@ -64,9 +65,10 @@ func TestNodeToQueryShape_MulMat_LargeN(t *testing.T) {
 		InputShapes:  [][]int64{{14336, 4096}, {4096, 512}},
 	}
 	_, shape, _, _ := nodeToQueryShape(node)
-	assert.Equal(t, int64(14336), shape[0]) // M
-	assert.Equal(t, int64(4096), shape[1])  // K
-	assert.Equal(t, int64(512), shape[2])   // N
+	// InputShapes[0] = {14336, 4096}: ne[0]=K=14336, ne[1]=M=4096
+	assert.Equal(t, int64(4096), shape[0])  // M (weight ne[1])
+	assert.Equal(t, int64(14336), shape[1]) // K (weight ne[0])
+	assert.Equal(t, int64(512), shape[2])   // N (activation ne[1])
 }
 
 func TestNodeToQueryShape_FlashAttn(t *testing.T) {
@@ -207,6 +209,16 @@ func makeTestProfileForEstimation() *Profile {
 					{Shape: []int64{65536}, LatencyUs: 18.0},
 					{Shape: []int64{1048576}, LatencyUs: 220.0},
 					{Shape: []int64{16777216}, LatencyUs: 3200.0},
+				},
+			},
+			{
+				Op: "RELU", Backend: "cuda", ComputeDtype: "f32",
+				Dimensions: []string{"N"},
+				Points: []LatencyPoint{
+					{Shape: []int64{1024}, LatencyUs: 2.0},
+					{Shape: []int64{65536}, LatencyUs: 12.0},
+					{Shape: []int64{1048576}, LatencyUs: 170.0},
+					{Shape: []int64{16777216}, LatencyUs: 2600.0},
 				},
 			},
 			{
@@ -438,8 +450,8 @@ func TestEstimatePhase_AllNodesUncalibrated(t *testing.T) {
 	p := makeTestProfileForEstimation()
 	nodes := []ml.GraphNode{
 		{Op: "TANH", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
-		{Op: "RELU", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
 		{Op: "SWIGLU", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
+		{Op: "NORM", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
 	}
 	var warnings []string
 	result := estimatePhase(p, nodes, &warnings)
