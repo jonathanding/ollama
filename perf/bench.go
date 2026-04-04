@@ -94,12 +94,19 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 		ctx.Compute(out)
 	}
 
-	// Measure
-	latencies := make([]float64, cfg.MeasureReps)
-	for i := 0; i < cfg.MeasureReps; i++ {
+	// Measure with adaptive reps: reduce repetitions for slow ops
+	reps := cfg.MeasureReps
+	latencies := make([]float64, 0, reps)
+	for i := 0; i < reps; i++ {
 		start := time.Now()
 		ctx.Compute(out)
-		latencies[i] = float64(time.Since(start).Microseconds())
+		lat := float64(time.Since(start).Microseconds())
+		latencies = append(latencies, lat)
+		// After 5 samples, if median latency > 1s, reduce to 10 reps total
+		if i == 4 && trimmedMedian(latencies, 0) > 1e6 && reps > 10 {
+			reps = 10
+			slog.Info("reducing reps for slow op", "latency_us", trimmedMedian(latencies, 0), "reps", reps)
+		}
 	}
 
 	median := trimmedMedian(latencies, cfg.TrimPercent)
@@ -473,7 +480,7 @@ func benchmarkFlashAttn(backend ml.Backend, dtype string, fixedDims map[string]i
 		pt.Shape = []int64{seqLen}
 		return pt
 	}
-	prefillPts := AdaptiveSample1D(prefillMeasure, 64, 16384, 8, cfg)
+	prefillPts := AdaptiveSample1D(prefillMeasure, 64, 4096, 8, cfg)
 	// Convert to 2D after sampling: [seq_len] → [seq_len, seq_len]
 	for i := range prefillPts {
 		seqLen := prefillPts[i].Shape[0]
