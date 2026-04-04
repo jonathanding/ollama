@@ -69,20 +69,29 @@ func benchPeakTOPS(backend ml.Backend, dtype ml.DType, cfg BenchmarkConfig) (flo
 	out := a.Mulmat(ctx, b)
 	ctx.Forward(out)
 
-	// Warmup
+	// Adaptive warmup
+	warmupStart := time.Now()
 	for i := 0; i < cfg.WarmupReps; i++ {
 		ctx.Compute(out)
+		if i == 0 {
+			elapsed := float64(time.Since(warmupStart).Microseconds())
+			if elapsed > 5e6 {
+				break
+			} else if elapsed > 1e6 {
+				ctx.Compute(out)
+				break
+			}
+		}
 	}
 
-	// Measure with trimming
-	latencies := make([]float64, cfg.MeasureReps)
-	for i := 0; i < cfg.MeasureReps; i++ {
+	// Measure with convergence-based early stopping
+	med, _, _ := convergentMeasure(func() float64 {
 		start := time.Now()
 		ctx.Compute(out)
-		latencies[i] = time.Since(start).Seconds()
-	}
+		return float64(time.Since(start).Microseconds())
+	}, cfg)
 
-	median := trimmedMedian(latencies, cfg.TrimPercent)
+	median := med / 1e6 // convert us to seconds for TOPS calculation
 	flops := 2.0 * M * K * N
 	return flops / median, nil
 }
@@ -98,21 +107,30 @@ func benchPeakBandwidth(backend ml.Backend, cfg BenchmarkConfig) (float64, error
 	dst := src.Contiguous(ctx)
 	ctx.Forward(dst)
 
-	// Warmup
+	// Adaptive warmup
+	warmupStart := time.Now()
 	for i := 0; i < cfg.WarmupReps; i++ {
 		ctx.Compute(dst)
+		if i == 0 {
+			elapsed := float64(time.Since(warmupStart).Microseconds())
+			if elapsed > 5e6 {
+				break
+			} else if elapsed > 1e6 {
+				ctx.Compute(dst)
+				break
+			}
+		}
 	}
 
-	// Measure with trimming
-	latencies := make([]float64, cfg.MeasureReps)
-	for i := 0; i < cfg.MeasureReps; i++ {
+	// Measure with convergence-based early stopping
+	med, _, _ := convergentMeasure(func() float64 {
 		start := time.Now()
 		ctx.Compute(dst)
-		latencies[i] = time.Since(start).Seconds()
-	}
+		return float64(time.Since(start).Microseconds())
+	}, cfg)
 
-	median := trimmedMedian(latencies, cfg.TrimPercent)
-	bytesTotal := 2.0 * size * 4 // read + write, 4 bytes per f32
+	median := med / 1e6 // convert us to seconds
+	bytesTotal := 2.0 * size * 4
 	return bytesTotal / median, nil
 }
 

@@ -66,6 +66,24 @@ func TestParseDType_HWChar(t *testing.T) {
 	}
 }
 
+func TestBenchPeakTOPS_ConfigPropagation(t *testing.T) {
+	cfg := DefaultBenchmarkConfig()
+	assert.Equal(t, 0.05, cfg.ConvergenceCV, "convergence CV should propagate to hwchar")
+	assert.Equal(t, 5, cfg.MinReps, "MinReps should propagate to hwchar")
+}
+
+func TestTrimmedMedian_SmallSample(t *testing.T) {
+	// 5 samples with 10% trim: trimCount = round(0.5) = 1
+	values := []float64{100, 102, 101, 103, 99}
+	median := trimmedMedian(values, 0.1)
+	assert.InDelta(t, 101.0, median, 1.0)
+
+	// 7 samples with 10% trim: trimCount = round(0.7) = 1
+	values = []float64{100, 102, 101, 103, 99, 104, 98}
+	median = trimmedMedian(values, 0.1)
+	assert.InDelta(t, 101.0, median, 2.0)
+}
+
 // TestConvergentMeasure_ConvergesEarly verifies that stable measurements stop before maxReps.
 func TestConvergentMeasure_ConvergesEarly(t *testing.T) {
 	callCount := 0
