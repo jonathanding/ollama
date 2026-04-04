@@ -11,10 +11,9 @@
   .header h1 { margin: 0; color: #333; }
   .header .meta { color: #666; font-size: 14px; }
   .controls { margin: 15px 0; display: flex; gap: 15px; align-items: center; }
-  .controls select, .controls button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; }
-  .controls button { cursor: pointer; background: #fff; }
+  .controls button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #fff; }
   .controls button.active { background: #007bff; color: #fff; border-color: #007bff; }
-  #chart-container { background: #fff; border-radius: 8px; padding: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .chart-card { background: #fff; border-radius: 8px; padding: 15px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
   .hw-info { background: #fff; border-radius: 8px; padding: 15px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
   .hw-info table { border-collapse: collapse; }
   .hw-info td { padding: 4px 12px 4px 0; }
@@ -31,12 +30,11 @@
 <div class="hw-info" id="hw-info"></div>
 
 <div class="controls">
-  <label>Op: <select id="op-select"></select></label>
   <button id="btn-log" class="active" onclick="toggleScale('log')">Log Scale</button>
   <button id="btn-linear" onclick="toggleScale('linear')">Linear Scale</button>
 </div>
 
-<div id="chart-container"></div>
+<div id="charts-container"></div>
 
 <script>
 const PROFILE_DATA = __PROFILE_JSON__;
@@ -48,8 +46,7 @@ function init() {
   meta.textContent = `Version ${PROFILE_DATA.version} | ${PROFILE_DATA.timestamp || 'N/A'}`;
 
   renderHWInfo();
-  populateOpSelect();
-  renderChart();
+  renderAllCharts();
 }
 
 function renderHWInfo() {
@@ -73,29 +70,32 @@ function renderHWInfo() {
   document.getElementById('hw-info').innerHTML = html;
 }
 
-function populateOpSelect() {
-  const ops = new Set();
-  (PROFILE_DATA.operators || []).forEach(c => ops.add(c.op));
-  const select = document.getElementById('op-select');
-  select.innerHTML = '';
-  ops.forEach(op => {
-    const opt = document.createElement('option');
-    opt.value = op; opt.textContent = op;
-    select.appendChild(opt);
+function renderAllCharts() {
+  const container = document.getElementById('charts-container');
+  container.innerHTML = '';
+
+  // Group curves by op
+  const opMap = new Map();
+  (PROFILE_DATA.operators || []).forEach(c => {
+    if (!opMap.has(c.op)) opMap.set(c.op, []);
+    opMap.get(c.op).push(c);
   });
-  select.onchange = renderChart;
+
+  opMap.forEach((curves, op) => {
+    const card = document.createElement('div');
+    card.className = 'chart-card';
+    const chartDiv = document.createElement('div');
+    chartDiv.id = `chart-${op}`;
+    card.appendChild(chartDiv);
+    container.appendChild(card);
+
+    renderOpChart(chartDiv.id, op, curves);
+  });
 }
 
-function renderChart() {
-  const op = document.getElementById('op-select').value;
-  const curves = (PROFILE_DATA.operators || []).filter(c => c.op === op);
-  if (curves.length === 0) {
-    Plotly.purge('chart-container');
-    return;
-  }
-
+function renderOpChart(divId, op, curves) {
   const traces = [];
-  curves.forEach((curve, idx) => {
+  curves.forEach(curve => {
     let baseLabel = curve.op;
     if (curve.weight_dtype) baseLabel += ` ${curve.weight_dtype}`;
     if (curve.fixed_dims) {
@@ -103,7 +103,7 @@ function renderChart() {
       baseLabel += ` [${dims}]`;
     }
 
-    // For 2D shapes (e.g. FLASH_ATTN [seq_q, seq_kv]), split into sub-traces by shape[0]
+    // For 2D shapes (e.g. FLASH_ATTN [seq_q, seq_kv]), split into sub-traces
     const is2D = curve.points.length > 0 && curve.points[0].shape.length === 2;
     const groups = new Map();
     curve.points.forEach(p => {
@@ -113,7 +113,6 @@ function renderChart() {
     });
 
     groups.forEach((pts, key) => {
-      // Sort by last dimension for consistent line drawing
       pts.sort((a, b) => a.shape[a.shape.length - 1] - b.shape[b.shape.length - 1]);
       const label = groups.size > 1 ? `${baseLabel} (${key})` : baseLabel;
       const xs = pts.map(p => p.shape[p.shape.length - 1]);
@@ -136,17 +135,18 @@ function renderChart() {
     xaxis: { title: xLabel, type: currentScale },
     yaxis: { title: 'Latency (us)', type: currentScale },
     hovermode: 'closest',
-    height: 500,
+    height: 450,
+    margin: { t: 40, b: 50 },
   };
 
-  Plotly.newPlot('chart-container', traces, layout, {responsive: true});
+  Plotly.newPlot(divId, traces, layout, {responsive: true});
 }
 
 function toggleScale(scale) {
   currentScale = scale;
   document.getElementById('btn-log').classList.toggle('active', scale === 'log');
   document.getElementById('btn-linear').classList.toggle('active', scale === 'linear');
-  renderChart();
+  renderAllCharts();
 }
 
 function formatSI(val, unit) {
