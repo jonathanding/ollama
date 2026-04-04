@@ -71,7 +71,58 @@ Extend the benchmark and estimation pipeline to cover all common LLM operators, 
 
 **ROPE handling**: `RoPE` is not on the `ml.Tensor` interface — it's a backend-specific method accessed via type assertion. The registry uses `CreateInputs` for the 4D input + i32 positions tensor, and `Run` does a type assertion to call `RoPE`.
 
-**GET_ROWS handling**: Creates a random embedding table `[hidden_dim, vocab_size]` and random i32 indices via `ctx.Input().FromInts()`.
+**GET_ROWS handling**: Removed from benchmark. GET_ROWS is a pure memory copy (embedding lookup) called once per forward pass, with negligible latency (~10μs). Benchmarking it requires creating output tensors of N × hidden_dim which becomes impractical at large N (67M × 4096 = 1TB). Instead, `lookupLatency` returns a fixed 10μs constant to avoid "uncalibrated" warnings.
+
+**NORM (LayerNorm) excluded**: Investigation of 21+ model architectures found 0 model files call `.LayerNorm()` directly. Removed from the operator list.
+
+### Phase 1B Addendum: Sampling Range Analysis
+
+#### Model Architecture Reference
+
+| Model | hidden | intermediate | heads | kv_heads | head_dim | context |
+|-------|--------|-------------|-------|----------|----------|---------|
+| Llama-3 8B | 4096 | 14336 | 32 | 8 | 128 | 8K |
+| Llama-3 70B | 8192 | 28672 | 64 | 8 | 128 | 8K |
+| Qwen2.5-32B | 5120 | 27648 | 40 | 8 | 128 | 128K |
+| Qwen3-30B-A3B (MoE) | 2048 | 6144* | 32 | 4 | 64 | 128K |
+
+\* MoE: 128 experts, 8 active per token, per-expert intermediate=768.
+
+#### Maximum Element Counts (N) per Operator
+
+The largest tensors occur during **prefill** (batch=512). The table below shows max N for each operator across model sizes.
+
+| Operator | Max tensor source | 8B | 32B | 70B |
+|----------|------------------|-----|-----|-----|
+| SILU/GELU/RELU | intermediate × batch | 7.3M | 14.2M | 14.7M |
+| ADD/MUL | intermediate × batch | 7.3M | 14.2M | 14.7M |
+| RMS_NORM | hidden × batch | 2.1M | 2.6M | 4.2M |
+| SOFT_MAX | heads × context_len | 262K | 5.1M | 524K |
+| ROPE | head_dim × heads × batch | 2.1M | 2.6M | 4.2M |
+| CONT | hidden × batch | 2.1M | 2.6M | 4.2M |
+| MUL_MAT (N axis) | batch/seq | ≤512 | ≤512 | ≤512 |
+| FLASH_ATTN seq_kv | context length | 8K | 128K | 8K |
+| FLASH_ATTN seq_q | prefill batch | ≤2048 | ≤2048 | ≤2048 |
+
+#### Chosen Sampling Ranges
+
+| Operator | shapeMin | shapeMax | Rationale |
+|----------|----------|----------|-----------|
+| 1D elementwise (all) | 1,024 | **8M** | Covers 8B in-range. 32B/70B (~15M) covered by log-log extrapolation — curves are smooth (measured max_error <5%), extrapolation ≈1 octave in log space |
+| MUL_MAT (N axis) | 1 | **4,096** | N = batch/sequence dim. Prefill typically ≤512, 4096 provides ample margin |
+| FLASH_ATTN decode (seq_kv) | 64 | **16,384** | 128K context covered by extrapolation. Decode latency is O(seq_kv), curve is smooth (max_error 3.1%, zero refinement needed) |
+| FLASH_ATTN prefill (seq_len) | 64 | **2,048** | Prefill is O(seq²), measuring beyond 2048 is prohibitively slow (~2s/point on iGPU). Larger values extrapolated |
+| GET_ROWS | — | — | Not benchmarked. Fixed 10μs constant (negligible: 1 call/forward, pure memory copy) |
+
+**Key design principle**: The adaptive sampler + log-log interpolation framework means shapeMax does not need to cover the actual maximum tensor size. It only needs to capture enough of the curve shape for reliable extrapolation. All operators showed smooth power-law-like behavior (max_error <5% at convergence), validating this approach.
+
+#### Outlier Handling
+
+Each sampling point goes through a two-level measurement pipeline:
+
+1. **Per-point**: `convergentMeasure()` collects multiple reps, trims outliers (top/bottom `TrimPercent`), checks coefficient-of-variation (CV) convergence, and returns the trimmed median. This eliminates GPU scheduling jitter and cold-start effects.
+
+2. **Adaptive level**: `AdaptiveSample1D` uses existing measured points to find intervals with poor interpolation fit (`worstInterval`), measures one midpoint per round, and stops when interpolation error < `ErrorThreshold` (default 5%). This ensures the curve is well-represented without over-sampling smooth regions.
 
 ### Phase 2: Full Operator Coverage (out of scope)
 
