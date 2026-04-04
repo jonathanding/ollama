@@ -107,59 +107,18 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 		}
 	}
 
-	// Measure with tiered adaptive reps based on latency
-	reps := cfg.MeasureReps
-	latencies := make([]float64, 0, reps)
-	for i := 0; i < reps; i++ {
+	// Measure with convergence-based early stopping
+	med, sd, actualReps := convergentMeasure(func() float64 {
 		start := time.Now()
 		ctx.Compute(out)
-		lat := float64(time.Since(start).Microseconds())
-		latencies = append(latencies, lat)
-		// After 5 samples, check median and reduce reps for slow ops
-		if i == 4 {
-			med := trimmedMedian(latencies, 0)
-			var newReps int
-			switch {
-			case med > 5e6:
-				newReps = 5
-			case med > 1e6:
-				newReps = 10
-			case med > 1e5:
-				newReps = 20
-			}
-			if newReps > 0 && newReps < reps {
-				reps = newReps
-				slog.Info("adaptive reps", "latency_us", med, "reps", reps)
-			}
-		}
-	}
-
-	median := trimmedMedian(latencies, cfg.TrimPercent)
-
-	// Compute stddev of trimmed set
-	sort.Float64s(latencies)
-	trimCount := int(math.Round(float64(len(latencies)) * cfg.TrimPercent))
-	if trimCount*2 >= len(latencies) {
-		trimCount = 0
-	}
-	trimmed := latencies[trimCount : len(latencies)-trimCount]
-	mean := 0.0
-	for _, l := range trimmed {
-		mean += l
-	}
-	mean /= float64(len(trimmed))
-	variance := 0.0
-	for _, l := range trimmed {
-		d := l - mean
-		variance += d * d
-	}
-	stddev := math.Sqrt(variance / float64(len(trimmed)))
+		return float64(time.Since(start).Microseconds())
+	}, cfg)
 
 	return LatencyPoint{
 		Shape:     gridPoint,
-		LatencyUs: median,
-		StddevUs:  stddev,
-		Reps:      cfg.MeasureReps,
+		LatencyUs: med,
+		StddevUs:  sd,
+		Reps:      actualReps,
 	}
 }
 
