@@ -26,9 +26,56 @@ Phase 1 deliverables:
 7. HTML viewer for benchmark data visualization
 8. Comprehensive tests (TDD, requires GGML build)
 
+### Phase 1B: Extended Operator Coverage + Random Initialization
+
+Extend the benchmark and estimation pipeline to cover all common LLM operators, eliminating "uncalibrated" warnings for standard architectures (Llama, Gemma, Qwen, Mistral, etc.).
+
+**Changes from Phase 1A:**
+
+1. **Random tensor initialization**: Replace `ctx.Input().Zeros()` with random data in `[-1, 1]` for more realistic benchmarking. GPU kernel timing is generally data-independent, but random init avoids edge cases with special values (all-zeros quantization patterns, NaN propagation, etc.).
+
+2. **Extended `OpRunnerML`**: Add optional `CreateInputs` field for ops that need non-standard tensor creation (mixed dtypes, special shapes). Remove `NumInputs` — inferred from `CreateInputs` return or `expandShapes`.
+
+   ```go
+   type OpRunnerML struct {
+       Dimensions   []string
+       CreateInputs func(ctx ml.Context, dt ml.DType, gridPoint []int64) []ml.Tensor  // optional
+       Run          func(ctx ml.Context, inputs []ml.Tensor) ml.Tensor
+   }
+   ```
+
+3. **MUL_MAT tensor creation unified**: `measureMulMat` is removed; MUL_MAT uses `measureOp` with a custom `CreateInputs` that creates weight at quantized dtype and activation at f32. Post-measurement processing (roofline efficiency extraction) remains MUL_MAT-specific in `RunBenchmark`.
+
+4. **New operators** (all 1D `f(N)`, benchmarked at f32 only):
+
+   | GGML Op Name | Category | Inputs | Registry `Run` |
+   |---|---|---|---|
+   | `ADD` | 2-input element-wise | 2 same-shape | `in[0].Add(ctx, in[1])` |
+   | `MUL` | 2-input element-wise | 2 same-shape | `in[0].Mul(ctx, in[1])` |
+   | `RMS_NORM` | 1-input norm | 1 | `in[0].RMSNorm(ctx, nil, 1e-5)` (nil weight → only ggml_rms_norm node) |
+   | `SOFT_MAX` | 1-input | 1 | `in[0].Softmax(ctx)` |
+   | `GELU` | 1-input activation | 1 | `in[0].GELU(ctx)` |
+   | `RELU` | 1-input activation | 1 | `in[0].RELU(ctx)` |
+   | `CONT` | 1-input memory copy | 1 | `in[0].Contiguous(ctx)` |
+   | `NORM` | 1-input norm | 1 | `in[0].LayerNorm(ctx, nil, nil, 1e-5)` |
+   | `ROPE` | special (type assert) | custom | Needs positions(i32) + 4D input; uses type assertion for `RoPE` method |
+   | `GET_ROWS` | special (index tensor) | custom | Needs i32 index tensor; embedding lookup pattern |
+
+5. **`expandShapes` updated**: 2-input ops (ADD, MUL) return `[][]int64{gridPoint, gridPoint}`.
+
+6. **`IsZeroCostOp` updated**: Add `TRANSPOSE` (metadata-only, like VIEW/RESHAPE/PERMUTE).
+
+7. **Default ops list**: `cmd.go` expands to include all registered ops.
+
+**Benchmark time impact**: ~10 new 1D ops × ~10-15s each = **~2 min additional**. Total from ~6 min → ~8 min.
+
+**ROPE handling**: `RoPE` is not on the `ml.Tensor` interface — it's a backend-specific method accessed via type assertion. The registry uses `CreateInputs` for the 4D input + i32 positions tensor, and `Run` does a type assertion to call `RoPE`.
+
+**GET_ROWS handling**: Creates a random embedding table `[hidden_dim, vocab_size]` and random i32 indices via `ctx.Input().FromInts()`.
+
 ### Phase 2: Full Operator Coverage (out of scope)
 
-- Extend to all remaining operators (~22 more). Each new op = 1 registry line + tests.
+- Extend to specialized architecture operators (SSM_CONV, SSM_SCAN for Mamba; TRI, SOLVE_TRI for DeltaNet; Conv2D/Conv3D for vision models).
 - **Cross-backend transfer cost**: Measure interconnect bandwidth (PCIe, NVLink), add transfer latency when consecutive graph nodes are on different backends. Phase 1 assumes single backend.
 - **Incremental calibration (`--update`)**: Load existing profile, diff against model graph to find uncalibrated (op, dtype) combos, benchmark only the missing ones, merge into profile. v1's `RunUpdateBenchmark` pattern is preserved but reimplemented on the new data model.
 - **`HardwareProfile.InterconnectBWBytesPerSec`**: Populated in Phase 2 when cross-backend support is added. Phase 1 leaves it as 0.
