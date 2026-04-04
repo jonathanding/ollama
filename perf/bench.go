@@ -133,15 +133,20 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 
 // RunBenchmark executes the full v2 calibration pipeline:
 // 1. Hardware characterization (peak TOPS, BW)
-// 2. For each op × dtype: adaptive sampling → OperatorCurves
+// 2. MUL_MAT: one reference curve + extract efficiency constants (roofline extrapolation)
+// 3. Other ops: adaptive sampling → OperatorCurves
 // Returns a complete Profile ready for estimation.
 func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg BenchmarkConfig) (*Profile, error) {
+	benchStart := time.Now()
+
 	// Step 1: Hardware characterization
+	hwStart := time.Now()
 	hwResult, err := CharacterizeHardware(backend, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("hardware characterization: %w", err)
 	}
 	hwProfile := HWCharResultToHardwareProfile(hwResult, backend)
+	slog.Info("hardware characterization complete", "duration", time.Since(hwStart).Round(time.Second))
 
 	profile := &Profile{
 		Version:   2,
@@ -149,44 +154,94 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 		Hardware:  hwProfile,
 	}
 
-	slog.Info("starting operator calibration", "ops", len(ops), "dtypes", len(dtypes))
+	// Count grids: MUL_MAT = 1 reference curve, others = normal counting
+	totalGrids := countGrids(ops, dtypes)
+	slog.Info("starting operator calibration", "ops", len(ops), "dtypes", len(dtypes), "total_grids", totalGrids)
+	calibrationStart := time.Now()
+	gridIdx := 0
 
-	// Step 2: Benchmark each op × dtype
+	// Step 2: Benchmark each op
 	for _, op := range ops {
+		if op == "MUL_MAT" {
+			// MUL_MAT: measure ONE reference curve, extract efficiency constants
+			gridIdx++
+			elapsed := time.Since(calibrationStart).Round(time.Second)
+			slog.Info("benchmarking MUL_MAT reference curve",
+				"progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
+				"M", 4096, "K", 4096, "dtype", "f32", "elapsed", elapsed)
+
+			gridStart := time.Now()
+			refPoints := benchmarkMulMat(backend, "f32", map[string]int64{"M": 4096, "K": 4096}, cfg)
+
+			if len(refPoints) == 0 {
+				slog.Warn("MUL_MAT reference curve produced no points")
+				continue
+			}
+
+			// Store reference curve in profile
+			refCurve := OperatorCurve{
+				Op:           "MUL_MAT",
+				ComputeDtype: "f32",
+				WeightDtype:  "f32",
+				Dimensions:   []string{"N"},
+				FixedDims:    map[string]int64{"M": 4096, "K": 4096},
+				Points:       refPoints,
+			}
+			devices := backend.BackendDevices()
+			if len(devices) > 0 {
+				refCurve.Backend = devices[0].Library
+			}
+			profile.Operators = append(profile.Operators, refCurve)
+
+			// Extract efficiency constants from reference curve
+			eff := extractEfficiencyConstants(refPoints, 4096, 4096, hwResult.PeakTOPS["f32"], hwResult.PeakBW)
+			if profile.Hardware.EfficiencyConstants == nil {
+				profile.Hardware.EfficiencyConstants = make(map[string]OpEfficiency)
+			}
+			profile.Hardware.EfficiencyConstants["MUL_MAT"] = eff
+
+			gridDuration := time.Since(gridStart).Round(time.Second)
+			slog.Info("completed MUL_MAT reference",
+				"progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
+				"points", len(refPoints),
+				"eff_compute", fmt.Sprintf("%.2f", eff.ComputeEff),
+				"eff_bw", fmt.Sprintf("%.2f", eff.BWEff),
+				"overhead_us", fmt.Sprintf("%.0f", eff.OverheadUs),
+				"grid_duration", gridDuration)
+			continue
+		}
+
+		// Non-MUL_MAT ops: adaptive sampling as before
 		opDtypes := dtypes
-		// FLASH_ATTN_EXT only uses f16
 		if op == "FLASH_ATTN_EXT" {
 			opDtypes = []string{"f16"}
 		}
-		// 1D element-wise ops only use f32
 		runner, ok := LookupRegistry(op)
 		if !ok {
 			slog.Warn("skipping unknown op", "op", op)
 			continue
 		}
-		if len(runner.Dimensions) == 1 && runner.Dimensions[0] == "N" && op != "MUL_MAT" {
+		if len(runner.Dimensions) == 1 && runner.Dimensions[0] == "N" {
 			opDtypes = []string{"f32"}
 		}
 
 		for _, dtype := range opDtypes {
-			weightDtype := ""
-			if op == "MUL_MAT" {
-				weightDtype = dtype
-			}
-
-			grids := buildSamplingGrids(op, dtype, weightDtype)
+			grids := buildSamplingGrids(op, dtype, "")
 
 			for _, grid := range grids {
-				slog.Info("benchmarking", "op", op, "dtype", dtype, "fixed", grid.FixedDims)
+				gridIdx++
+				elapsed := time.Since(calibrationStart).Round(time.Second)
+				slog.Info("benchmarking", "progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
+					"op", op, "dtype", dtype, "fixed", grid.FixedDims, "elapsed", elapsed)
+
+				gridStart := time.Now()
 
 				var curve OperatorCurve
 				curve.Op = op
 				curve.ComputeDtype = dtype
-				curve.WeightDtype = weightDtype
 				curve.Dimensions = sweepDimensions(op)
 				curve.FixedDims = grid.FixedDims
 
-				// Determine backend name from first device
 				devices := backend.BackendDevices()
 				if len(devices) > 0 {
 					curve.Backend = devices[0].Library
@@ -195,20 +250,158 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 				switch op {
 				case "FLASH_ATTN_EXT":
 					curve.Points = benchmarkFlashAttn(backend, dtype, grid.FixedDims, cfg)
-				case "MUL_MAT":
-					curve.Points = benchmarkMulMat(backend, dtype, grid.FixedDims, cfg)
 				default:
 					curve.Points = benchmarkElementwise(backend, op, dtype, cfg)
 				}
 
+				gridDuration := time.Since(gridStart).Round(time.Second)
 				if len(curve.Points) > 0 {
+					minLat, maxLat := curve.Points[0].LatencyUs, curve.Points[0].LatencyUs
+					for _, p := range curve.Points[1:] {
+						if p.LatencyUs < minLat {
+							minLat = p.LatencyUs
+						}
+						if p.LatencyUs > maxLat {
+							maxLat = p.LatencyUs
+						}
+					}
+					slog.Info("completed", "progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
+						"op", op, "dtype", dtype, "fixed", grid.FixedDims,
+						"points", len(curve.Points),
+						"latency_range_us", fmt.Sprintf("%.0f-%.0f", minLat, maxLat),
+						"grid_duration", gridDuration)
 					profile.Operators = append(profile.Operators, curve)
+				} else {
+					slog.Warn("no points collected", "op", op, "dtype", dtype, "fixed", grid.FixedDims)
 				}
 			}
 		}
 	}
 
+	totalDuration := time.Since(benchStart).Round(time.Second)
+	slog.Info("calibration complete", "grids", len(profile.Operators), "total_duration", totalDuration)
+
 	return profile, nil
+}
+
+// countGrids pre-counts the total number of sampling grids to run.
+// MUL_MAT counts as 1 (reference curve only), not 6×4=24.
+func countGrids(ops []string, dtypes []string) int {
+	total := 0
+	for _, op := range ops {
+		if op == "MUL_MAT" {
+			total++ // one reference curve
+			continue
+		}
+		opDtypes := dtypes
+		if op == "FLASH_ATTN_EXT" {
+			opDtypes = []string{"f16"}
+		}
+		runner, ok := LookupRegistry(op)
+		if !ok {
+			continue
+		}
+		if len(runner.Dimensions) == 1 && runner.Dimensions[0] == "N" {
+			opDtypes = []string{"f32"}
+		}
+		for _, dtype := range opDtypes {
+			grids := buildSamplingGrids(op, dtype, "")
+			total += len(grids)
+		}
+	}
+	return total
+}
+
+// extractEfficiencyConstants computes compute and BW efficiency from a MUL_MAT reference curve.
+// The reference curve is measured at (refM, refK) with varying N.
+func extractEfficiencyConstants(points []LatencyPoint, refM, refK int64, peakTOPS, peakBW float64) OpEfficiency {
+	var computeEffs, bwEffs []float64
+	var overheads []float64
+
+	for _, pt := range points {
+		N := pt.Shape[0]
+		if pt.LatencyUs <= 0 {
+			continue
+		}
+
+		flops := 2.0 * float64(refM) * float64(refK) * float64(N)
+		bytes := float64(refM*refK+refK*N+refM*N) * 4 // f32 = 4 bytes
+
+		computeTime := flops / peakTOPS * 1e6  // ideal compute time in us
+		bwTime := bytes / peakBW * 1e6          // ideal BW time in us
+
+		if computeTime > bwTime {
+			// Compute-bound point: efficiency = ideal / measured
+			computeEffs = append(computeEffs, computeTime/pt.LatencyUs)
+		} else {
+			// BW-bound point: efficiency = ideal / measured
+			bwEffs = append(bwEffs, bwTime/pt.LatencyUs)
+			// Also extract overhead: measured - ideal_bw
+			overheads = append(overheads, pt.LatencyUs-bwTime)
+		}
+	}
+
+	eff := OpEfficiency{}
+	if len(computeEffs) > 0 {
+		sort.Float64s(computeEffs)
+		eff.ComputeEff = computeEffs[len(computeEffs)/2] // median
+	} else {
+		eff.ComputeEff = 0.9 // reasonable default
+	}
+	if len(bwEffs) > 0 {
+		sort.Float64s(bwEffs)
+		eff.BWEff = bwEffs[len(bwEffs)/2]
+	} else {
+		eff.BWEff = 0.45 // reasonable default
+	}
+	if len(overheads) > 0 {
+		sort.Float64s(overheads)
+		eff.OverheadUs = math.Max(0, overheads[len(overheads)/2])
+	}
+
+	return eff
+}
+
+// PredictMulMatLatency computes MUL_MAT latency using the roofline model
+// with measured efficiency constants.
+func PredictMulMatLatency(hw *HardwareProfile, M, K, N int64, dtype string) float64 {
+	eff, ok := hw.EfficiencyConstants["MUL_MAT"]
+	if !ok {
+		return 0
+	}
+	peakTOPS, ok := hw.PeakTOPS[dtype]
+	if !ok {
+		// Fall back to f32 if dtype not measured
+		peakTOPS = hw.PeakTOPS["f32"]
+	}
+	peakBW := hw.PeakBandwidthBytesPerSec
+
+	flops := 2.0 * float64(M) * float64(K) * float64(N)
+	elemBytes := float64(elemSizeFromDtype(dtype))
+	bytes := float64(M*K+K*N+M*N) * elemBytes
+
+	computeTime := flops / (eff.ComputeEff * peakTOPS) * 1e6 // microseconds
+	bwTime := bytes / (eff.BWEff * peakBW) * 1e6              // microseconds
+
+	return math.Max(computeTime, bwTime) + eff.OverheadUs
+}
+
+// elemSizeFromDtype returns bytes per element for a dtype string.
+func elemSizeFromDtype(dtype string) int {
+	switch dtype {
+	case "f32":
+		return 4
+	case "f16":
+		return 2
+	case "q4_0":
+		// q4_0: 32 elements in 18 bytes (16 nibbles + 2 byte scale)
+		// Effective: 0.5625 bytes per element, but for memory estimation use block size
+		return 1 // approximate: actual is 4.5 bits
+	case "q8_0":
+		return 1 // 8 bits per element
+	default:
+		return 4
+	}
 }
 
 // sweepDimensions returns the sweep (non-fixed) dimensions for an op.

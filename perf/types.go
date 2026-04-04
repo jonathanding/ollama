@@ -13,13 +13,22 @@ type Profile struct {
 	Operators []OperatorCurve  `json:"operators"`
 }
 
-// HardwareProfile captures hardware characteristics used for initial sampling grid placement.
+// HardwareProfile captures hardware characteristics used for roofline prediction and sampling.
 type HardwareProfile struct {
-	Backends                  []BackendInfo      `json:"backends"`
-	PeakTOPS                  map[string]float64 `json:"peak_tops"`                    // dtype -> TOPS
-	PeakBandwidthBytesPerSec  float64            `json:"peak_bandwidth_bytes_sec"`
-	InterconnectBWBytesPerSec float64            `json:"interconnect_bandwidth_bytes_sec"` // Phase 2
-	BalancePoints             map[string]float64 `json:"balance_points"`               // dtype -> FLOPs/byte
+	Backends                  []BackendInfo              `json:"backends"`
+	PeakTOPS                  map[string]float64         `json:"peak_tops"`                    // dtype -> TOPS
+	PeakBandwidthBytesPerSec  float64                    `json:"peak_bandwidth_bytes_sec"`
+	InterconnectBWBytesPerSec float64                    `json:"interconnect_bandwidth_bytes_sec"` // Phase 2
+	BalancePoints             map[string]float64         `json:"balance_points"`               // dtype -> FLOPs/byte
+	EfficiencyConstants       map[string]OpEfficiency    `json:"efficiency_constants,omitempty"`
+}
+
+// OpEfficiency stores roofline efficiency constants extracted from a reference curve.
+// These allow predicting latency for any shape without measuring every combination.
+type OpEfficiency struct {
+	ComputeEff float64 `json:"compute_eff"` // fraction of peak TOPS achieved (compute-bound regime)
+	BWEff      float64 `json:"bw_eff"`      // fraction of peak BW achieved (BW-bound regime)
+	OverheadUs float64 `json:"overhead_us"`  // per-kernel-launch overhead in microseconds
 }
 
 // BackendInfo identifies a compute backend (GPU, CPU, etc.).

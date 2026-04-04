@@ -65,9 +65,13 @@ func expandShapes(op string, gridPoint []int64) [][]int64 {
 		}
 	case "MUL_MAT":
 		// gridPoint = [M, K, N]
-		M, K, N := gridPoint[0], gridPoint[1], gridPoint[2]
+		// GGML mul_mat computes weight^T * activation, so weight ne[0] must equal activation ne[0].
+		// weight: {K, M} (ne[0]=K, ne[1]=M), activation: {K, N} (ne[0]=K, ne[1]=N)
+		// Result: {M, N}
+		_, K, N := gridPoint[0], gridPoint[1], gridPoint[2]
+		M := gridPoint[0]
 		return [][]int64{
-			{M, K}, // weight
+			{K, M}, // weight (ne[0]=K must match activation ne[0])
 			{K, N}, // activation
 		}
 	default:

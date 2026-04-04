@@ -14,9 +14,6 @@ import (
 // Returns an HWCharResult and populates the given HardwareProfile.
 func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResult, error) {
 	devices := backend.BackendDevices()
-	if len(devices) == 0 {
-		return nil, fmt.Errorf("no backend devices found")
-	}
 
 	result := &HWCharResult{
 		PeakTOPS:     make(map[string]float64),
@@ -31,6 +28,7 @@ func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResul
 		if !ok {
 			continue
 		}
+		slog.Info("measuring peak TOPS", "dtype", dtypeStr)
 		tops, err := benchPeakTOPS(backend, dt, cfg)
 		if err != nil {
 			slog.Warn("peak TOPS failed", "dtype", dtypeStr, "error", err)
@@ -41,6 +39,7 @@ func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResul
 	}
 
 	// Measure peak bandwidth
+	slog.Info("measuring peak bandwidth")
 	bw, err := benchPeakBandwidth(backend, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("peak bandwidth failed: %w", err)

@@ -1,6 +1,7 @@
 package perf
 
 import (
+	"log/slog"
 	"math"
 	"sort"
 )
@@ -31,12 +32,15 @@ func AdaptiveSample1D(measure MeasureFunc, shapeMin, shapeMax int64, nInitial in
 		N := int64(math.Round(math.Exp(logN)))
 		pt := measure([]int64{N})
 		points = append(points, pt)
+		slog.Info("sample", "point", i+1, "of", nInitial, "N", N, "latency_us", pt.LatencyUs)
 	}
 
 	// Step 2: Adaptive refinement
+	round := 0
 	for len(points) < cfg.MaxPointsPerOp {
 		maxErr, maxIdx := findMaxInterpolationError(points, measure)
 		if maxErr < cfg.ErrorThreshold {
+			slog.Info("converged", "points", len(points), "max_error", maxErr)
 			break
 		}
 		// Measure midpoint of highest-error interval
@@ -47,6 +51,8 @@ func AdaptiveSample1D(measure MeasureFunc, shapeMin, shapeMax int64, nInitial in
 		}
 		pt := measure([]int64{midN})
 		points = insertSorted(points, pt)
+		round++
+		slog.Info("refine", "round", round, "N", midN, "error", maxErr, "points", len(points))
 	}
 
 	return points

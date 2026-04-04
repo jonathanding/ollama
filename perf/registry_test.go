@@ -61,8 +61,16 @@ func TestExpandShapes_SILU(t *testing.T) {
 func TestExpandShapes_MulMat(t *testing.T) {
 	shapes := expandShapes("MUL_MAT", []int64{4096, 4096, 32})
 	require.Len(t, shapes, 2, "MUL_MAT needs 2 input tensors")
-	assert.Equal(t, []int64{4096, 4096}, shapes[0]) // weight [M, K]
+	assert.Equal(t, []int64{4096, 4096}, shapes[0]) // weight [K, M] (ne[0]=K must match activation)
 	assert.Equal(t, []int64{4096, 32}, shapes[1])    // activation [K, N]
+}
+
+func TestExpandShapes_MulMat_Rectangular(t *testing.T) {
+	// M != K: weight must be {K, M} not {M, K} for GGML mul_mat (requires ne[0] match)
+	shapes := expandShapes("MUL_MAT", []int64{14336, 4096, 1})
+	require.Len(t, shapes, 2)
+	assert.Equal(t, []int64{4096, 14336}, shapes[0]) // weight [K=4096, M=14336]
+	assert.Equal(t, []int64{4096, 1}, shapes[1])      // activation [K=4096, N=1]
 }
 
 func TestExpandShapes_FlashAttn(t *testing.T) {

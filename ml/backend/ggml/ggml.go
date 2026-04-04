@@ -456,6 +456,19 @@ func init() {
 // NewForBench creates a Backend with device discovery and scheduler but no model.
 // Used by daop-bench to run standalone operator benchmarks without a GGUF file.
 func NewForBench(params ml.BackendParams) (ml.Backend, error) {
+	// Ensure GGML can discover backend DLLs in the development build directory.
+	// ggml.OnceLoad() resolves library paths relative to the executable, which
+	// under "go run" is a temp directory without DLLs. ml.LibOllamaPath also
+	// checks cwd/build/lib/ollama and finds the cmake output.
+	// On Windows, PATH must also include the lib dir so LoadLibraryW can resolve
+	// transitive dependencies (e.g. ggml-base.dll needed by ggml-vulkan.dll).
+	if _, ok := os.LookupEnv("OLLAMA_LIBRARY_PATH"); !ok {
+		os.Setenv("OLLAMA_LIBRARY_PATH", ml.LibOllamaPath)
+	}
+	if runtime.GOOS == "windows" {
+		os.Setenv("PATH", ml.LibOllamaPath+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+
 	initDevices()
 
 	// Collect all available backends and buffer types

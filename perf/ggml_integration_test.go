@@ -104,13 +104,6 @@ func TestGGML_HardwareCharacterization(t *testing.T) {
 	backend := skipIfNoBackend(t)
 	defer backend.Close()
 
-	// Note: BackendDevices() may return empty on CPU-only systems, but
-	// CharacterizeHardware should still work if the backend is functional
-	devices := backend.BackendDevices()
-	if len(devices) == 0 {
-		t.Skip("no GPU devices found (CPU-only system)")
-	}
-
 	cfg := BenchmarkConfig{WarmupReps: 2, MeasureReps: 20, TrimPercent: 0.1}
 	result, err := CharacterizeHardware(backend, cfg)
 	require.NoError(t, err)
@@ -129,12 +122,6 @@ func TestGGML_HardwareCharacterization(t *testing.T) {
 func TestGGML_FullPipeline_SILU(t *testing.T) {
 	backend := skipIfNoBackend(t)
 	defer backend.Close()
-
-	// Skip if no GPU devices (CPU-only systems don't report devices)
-	devices := backend.BackendDevices()
-	if len(devices) == 0 {
-		t.Skip("no GPU devices found (CPU-only system)")
-	}
 
 	cfg := BenchmarkConfig{
 		WarmupReps: 2, MeasureReps: 20, TrimPercent: 0.1,

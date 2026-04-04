@@ -152,3 +152,101 @@ func TestBenchmarkMulMat_OutputShapeContract(t *testing.T) {
 	assert.Less(t, result, 3000.0)
 	assert.False(t, math.IsNaN(result))
 }
+
+func TestExtractEfficiencyConstants(t *testing.T) {
+	// Simulate a reference curve at M=K=4096 with known peak TOPS and BW
+	// peakTOPS = 64.3 GFLOPS, peakBW = 40.7 GB/s
+	peakTOPS := 64.3e9
+	peakBW := 40.7e9
+
+	// Points from actual Intel iGPU measurement
+	points := []LatencyPoint{
+		{Shape: []int64{1}, LatencyUs: 3754},
+		{Shape: []int64{3}, LatencyUs: 3007},
+		{Shape: []int64{11}, LatencyUs: 8028},
+		{Shape: []int64{35}, LatencyUs: 24217},
+		{Shape: []int64{116}, LatencyUs: 64610},
+		{Shape: []int64{380}, LatencyUs: 219651},
+		{Shape: []int64{1248}, LatencyUs: 695931},
+		{Shape: []int64{4096}, LatencyUs: 2302781},
+	}
+
+	eff := extractEfficiencyConstants(points, 4096, 4096, peakTOPS, peakBW)
+
+	// Compute efficiency should be ~0.90-0.95
+	assert.Greater(t, eff.ComputeEff, 0.80, "compute efficiency should be > 80%%")
+	assert.Less(t, eff.ComputeEff, 1.0, "compute efficiency should be < 100%%")
+
+	// BW efficiency should be ~0.40-0.55
+	assert.Greater(t, eff.BWEff, 0.30, "BW efficiency should be > 30%%")
+	assert.Less(t, eff.BWEff, 0.70, "BW efficiency should be < 70%%")
+
+	// Overhead should be non-negative
+	assert.GreaterOrEqual(t, eff.OverheadUs, 0.0)
+}
+
+func TestPredictMulMatLatency_ComputeBound(t *testing.T) {
+	// Large N should be compute-bound
+	hw := &HardwareProfile{
+		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
+		PeakBandwidthBytesPerSec: 40.7e9,
+		EfficiencyConstants: map[string]OpEfficiency{
+			"MUL_MAT": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 0},
+		},
+	}
+
+	// M=K=4096, N=4096: FLOPs = 2*4096^3 = 137.4G
+	// Expected: 137.4G / (0.93 * 64.3G) * 1e6 ≈ 2,298,000 us
+	lat := PredictMulMatLatency(hw, 4096, 4096, 4096, "f32")
+	assert.InDelta(t, 2298000, lat, 100000, "should predict ~2.3M us for 4096^3 matmul")
+}
+
+func TestPredictMulMatLatency_BWBound(t *testing.T) {
+	// N=1 should be BW-bound
+	hw := &HardwareProfile{
+		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
+		PeakBandwidthBytesPerSec: 40.7e9,
+		EfficiencyConstants: map[string]OpEfficiency{
+			"MUL_MAT": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 500},
+		},
+	}
+
+	// M=K=4096, N=1: bytes ≈ 64MB, BW time = 64MB / (0.45 * 40.7 GB/s) ≈ 3,494 us + 500 overhead
+	lat := PredictMulMatLatency(hw, 4096, 4096, 1, "f32")
+	assert.Greater(t, lat, 2000.0, "N=1 matmul should take > 2ms")
+	assert.Less(t, lat, 10000.0, "N=1 matmul should take < 10ms")
+}
+
+func TestPredictMulMatLatency_ScalesWithShape(t *testing.T) {
+	hw := &HardwareProfile{
+		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
+		PeakBandwidthBytesPerSec: 40.7e9,
+		EfficiencyConstants: map[string]OpEfficiency{
+			"MUL_MAT": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 0},
+		},
+	}
+
+	// Larger M should give proportionally more latency at large N (compute-bound)
+	lat1 := PredictMulMatLatency(hw, 4096, 4096, 4096, "f32")
+	lat2 := PredictMulMatLatency(hw, 14336, 4096, 4096, "f32")
+	ratio := lat2 / lat1
+	expectedRatio := 14336.0 / 4096.0 // ~3.5x
+	assert.InDelta(t, expectedRatio, ratio, 0.3, "latency should scale with M")
+}
+
+func TestElemSizeFromDtype(t *testing.T) {
+	assert.Equal(t, 4, elemSizeFromDtype("f32"))
+	assert.Equal(t, 2, elemSizeFromDtype("f16"))
+	assert.Equal(t, 1, elemSizeFromDtype("q4_0"))
+	assert.Equal(t, 1, elemSizeFromDtype("q8_0"))
+	assert.Equal(t, 4, elemSizeFromDtype("unknown"))
+}
+
+func TestCountGrids_MulMatIsOne(t *testing.T) {
+	// MUL_MAT should count as 1 grid (reference curve), not 6*4=24
+	ops := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT"}
+	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
+	count := countGrids(ops, dtypes)
+	// SILU: 1 (f32 only), MUL_MAT: 1 (reference), FLASH_ATTN_EXT: 1 (f16 only)
+	assert.Equal(t, 3, count, "should be 3 grids: SILU + MUL_MAT ref + FLASH_ATTN")
+}
