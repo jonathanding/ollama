@@ -116,6 +116,95 @@ func benchPeakBandwidth(backend ml.Backend, cfg BenchmarkConfig) (float64, error
 	return bytesTotal / median, nil
 }
 
+// convergentMeasure runs repeated measurements with convergence-based early stopping.
+// The compute callback should perform one timed operation and return latency in microseconds.
+// Returns (trimmedMedian, trimmedStddev, actualReps).
+//
+// Algorithm:
+//  1. Collect MinReps samples
+//  2. After MinReps, set tiered maxReps based on median latency
+//  3. After each additional sample, check CV on trimmed data
+//  4. Stop early if CV < ConvergenceCV, or when maxReps reached
+func convergentMeasure(compute func() float64, cfg BenchmarkConfig) (median, stddev float64, reps int) {
+	maxReps := cfg.MeasureReps
+	latencies := make([]float64, 0, maxReps)
+
+	for i := 0; i < maxReps; i++ {
+		lat := compute()
+		latencies = append(latencies, lat)
+
+		// After MinReps samples, apply tiered ceiling and check convergence
+		if i+1 >= cfg.MinReps {
+			// On first eligibility check, set tiered max reps
+			if i+1 == cfg.MinReps {
+				med := trimmedMedian(latencies, 0)
+				switch {
+				case med > 5e6:
+					maxReps = cfg.MinReps // cap at MinReps for very slow ops
+				case med > 1e6:
+					if 10 < maxReps {
+						maxReps = 10
+					}
+				case med > 1e5:
+					if 20 < maxReps {
+						maxReps = 20
+					}
+				}
+			}
+
+			// Check convergence: CV on trimmed data
+			sorted := make([]float64, len(latencies))
+			copy(sorted, latencies)
+			sort.Float64s(sorted)
+			trimCount := int(math.Round(float64(len(sorted)) * cfg.TrimPercent))
+			if trimCount*2 >= len(sorted) {
+				trimCount = 0
+			}
+			trimmed := sorted[trimCount : len(sorted)-trimCount]
+
+			mean := 0.0
+			for _, l := range trimmed {
+				mean += l
+			}
+			mean /= float64(len(trimmed))
+
+			variance := 0.0
+			for _, l := range trimmed {
+				d := l - mean
+				variance += d * d
+			}
+			sd := math.Sqrt(variance / float64(len(trimmed)))
+
+			if mean > 0 && sd/mean < cfg.ConvergenceCV {
+				return trimmedMedian(latencies, cfg.TrimPercent), sd, i + 1
+			}
+		}
+	}
+
+	// Did not converge — return trimmed stats anyway
+	sorted := make([]float64, len(latencies))
+	copy(sorted, latencies)
+	sort.Float64s(sorted)
+	trimCount := int(math.Round(float64(len(sorted)) * cfg.TrimPercent))
+	if trimCount*2 >= len(sorted) {
+		trimCount = 0
+	}
+	trimmed := sorted[trimCount : len(sorted)-trimCount]
+	mean := 0.0
+	for _, l := range trimmed {
+		mean += l
+	}
+	mean /= float64(len(trimmed))
+	variance := 0.0
+	for _, l := range trimmed {
+		d := l - mean
+		variance += d * d
+	}
+	sd := math.Sqrt(variance / float64(len(trimmed)))
+
+	return trimmedMedian(latencies, cfg.TrimPercent), sd, len(latencies)
+}
+
 // trimmedMedian sorts the values, trims outliers, and returns the median.
 func trimmedMedian(values []float64, trimPercent float64) float64 {
 	if len(values) == 0 {

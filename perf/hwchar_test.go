@@ -66,5 +66,124 @@ func TestParseDType_HWChar(t *testing.T) {
 	}
 }
 
+// TestConvergentMeasure_ConvergesEarly verifies that stable measurements stop before maxReps.
+func TestConvergentMeasure_ConvergesEarly(t *testing.T) {
+	callCount := 0
+	compute := func() float64 {
+		callCount++
+		noise := float64(callCount%3-1) * 10.0
+		return 1000.0 + noise
+	}
+	cfg := BenchmarkConfig{
+		MeasureReps:   50,
+		TrimPercent:   0.1,
+		ConvergenceCV: 0.05,
+		MinReps:       5,
+	}
+	median, stddev, reps := convergentMeasure(compute, cfg)
+
+	assert.Greater(t, median, 900.0)
+	assert.Less(t, median, 1100.0)
+	assert.Less(t, stddev, 50.0, "stddev should be small for stable measurements")
+	assert.GreaterOrEqual(t, reps, 5, "must run at least MinReps")
+	assert.Less(t, reps, 15, "stable measurement should converge well before 50 reps")
+}
+
+// TestConvergentMeasure_NoisyDoesNotConverge verifies that noisy measurements run to maxReps.
+func TestConvergentMeasure_NoisyDoesNotConverge(t *testing.T) {
+	callCount := 0
+	compute := func() float64 {
+		callCount++
+		if callCount%2 == 0 {
+			return 500.0
+		}
+		return 1500.0
+	}
+	cfg := BenchmarkConfig{
+		MeasureReps:   20,
+		TrimPercent:   0.1,
+		ConvergenceCV: 0.05,
+		MinReps:       5,
+	}
+	_, _, reps := convergentMeasure(compute, cfg)
+
+	assert.Equal(t, 20, reps, "noisy measurement should run all maxReps")
+}
+
+// TestConvergentMeasure_TieredMaxReps verifies that slow ops get reduced maxReps.
+func TestConvergentMeasure_TieredMaxReps(t *testing.T) {
+	callCount := 0
+	compute := func() float64 {
+		callCount++
+		return 2e6 + float64(callCount%5)*4e5
+	}
+	cfg := BenchmarkConfig{
+		MeasureReps:   50,
+		TrimPercent:   0.1,
+		ConvergenceCV: 0.05,
+		MinReps:       5,
+	}
+	_, _, reps := convergentMeasure(compute, cfg)
+
+	assert.LessOrEqual(t, reps, 10, "ops >1s should cap at 10 reps")
+}
+
+// TestConvergentMeasure_VerySlowOp verifies >5s ops cap at MinReps.
+func TestConvergentMeasure_VerySlowOp(t *testing.T) {
+	callCount := 0
+	compute := func() float64 {
+		callCount++
+		return 6e6 + float64(callCount%3)*1e6
+	}
+	cfg := BenchmarkConfig{
+		MeasureReps:   50,
+		TrimPercent:   0.1,
+		ConvergenceCV: 0.05,
+		MinReps:       5,
+	}
+	_, _, reps := convergentMeasure(compute, cfg)
+
+	assert.Equal(t, 5, reps, "ops >5s should cap at MinReps")
+}
+
+// TestConvergentMeasure_MinRepsRespected verifies we never stop before MinReps.
+func TestConvergentMeasure_MinRepsRespected(t *testing.T) {
+	compute := func() float64 {
+		return 1000.0
+	}
+	cfg := BenchmarkConfig{
+		MeasureReps:   50,
+		TrimPercent:   0.1,
+		ConvergenceCV: 0.05,
+		MinReps:       8,
+	}
+	_, _, reps := convergentMeasure(compute, cfg)
+
+	assert.GreaterOrEqual(t, reps, 8, "must run at least MinReps even if stable")
+}
+
+// TestConvergentMeasure_TrimmedCV verifies CV is computed on trimmed data, not raw.
+func TestConvergentMeasure_TrimmedCV(t *testing.T) {
+	callCount := 0
+	compute := func() float64 {
+		callCount++
+		if callCount%7 == 0 {
+			return 50000.0 // outlier
+		}
+		return 1000.0 + float64(callCount%3)*5.0
+	}
+	cfg := BenchmarkConfig{
+		MeasureReps:   30,
+		TrimPercent:   0.1,
+		ConvergenceCV: 0.05,
+		MinReps:       5,
+	}
+	median, _, reps := convergentMeasure(compute, cfg)
+
+	assert.Greater(t, median, 900.0)
+	assert.Less(t, median, 1100.0)
+	assert.Less(t, reps, 30, "should converge after trimming removes outliers")
+}
+
 // Integration tests for benchPeakTOPS and benchPeakBandwidth require a real
 // GGML backend. They are in integration_test.go (Task 14).
