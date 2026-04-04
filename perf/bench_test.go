@@ -302,7 +302,7 @@ func TestElemBytesFromDtype(t *testing.T) {
 	assert.Equal(t, 4.0, elemBytesFromDtype("unknown"))
 }
 
-// TestMeasureMulMat_OutputShape verifies measureMulMat returns correct shape metadata.
+// TestMeasureMulMat_OutputShape verifies MUL_MAT returns correct shape metadata.
 func TestMeasureMulMat_OutputShape(t *testing.T) {
 	pt := LatencyPoint{
 		Shape:     []int64{4096, 4096, 32},

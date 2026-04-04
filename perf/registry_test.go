@@ -46,14 +46,28 @@ func TestRegistryCreateInputsOrExpandShapes(t *testing.T) {
 }
 
 func TestRegistryCustomCreateInputs(t *testing.T) {
-	// These ops MUST have CreateInputs because they need non-standard tensor creation
-	// (None yet in this task — MUL_MAT will get CreateInputs in Task 3)
-	// For now, verify no Phase 1 ops have CreateInputs set
-	for _, op := range []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT"} {
-		t.Run(op, func(t *testing.T) {
-			runner, ok := opRegistry[op]
-			require.True(t, ok)
-			assert.Nil(t, runner.CreateInputs, "%s should not have CreateInputs yet", op)
+	// MUL_MAT needs CreateInputs for mixed-dtype tensor creation
+	runner, ok := opRegistry["MUL_MAT"]
+	require.True(t, ok)
+	assert.NotNil(t, runner.CreateInputs, "MUL_MAT requires custom CreateInputs")
+}
+
+func TestMulMatInputShapes(t *testing.T) {
+	tests := []struct {
+		name      string
+		gridPoint []int64
+		wantW     []int // weight shape [K, M]
+		wantA     []int // activation shape [K, N]
+	}{
+		{"decode", []int64{4096, 4096, 1}, []int{4096, 4096}, []int{4096, 1}},
+		{"prefill", []int64{4096, 4096, 512}, []int{4096, 4096}, []int{4096, 512}},
+		{"non-square", []int64{14336, 4096, 32}, []int{4096, 14336}, []int{4096, 32}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wShape, aShape := mulMatInputShapes(tt.gridPoint)
+			assert.Equal(t, tt.wantW, wShape, "weight shape")
+			assert.Equal(t, tt.wantA, aShape, "activation shape")
 		})
 	}
 }

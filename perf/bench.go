@@ -409,61 +409,6 @@ func elemBytesFromDtype(dtype string) float64 {
 	}
 }
 
-// measureMulMat benchmarks a MUL_MAT at one shape point with mixed dtypes.
-// GGML mul_mat requires weight at weightDtype (e.g., q4_0) and activation at f32.
-// This is separate from measureOp because measureOp creates all inputs with same dtype.
-func measureMulMat(backend ml.Backend, M, K, N int64, weightDtype string, cfg BenchmarkConfig) LatencyPoint {
-	wdt, ok := parseDType(weightDtype)
-	if !ok {
-		slog.Warn("unsupported weight dtype", "dtype", weightDtype)
-		return LatencyPoint{Shape: []int64{M, K, N}}
-	}
-
-	ctx := backend.NewContext()
-	defer ctx.Close()
-
-	// Weight: K×M at weightDtype (quantized or float)
-	weight := ctx.Input().Zeros(wdt, int(K), int(M))
-	// Activation: K×N at f32
-	activation := ctx.Input().Zeros(ml.DTypeF32, int(K), int(N))
-
-	out := weight.Mulmat(ctx, activation)
-	if out == nil {
-		slog.Warn("mulmat returned nil", "weight_dtype", weightDtype)
-		return LatencyPoint{Shape: []int64{M, K, N}}
-	}
-	ctx.Forward(out)
-
-	// Adaptive warmup
-	warmupStart := time.Now()
-	for i := 0; i < cfg.WarmupReps; i++ {
-		ctx.Compute(out)
-		if i == 0 {
-			elapsed := float64(time.Since(warmupStart).Microseconds())
-			if elapsed > 5e6 {
-				break
-			} else if elapsed > 1e6 {
-				ctx.Compute(out)
-				break
-			}
-		}
-	}
-
-	// Measure with convergence-based early stopping
-	med, sd, actualReps := convergentMeasure(func() float64 {
-		start := time.Now()
-		ctx.Compute(out)
-		return float64(time.Since(start).Microseconds())
-	}, cfg)
-
-	return LatencyPoint{
-		Shape:     []int64{M, K, N},
-		LatencyUs: med,
-		StddevUs:  sd,
-		Reps:      actualReps,
-	}
-}
-
 // sweepDimensions returns the sweep (non-fixed) dimensions for an op.
 func sweepDimensions(op string) []string {
 	switch op {
@@ -492,7 +437,7 @@ func benchmarkMulMat(backend ml.Backend, weightDtype string, fixedDims map[strin
 	K := fixedDims["K"]
 	measure := func(shape []int64) LatencyPoint {
 		N := shape[0]
-		pt := measureMulMat(backend, M, K, N, weightDtype, cfg)
+		pt := measureOp(backend, "MUL_MAT", []int64{M, K, N}, weightDtype, cfg)
 		pt.Shape = []int64{N} // 1D for AdaptiveSample1D
 		return pt
 	}

@@ -62,6 +62,13 @@ var opRegistry = map[string]OpRunnerML{
 	},
 	"MUL_MAT": {
 		Dimensions: []string{"M", "K", "N"},
+		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+			dt, _ := parseDType(dtypeStr)
+			wShape, aShape := mulMatInputShapes(gridPoint)
+			weight := randomTensor(ctx, dt, wShape...)
+			activation := randomTensor(ctx, ml.DTypeF32, aShape...)
+			return []ml.Tensor{weight, activation}
+		},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
 			return in[0].Mulmat(ctx, in[1])
 		},
@@ -79,6 +86,13 @@ var opRegistry = map[string]OpRunnerML{
 			return sdpa.ScaledDotProductAttention(ctx, in[1], in[2], nil, nil, nil, scale, false)
 		},
 	},
+}
+
+// mulMatInputShapes returns (weightShape, activationShape) for MUL_MAT benchmarking.
+// gridPoint = [M, K, N]. Weight is [K, M], activation is [K, N].
+func mulMatInputShapes(gridPoint []int64) (weightShape, activationShape []int) {
+	M, K, N := gridPoint[0], gridPoint[1], gridPoint[2]
+	return []int{int(K), int(M)}, []int{int(K), int(N)}
 }
 
 // expandShapes converts grid dimensions to full tensor shapes per op.
