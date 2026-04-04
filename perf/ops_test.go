@@ -14,6 +14,7 @@ func TestIsZeroCostOp(t *testing.T) {
 		{"VIEW", true},
 		{"RESHAPE", true},
 		{"PERMUTE", true},
+		{"TRANSPOSE", true},
 		{"MUL_MAT", false},
 		{"SILU", false},
 		{"ADD", false},

@@ -316,10 +316,26 @@ func TestMeasureMulMat_OutputShape(t *testing.T) {
 	assert.Equal(t, int64(32), pt.Shape[2])   // N
 }
 
-func TestCountGrids_MulMatIsFour(t *testing.T) {
-	ops := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT"}
+func TestCountGrids_AllOps(t *testing.T) {
+	ops := DefaultBenchmarkOps()
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
 	count := countGrids(ops, dtypes)
-	// SILU: 1 (f32 only), MUL_MAT: 4 (one per weight dtype), FLASH_ATTN_EXT: 1 (f16 only)
-	assert.Equal(t, 6, count, "should be 6 grids: SILU + 4 MUL_MAT refs + FLASH_ATTN")
+	// MUL_MAT: 4 (one per weight dtype)
+	// FLASH_ATTN_EXT: 1 (f16 only)
+	// All other ops: 1 each (f32 only, 1D)
+	numOtherOps := len(ops) - 2 // minus MUL_MAT and FLASH_ATTN_EXT
+	expected := numOtherOps + 4 + 1
+	assert.Equal(t, expected, count)
+}
+
+func TestCountGrids_SubsetOps(t *testing.T) {
+	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
+	count := countGrids([]string{"SILU"}, dtypes)
+	assert.Equal(t, 1, count, "SILU is 1D, f32 only → 1 grid")
+
+	count = countGrids([]string{"MUL_MAT"}, dtypes)
+	assert.Equal(t, 4, count, "MUL_MAT → 4 grids (one per weight dtype)")
+
+	count = countGrids([]string{"SILU", "ADD", "MUL_MAT"}, dtypes)
+	assert.Equal(t, 6, count, "2 × 1D + 4 MUL_MAT = 6")
 }

@@ -16,7 +16,7 @@ import (
 func RunBenchmarkCLI(backend ml.Backend, opts BenchmarkCLIOptions) error {
 	cfg := DefaultBenchmarkConfig()
 
-	ops := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT"}
+	ops := DefaultBenchmarkOps()
 	if opts.Ops != "" {
 		ops = strings.Split(opts.Ops, ",")
 	}

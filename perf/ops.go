@@ -51,7 +51,7 @@ func product(shape []int64) float64 {
 // (metadata-only operations like view, reshape, permute).
 func IsZeroCostOp(op string) bool {
 	switch op {
-	case "VIEW", "RESHAPE", "PERMUTE":
+	case "VIEW", "RESHAPE", "PERMUTE", "TRANSPOSE":
 		return true
 	default:
 		return false

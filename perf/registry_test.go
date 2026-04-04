@@ -342,6 +342,22 @@ func TestRegistryGET_ROWS(t *testing.T) {
 	assert.NotNil(t, runner.Run)
 }
 
+func TestDefaultBenchmarkOps_ContainsAllRegistered(t *testing.T) {
+	ops := DefaultBenchmarkOps()
+	assert.Len(t, ops, len(opRegistry), "should contain all registered ops")
+	for i := 1; i < len(ops); i++ {
+		assert.Less(t, ops[i-1], ops[i], "ops should be sorted alphabetically")
+	}
+}
+
+func TestDefaultBenchmarkOps_ContainsExpectedOps(t *testing.T) {
+	ops := DefaultBenchmarkOps()
+	expected := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT", "ADD", "MUL", "GELU", "ROPE", "GET_ROWS", "RMS_NORM", "SOFT_MAX", "CONT", "RELU"}
+	for _, e := range expected {
+		assert.Contains(t, ops, e, "should contain %s", e)
+	}
+}
+
 func TestPhase1MulMatShapePairs(t *testing.T) {
 	pairs := Phase1MulMatFixedDims()
 	assert.NotEmpty(t, pairs)

@@ -3,6 +3,7 @@ package perf
 import (
 	"math"
 	"math/rand/v2"
+	"sort"
 
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/ml/nn/rope"
@@ -291,6 +292,17 @@ func Phase1MulMatFixedDims() [][2]int64 {
 		{28672, 8192},  // Llama-70B: FFN up/gate
 		{8192, 28672},  // Llama-70B: FFN down
 	}
+}
+
+// DefaultBenchmarkOps returns the list of ops to benchmark by default.
+// This includes all registered ops.
+func DefaultBenchmarkOps() []string {
+	ops := make([]string, 0, len(opRegistry))
+	for name := range opRegistry {
+		ops = append(ops, name)
+	}
+	sort.Strings(ops)
+	return ops
 }
 
 // LookupRegistry returns the OpRunnerML for a given op name.
