@@ -368,15 +368,38 @@ Where:
 
 Instead of 24 full adaptive sampling grids, the calibration measures:
 
-1. **Hardware characterization** (already in Section 5): peak_TOPS per dtype, peak_BW (~4 min)
-2. **One reference curve per op type**: Full adaptive sampling for ONE (M,K) pair, ONE dtype
-   - MUL_MAT: M=K=4096, f32, adaptive over N ∈ [1, 4096] (~2 min)
-   - This gives eff_compute and eff_bw constants
-3. **Spot checks** (optional): 2 points (small N, large N) for a few other (M,K,dtype) to validate scaling
+1. **Hardware characterization** (already in Section 5): peak_TOPS for f16 + f32, peak_BW (~1 min with convergence early stopping)
+2. **One reference curve per weight dtype**: Full adaptive sampling at M=K=4096 for each weight dtype
+   - f32: M=K=4096, adaptive over N ∈ [1, 4096] (~2-3 min)
+   - f16: same (~2-3 min)
+   - q4_0: same (~1-2 min, likely faster due to smaller memory footprint)
+   - q8_0: same (~1-2 min)
+   - Each curve independently extracts eff_compute and eff_bw constants for that weight dtype
+3. **Spot checks** (optional): 2 points (small N, large N) for a few other (M,K) to validate scaling
    - Each spot check: ~30 seconds
    - Total: ~2-3 minutes for 4-5 spot checks
 
-**Total calibration time: ~8 minutes** (vs ~4 hours with full adaptive sampling)
+**Total calibration time: ~12-14 minutes** (vs ~4 hours with full adaptive sampling)
+
+> **Why per-dtype reference curves**: Different weight dtypes use completely different GPU kernels.
+> q4_0 MUL_MAT involves on-the-fly dequantization, which changes both the compute efficiency
+> (dequant overhead) and memory bandwidth efficiency (smaller blocks = less data to read). Using
+> f32 efficiency constants for q4_0 prediction would be inaccurate. Empirical data is needed to
+> confirm the actual magnitude of this difference.
+>
+> **Dtype mapping for estimation**: The benchmark measures f32, f16, q4_0, q8_0. Real models may
+> use K-quant variants (q4_K, q5_K, q6_K) that are not directly benchmarkable via the Go DType
+> abstraction (which only exposes f32/f16/q4_0/q8_0). At estimation time, unsupported weight dtypes
+> are mapped to the nearest measured dtype:
+> - q4_K, q4_1 → q4_0 (same 4.5 bits/element, similar dequant cost)
+> - q5_K, q5_0, q5_1 → q8_0 (closer to 8-bit in memory footprint)
+> - q6_K → q8_0
+> - q3_K, q2_K → q4_0 (conservative: use 4-bit efficiency for smaller quants)
+> - q8_K → q8_0
+>
+> This mapping is approximate. The primary error source is the dequantization kernel difference,
+> not the memory footprint (which is similar within each group). Phase 2 may add direct C-level
+> benchmarking to bypass the Go DType limitation.
 
 ### 5A.5 Efficiency Constant Extraction
 
@@ -397,12 +420,12 @@ effBW := median(efficiencies(bwBoundPoints))
 
 | Aspect | Old (Adaptive per grid) | New (Roofline extrapolation) |
 |--------|------------------------|------|
-| MUL_MAT grids measured | 6 (M,K) × 4 dtype = 24 | 1 reference + spot checks |
-| Time | ~4 hours | ~8 minutes |
+| MUL_MAT grids measured | 6 (M,K) × 4 dtype = 24 | 4 reference curves (1 per weight dtype) + spot checks |
+| Time | ~4 hours | ~8-10 minutes |
 | Accuracy (compute-bound) | Exact measurement | ~10% error |
 | Accuracy (BW-bound) | Exact measurement | ~15% error |
-| Scalability to new ops | Linear in grid count | Constant (1 reference) |
-| Profile storage | 24 curves | 1 curve + efficiency constants |
+| Scalability to new (M,K) | Linear in grid count | Constant (roofline extrapolates) |
+| Profile storage | 24 curves | 4 curves + 4 sets of efficiency constants |
 
 ### 5A.7 Profile Extension
 
@@ -419,12 +442,23 @@ type OpEfficiency struct {
 }
 ```
 
-### 5A.8 Scope
+### 5A.8 Scope and Dtype Strategy
 
 Phase 1 applies roofline extrapolation to **MUL_MAT only** (the bottleneck with 24 grids).
 Other ops keep direct measurement:
-- SILU: 1 grid (f32 only), fast (~10 seconds)
-- FLASH_ATTN_EXT: 1 grid (f16 only), moderate (~2 minutes)
+- Element-wise ops (SILU, etc.): 1 grid each (f32 only), fast (~10-27 seconds per op)
+- FLASH_ATTN_EXT: 1 grid (f16 only), moderate (~2-3 minutes)
+
+**Dtype strategy per op type:**
+
+| Op Type | Benchmark Dtypes | Rationale |
+|---------|-----------------|-----------|
+| Peak TOPS (hw char) | f16, f32 | Measures raw ALU capability; quantization is irrelevant |
+| MUL_MAT reference curves | f32, f16, q4_0, q8_0 | Different weight dtypes use different GPU kernels with different efficiency |
+| Element-wise (SILU, ADD, ...) | f32 only | Operate on activations, not weights; no quantization involved |
+| FLASH_ATTN_EXT | f16 only | Q/K/V tensors are always f16; no quantization involved |
+
+**MUL_MAT estimation with unmeasured weight dtypes**: See dtype mapping table in Section 5A.4.
 
 Future phases can apply the same pattern to any new op that has many shape combinations.
 
@@ -921,17 +955,48 @@ func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) P
 ### 9.2 lookupLatency
 
 ```go
+// mapWeightDtype maps unsupported K-quant and other weight dtypes to the nearest
+// measured dtype. The Go DType abstraction only exposes f32/f16/q4_0/q8_0, but real
+// models use q4_K, q5_K, q6_K etc. This mapping enables estimation without
+// direct benchmarking of every quant variant.
+func mapWeightDtype(wdt string) string {
+    switch wdt {
+    case "f32", "f16", "q4_0", "q8_0":
+        return wdt // directly measured
+    case "q4_K", "q4_1":
+        return "q4_0" // same ~4.5 bits/element, similar dequant
+    case "q5_K", "q5_0", "q5_1", "q6_K":
+        return "q8_0" // closer to 8-bit in memory footprint
+    case "q3_K", "q2_K":
+        return "q4_0" // conservative: use 4-bit efficiency
+    case "q8_K":
+        return "q8_0"
+    default:
+        return "f16" // fallback for unknown types
+    }
+}
+
 func lookupLatency(profile *Profile, op string, shape []int64,
     computeDtype, weightDtype, backend string) (float64, error) {
 
     switch op {
     case "MUL_MAT":
-        // Use roofline prediction with efficiency constants (Section 5A)
-        eff, ok := profile.Hardware.EfficiencyConstants["MUL_MAT"]
+        // Map weight dtype to nearest measured dtype for efficiency constant lookup
+        mappedWdt := mapWeightDtype(weightDtype)
+
+        // Use roofline prediction with per-dtype efficiency constants (Section 5A)
+        // Efficiency constants are keyed as "MUL_MAT_<weightDtype>" (e.g., "MUL_MAT_q4_0")
+        effKey := "MUL_MAT_" + mappedWdt
+        eff, ok := profile.Hardware.EfficiencyConstants[effKey]
         if !ok {
-            return 0, fmt.Errorf("no efficiency constants for MUL_MAT — run daop-bench first")
+            // Fall back to generic MUL_MAT constants if per-dtype not available
+            eff, ok = profile.Hardware.EfficiencyConstants["MUL_MAT"]
+            if !ok {
+                return 0, fmt.Errorf("no efficiency constants for MUL_MAT — run daop-bench first")
+            }
         }
-        return PredictMulMatLatency(&profile.Hardware, shape[0], shape[1], shape[2], computeDtype), nil
+        _ = eff // used by PredictMulMatLatency via profile lookup
+        return PredictMulMatLatency(&profile.Hardware, shape[0], shape[1], shape[2], mappedWdt), nil
 
     case "FLASH_ATTN_EXT":
         // Find matching FLASH_ATTN_EXT curve (direct measurement)
@@ -979,12 +1044,12 @@ func GenerateHTMLViewer(profile *Profile, outputPath string) error {
 
 ### 10.3 Features
 
-- **Op selector**: Dropdown to switch between operators
+- **All operators on one page**: Each operator rendered as a separate chart card (no dropdown — user preference from empirical testing)
 - **Log/linear toggle**: Switch axes between log and linear scale
 - **Hover details**: Show exact shape, latency, stddev on hover
 - **1D ops**: 2D scatter plot (log N vs log latency) with interpolation line
-- **MUL_MAT**: Reference curve (measured) + roofline predictions for representative (M,K) pairs overlaid. Shows efficiency constants and roofline fit quality
-- **FLASH_ATTN**: Two curves overlaid — decode (seq_q=1, varying seq_kv) and prefill (seq_q=seq_kv)
+- **MUL_MAT**: Reference curve(s) per weight dtype (f32, f16, q4_0, q8_0) with efficiency constants
+- **FLASH_ATTN**: Two sub-traces per curve — decode (shape[0]=1, varying seq_kv) and prefill (shape[0]=seq_kv, both vary)
 
 ### 10.4 Tech Stack
 
@@ -999,24 +1064,56 @@ func GenerateHTMLViewer(profile *Profile, outputPath string) error {
 
 ```go
 type BenchmarkConfig struct {
-    WarmupReps    int     // GPU warmup iterations (default: 5)
-    MeasureReps   int     // Timed iterations (default: 100)
-    TrimPercent   float64 // Outlier trim percentage (default: 0.1 = 10%)
+    WarmupReps     int     // Max GPU warmup iterations (default: 5)
+    MeasureReps    int     // Max timed iterations, before adaptive reduction (default: 50)
+    TrimPercent    float64 // Outlier trim percentage (default: 0.1 = 10%)
+    ConvergenceCV  float64 // CV threshold for early stopping (default: 0.05 = 5%)
+    MinReps        int     // Minimum reps before convergence check (default: 5)
     ErrorThreshold float64 // Adaptive sampling convergence (default: 0.05 = 5%)
-    MaxPointsPerOp int    // Budget limit per (op, dtype) (default: 20)
+    MaxPointsPerOp int     // Budget limit per (op, dtype) (default: 20)
 }
 ```
 
-### 11.2 Latency Computation
+### 11.2 Latency Computation — Convergence-Based Adaptive Measurement
 
-Per-iteration timing with outlier trimming:
+> **Design rationale**: Fixed rep counts waste time on slow, stable ops (e.g., 4096³ MUL_MAT at ~3s/rep
+> needs only 5-10 reps for stable median) while potentially under-sampling fast, noisy ops. Industry
+> practice (Google Benchmark uses CV for warmup detection; criterion.rs uses bootstrap CI) confirms that
+> convergence-based stopping is the standard approach. We use CV on trimmed samples — simpler than
+> bootstrap, effective for our 5-50 rep range.
 
-1. Run `WarmupReps` iterations (discard)
-2. Time each of `MeasureReps` iterations individually
-3. Sort latencies
-4. Trim top and bottom `TrimPercent` (remove GPU clock spikes, OS interrupts)
-5. Take **median** of trimmed set as the reported latency
-6. Compute stddev of trimmed set for confidence reporting
+**Measurement algorithm:**
+
+1. **Adaptive warmup**: Run up to `WarmupReps` iterations. After the first warmup, check elapsed time:
+   - \>5s per iteration → 1 warmup is sufficient (break immediately)
+   - \>1s per iteration → 2 warmups total
+   - Otherwise → run all `WarmupReps`
+
+2. **Tiered max reps**: After `MinReps` (5) samples, compute median latency and set a ceiling:
+   - \>5s → maxReps = 5
+   - \>1s → maxReps = 10
+   - \>100ms → maxReps = 20
+   - Otherwise → maxReps = `MeasureReps` (50)
+
+3. **Convergence early stopping**: After each sample (once ≥ `MinReps`), compute CV on trimmed data:
+   - Sort samples, trim top/bottom `TrimPercent`
+   - CV = stddev(trimmed) / mean(trimmed)
+   - If CV < `ConvergenceCV` (5%) → stop early, measurement has converged
+   - Otherwise continue until maxReps
+
+4. **Result**: Take **median** of trimmed set as reported latency; stddev of trimmed set for confidence.
+
+**Why these parameters:**
+- **CV threshold 5%** (not 3%): Empirical data from Intel iGPU shows even large stable MUL_MAT (N=4096,
+  ~3s/rep) has CV ≈ 9% after 50 trimmed reps. A 3% threshold would never converge. 5% allows
+  convergence for most ops while still catching unstable measurements.
+- **Trimming before CV computation**: GPU benchmarks have right-skewed distributions (OS interrupts,
+  thermal throttling). Without trimming, one spike inflates CV and prevents convergence. The CV
+  should match the same trimmed set used for the final median — otherwise "CV says not converged"
+  but "trimmed median is already stable".
+- **Min 5 reps**: Minimum needed for meaningful trimming (10% of 5 = 0.5, rounds to 0-1 trim).
+
+**Applies uniformly to**: `measureOp()` (operator benchmarking) AND `benchPeakTOPS()`/`benchPeakBandwidth()` (hardware characterization). Previously, hardware characterization ran a fixed 50 reps unconditionally — with 4096³ MUL_MAT at ~3s/rep, this took ~2.5 min/dtype. With convergence early stopping, stable large-matrix measurements converge in ~5-10 reps (~15-30s/dtype).
 
 ## 12. CLI Commands
 

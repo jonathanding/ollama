@@ -1,6 +1,6 @@
 # DAOP Performance Estimation: High-Level Design
 
-> **TL;DR**: DAOP predicts LLM inference speed (tokens/sec) on a user's specific hardware without running the model. It calibrates the device once (~10 min) by benchmarking core operators, stores results as a reusable profile, then instantly estimates any model's performance. The key design choice is a **hybrid approach**: a physics-based roofline model with empirically-extracted efficiency constants for MUL_MAT (which dominates 70-90% of inference), and direct adaptive measurement for all other operators. This balances calibration speed (~10 min vs ~4 hours for full measurement) with prediction accuracy (±10%).
+> **TL;DR**: DAOP predicts LLM inference speed (tokens/sec) on a user's specific hardware without running the model. It calibrates the device once (~12-14 min) by benchmarking core operators across weight dtypes (f32, f16, q4_0, q8_0), stores results as a reusable profile, then instantly estimates any model's performance. The key design choice is a **hybrid approach**: a physics-based roofline model with per-dtype efficiency constants for MUL_MAT (which dominates 70-90% of inference), and direct adaptive measurement for all other operators. Convergence-based early stopping ensures each measurement runs only as long as needed. This balances calibration speed (~12-14 min vs ~4 hours for full measurement) with prediction accuracy (±10%).
 
 ## Document Map
 
@@ -313,11 +313,11 @@ flowchart LR
 
 | Operator Type | Strategy | Rationale | Calibration Time |
 |--------------|----------|-----------|-----------------|
-| **MUL_MAT** | Roofline + efficiency constants | ±10% accuracy, consistent across shapes | ~3 min (1 reference curve) |
-| **Element-wise** (SILU, ADD, etc.) | Direct adaptive sampling | Roofline doesn't fit (12% peak BW) | ~10 sec per op |
-| **FLASH_ATTN_EXT** | Direct adaptive sampling | Dual-mode, complex access patterns | ~2 min |
+| **MUL_MAT** | Roofline + per-dtype efficiency constants | ±10% accuracy, consistent across shapes | ~8-10 min (4 reference curves: f32, f16, q4_0, q8_0) |
+| **Element-wise** (SILU, ADD, etc.) | Direct adaptive sampling (f32 only) | Roofline doesn't fit (12% peak BW) | ~10-27 sec per op |
+| **FLASH_ATTN_EXT** | Direct adaptive sampling (f16 only) | Dual-mode, complex access patterns | ~2-3 min |
 
-**Total calibration: ~10 minutes** (vs ~4 hours with full measurement for MUL_MAT alone).
+**Total calibration: ~12-14 minutes** (vs ~4 hours with full measurement for MUL_MAT alone). Convergence-based early stopping (CV < 5% on trimmed samples) ensures each measurement runs only as long as needed — hardware characterization drops from ~5 min to ~1 min.
 
 This is the best of both worlds: the analytical model (improved roofline) where it is empirically validated to work, and direct measurement where it does not. The decision is data-driven, not ideological.
 
@@ -673,30 +673,52 @@ func benchmarkOp(backend ml.Backend, op string, shapes [][]int64,
     out := runner.Run(ctx, inputs)
     ctx.Forward(out)
 
-    // Warmup (stabilize GPU clocks, fill caches)
-    for i := 0; i < cfg.WarmupReps; i++ { ctx.Compute(out) }
+    // Adaptive warmup: reduce for slow ops
+    for i := 0; i < cfg.WarmupReps; i++ {
+        start := time.Now()
+        ctx.Compute(out)
+        if i == 0 {
+            elapsed := time.Since(start)
+            if elapsed > 5*time.Second { break }       // 1 warmup enough
+            if elapsed > 1*time.Second { ctx.Compute(out); break } // 2 total
+        }
+    }
 
-    // Measure with per-iteration timing for outlier detection
+    // Convergence-based measurement with tiered max reps
+    maxReps := cfg.MeasureReps  // 50 default
     var latencies []float64
-    for i := 0; i < cfg.MeasureReps; i++ {
+    for i := 0; i < maxReps; i++ {
         start := time.Now()
         ctx.Compute(out)
         latencies = append(latencies, time.Since(start).Seconds())
+
+        if len(latencies) >= cfg.MinReps {  // MinReps = 5
+            trimmed := trimAndSort(latencies, cfg.TrimPercent)
+            cv := stddev(trimmed) / mean(trimmed)
+            if cv < cfg.ConvergenceCV { break }  // converged!
+
+            // Set tiered max on first check
+            if len(latencies) == cfg.MinReps {
+                med := median(trimmed)
+                switch {
+                case med > 5.0:  maxReps = 5
+                case med > 1.0:  maxReps = 10
+                case med > 0.1:  maxReps = 20
+                }
+            }
+        }
     }
 
-    // Trim outliers (remove top/bottom 10%) and compute median
-    sort.Float64s(latencies)
-    trim := len(latencies) / 10
-    trimmed := latencies[trim : len(latencies)-trim]
-    median := trimmed[len(trimmed)/2]
-
-    return median, nil
+    trimmed := trimAndSort(latencies, cfg.TrimPercent)
+    return median(trimmed), nil
 }
 ```
 
 Key design choices in this function:
 - **Separate `computeDtype` and `weightDtype`**: Quantized MUL_MAT uses e.g. q4_0 weights with f16 activations. The first input tensor uses `weightDtype`, others use `computeDtype`.
-- **Per-iteration timing with outlier trimming**: GPU timing has occasional spikes (GC, thermal throttling, OS interrupts). Trimming the top/bottom 10% and taking the median provides a robust estimate.
+- **Convergence-based early stopping**: CV (coefficient of variation) on trimmed samples. Stops when CV < 5%. Empirical data shows large stable MUL_MAT (N=4096, ~3s) has CV ≈ 9% after 50 reps, while smaller ops converge in 5-10 reps. The 5% threshold balances accuracy vs speed.
+- **Tiered max reps**: Caps total iterations based on per-op latency. Prevents spending minutes on already-stable slow ops.
+- **Applies uniformly**: Same algorithm for operator measurement AND hardware characterization (peak TOPS/BW). Previously hw char ran 50 fixed reps (~2.5 min/dtype); now converges in ~5-10 reps for large matrices.
 - **Generic tensor construction + per-op dispatch**: Shapes come from the sampling grid or model graph; only the method call is op-specific.
 
 ## 9. buildModelGraphNodes
@@ -874,10 +896,14 @@ When consecutive graph nodes are assigned to different backends (e.g., GPU -> CP
 |----------|-----------|
 | **Hybrid model** (roofline for MUL_MAT, empirical for others) | Empirically validated: roofline achieves ±10% for MUL_MAT but fails for element-wise/attention ops. Full measurement takes ~4 hours — too slow for users. See [Section 3](#3-design-evolution-from-theory-to-empirical-hybrid) for complete derivation. |
 | **Two-constant roofline** (eff_compute + eff_bw + overhead) over single eta | Captures regime-specific behavior: BW-bound matmul uses 45% of peak BW (tiling overhead), not 100%. Reduces BW-bound prediction error from ~2× to ~15%. Known limitation: `max()` assumes perfect compute/memory overlap, causing up to ~30% underestimate in the transition zone (N ≈ 10–50) — acceptable because real inference uses extremes (N=1 decode, N=prompt_len prefill). |
+| **Per-dtype MUL_MAT reference curves** (f32, f16, q4_0, q8_0) | Different weight dtypes use different GPU kernels (dequant logic differs). Single f32 efficiency constants cannot predict q4_0 MUL_MAT accurately. Each dtype needs its own eff_compute/eff_bw. ~8-10 min total for 4 curves. |
+| **Dtype mapping for K-quants** (q4_K→q4_0, q6_K→q8_0, etc.) | Go's DType abstraction only exposes f32/f16/q4_0/q8_0. K-quant variants have similar bits/element and dequant cost to their mapped dtype. Error is within roofline's ±10% tolerance. |
+| **Convergence-based measurement** (CV < 5% on trimmed samples) | Fixed rep counts waste time on slow stable ops. Industry standard (Google Benchmark, criterion.rs). Empirical: hw char drops from ~5 min to ~1 min; large MUL_MAT converges in 5-10 reps. |
+| **Peak TOPS only for f16/f32** | Peak TOPS measures raw ALU capability. Quantized MUL_MAT dequantizes to f16/f32 before compute — the ALU peak is the same. Per-dtype efficiency constants capture the dequant overhead. |
 | Log-log space for interpolation | Performance relationships are multiplicative; log space makes them linear |
 | Piecewise linear interpolation | Sufficient accuracy for smooth low-dimensional functions; no external dependencies |
 | Adaptive sampling | Concentrates measurements where they matter; avoids wasting time on flat regions |
 | Hardware peak for MUL_MAT prediction and grid placement | Used both for roofline prediction (with efficiency constants) and for initial grid placement of other ops |
 | Simple function registry (not reflection) | Go method names don't match op names; signatures are non-uniform; reflection adds complexity without benefit |
 | buildModelGraphNodes for estimation | Essential: provides actual (op, shape, dtype) per model; eliminates guessing |
-| Calibrate once, estimate many | Users should not re-benchmark for each model. ~10 min calibration time is acceptable. |
+| Calibrate once, estimate many | Users should not re-benchmark for each model. ~12-14 min calibration time is acceptable. |

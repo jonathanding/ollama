@@ -2,7 +2,7 @@
 
 **Predict LLM inference speed on your hardware — before downloading the model.**
 
-DAOP calibrates your GPU/CPU once (~10 minutes), then instantly estimates tokens/sec for any model.
+DAOP calibrates your GPU/CPU once (~12-14 minutes), then instantly estimates tokens/sec for any model.
 
 ## How It Works
 
@@ -11,7 +11,7 @@ DAOP calibrates your GPU/CPU once (~10 minutes), then instantly estimates tokens
 │  daop-bench  │────▶│ profile.json │────▶│  daop-estimate   │
 │ (run once)   │     │ (reusable)   │     │  (any model)     │
 └─────────────┘     └──────────────┘     └─────────────────┘
-  ~10 min              hardware            instant result:
+  ~12-14 min              hardware            instant result:
   calibration          fingerprint         "Llama 3 8B q4_0:
                                             42 tok/s decode,
                                             850ms prefill"
