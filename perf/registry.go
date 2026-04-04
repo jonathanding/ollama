@@ -54,6 +54,18 @@ func randomTensor(ctx ml.Context, dt ml.DType, shape ...int) ml.Tensor {
 //  2. Add shape expansion in expandShapes() if using default path
 //  3. Add tests in registry_test.go
 var opRegistry = map[string]OpRunnerML{
+	"ADD": {
+		Dimensions: []string{"N"},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			return in[0].Add(ctx, in[1])
+		},
+	},
+	"MUL": {
+		Dimensions: []string{"N"},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			return in[0].Mul(ctx, in[1])
+		},
+	},
 	"SILU": {
 		Dimensions: []string{"N"},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
@@ -137,6 +149,8 @@ func expandShapes(op string, gridPoint []int64) [][]int64 {
 			{128, 32, seqKV, 1}, // K
 			{128, 32, seqKV, 1}, // V
 		}
+	case "ADD", "MUL":
+		return [][]int64{gridPoint, gridPoint}
 	case "MUL_MAT":
 		// gridPoint = [M, K, N]
 		// GGML mul_mat computes weight^T * activation, so weight ne[0] must equal activation ne[0].

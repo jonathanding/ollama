@@ -230,6 +230,31 @@ func TestExpandShapes_SimpleOps(t *testing.T) {
 	}
 }
 
+func TestRegistryContains2InputOps(t *testing.T) {
+	for _, op := range []string{"ADD", "MUL"} {
+		t.Run(op, func(t *testing.T) {
+			runner, ok := opRegistry[op]
+			assert.True(t, ok, "op %q must be in registry", op)
+			assert.Equal(t, []string{"N"}, runner.Dimensions)
+			assert.NotNil(t, runner.Run)
+		})
+	}
+}
+
+func TestExpandShapes_ADD(t *testing.T) {
+	shapes := expandShapes("ADD", []int64{65536})
+	require.Len(t, shapes, 2, "ADD needs 2 input tensors")
+	assert.Equal(t, []int64{65536}, shapes[0])
+	assert.Equal(t, []int64{65536}, shapes[1])
+}
+
+func TestExpandShapes_MUL(t *testing.T) {
+	shapes := expandShapes("MUL", []int64{65536})
+	require.Len(t, shapes, 2, "MUL needs 2 input tensors")
+	assert.Equal(t, []int64{65536}, shapes[0])
+	assert.Equal(t, []int64{65536}, shapes[1])
+}
+
 func TestPhase1MulMatShapePairs(t *testing.T) {
 	pairs := Phase1MulMatFixedDims()
 	assert.NotEmpty(t, pairs)
