@@ -94,26 +94,40 @@ function renderChart() {
     return;
   }
 
-  const traces = curves.map((curve, idx) => {
-    let label = curve.op;
-    if (curve.weight_dtype) label += ` ${curve.weight_dtype}`;
+  const traces = [];
+  curves.forEach((curve, idx) => {
+    let baseLabel = curve.op;
+    if (curve.weight_dtype) baseLabel += ` ${curve.weight_dtype}`;
     if (curve.fixed_dims) {
       const dims = Object.entries(curve.fixed_dims).map(([k,v]) => `${k}=${v}`).join(',');
-      label += ` [${dims}]`;
+      baseLabel += ` [${dims}]`;
     }
 
-    const xs = curve.points.map(p => p.shape[p.shape.length - 1]);
-    const ys = curve.points.map(p => p.latency_us);
-    const texts = curve.points.map(p =>
-      `Shape: [${p.shape.join(', ')}]<br>Latency: ${p.latency_us.toFixed(2)} us` +
-      (p.stddev_us ? `<br>Stddev: ${p.stddev_us.toFixed(2)} us` : '')
-    );
+    // For 2D shapes (e.g. FLASH_ATTN [seq_q, seq_kv]), split into sub-traces by shape[0]
+    const is2D = curve.points.length > 0 && curve.points[0].shape.length === 2;
+    const groups = new Map();
+    curve.points.forEach(p => {
+      const key = is2D ? (p.shape[0] === 1 ? 'decode' : 'prefill') : 'all';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(p);
+    });
 
-    return {
-      x: xs, y: ys, text: texts,
-      mode: 'lines+markers', name: label,
-      hovertemplate: '%{text}<extra></extra>',
-    };
+    groups.forEach((pts, key) => {
+      // Sort by last dimension for consistent line drawing
+      pts.sort((a, b) => a.shape[a.shape.length - 1] - b.shape[b.shape.length - 1]);
+      const label = groups.size > 1 ? `${baseLabel} (${key})` : baseLabel;
+      const xs = pts.map(p => p.shape[p.shape.length - 1]);
+      const ys = pts.map(p => p.latency_us);
+      const texts = pts.map(p =>
+        `Shape: [${p.shape.join(', ')}]<br>Latency: ${p.latency_us.toFixed(2)} us` +
+        (p.stddev_us ? `<br>Stddev: ${p.stddev_us.toFixed(2)} us` : '')
+      );
+      traces.push({
+        x: xs, y: ys, text: texts,
+        mode: 'lines+markers', name: label,
+        hovertemplate: '%{text}<extra></extra>',
+      });
+    });
   });
 
   const xLabel = curves[0].dimensions ? curves[0].dimensions[curves[0].dimensions.length - 1] : 'N';
