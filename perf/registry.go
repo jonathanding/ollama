@@ -86,6 +86,36 @@ var opRegistry = map[string]OpRunnerML{
 			return sdpa.ScaledDotProductAttention(ctx, in[1], in[2], nil, nil, nil, scale, false)
 		},
 	},
+	"GELU": {
+		Dimensions: []string{"N"},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			return in[0].GELU(ctx)
+		},
+	},
+	"RELU": {
+		Dimensions: []string{"N"},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			return in[0].RELU(ctx)
+		},
+	},
+	"SOFT_MAX": {
+		Dimensions: []string{"N"},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			return in[0].Softmax(ctx)
+		},
+	},
+	"CONT": {
+		Dimensions: []string{"N"},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			return in[0].Contiguous(ctx)
+		},
+	},
+	"RMS_NORM": {
+		Dimensions: []string{"N"},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			return in[0].RMSNorm(ctx, nil, 1e-5)
+		},
+	},
 }
 
 // mulMatInputShapes returns (weightShape, activationShape) for MUL_MAT benchmarking.

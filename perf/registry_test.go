@@ -207,6 +207,29 @@ func TestRandomFloat32Slice_Length(t *testing.T) {
 	}
 }
 
+func TestRegistryContainsPhase1BOps(t *testing.T) {
+	newOps := []string{"GELU", "RELU", "SOFT_MAX", "CONT", "RMS_NORM"}
+	for _, op := range newOps {
+		t.Run(op, func(t *testing.T) {
+			runner, ok := opRegistry[op]
+			assert.True(t, ok, "op %q must be in registry", op)
+			assert.Equal(t, []string{"N"}, runner.Dimensions, "1D ops should have Dimensions=[N]")
+			assert.NotNil(t, runner.Run)
+			assert.Nil(t, runner.CreateInputs, "simple 1-input ops should use default tensor creation")
+		})
+	}
+}
+
+func TestExpandShapes_SimpleOps(t *testing.T) {
+	for _, op := range []string{"GELU", "RELU", "SOFT_MAX", "CONT", "RMS_NORM"} {
+		t.Run(op, func(t *testing.T) {
+			shapes := expandShapes(op, []int64{65536})
+			require.Len(t, shapes, 1, "%s needs 1 input tensor", op)
+			assert.Equal(t, []int64{65536}, shapes[0])
+		})
+	}
+}
+
 func TestPhase1MulMatShapePairs(t *testing.T) {
 	pairs := Phase1MulMatFixedDims()
 	assert.NotEmpty(t, pairs)
