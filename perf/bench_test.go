@@ -234,12 +234,26 @@ func TestPredictMulMatLatency_ScalesWithShape(t *testing.T) {
 	assert.InDelta(t, expectedRatio, ratio, 0.3, "latency should scale with M")
 }
 
-func TestElemSizeFromDtype(t *testing.T) {
-	assert.Equal(t, 4, elemSizeFromDtype("f32"))
-	assert.Equal(t, 2, elemSizeFromDtype("f16"))
-	assert.Equal(t, 1, elemSizeFromDtype("q4_0"))
-	assert.Equal(t, 1, elemSizeFromDtype("q8_0"))
-	assert.Equal(t, 4, elemSizeFromDtype("unknown"))
+func TestElemBytesFromDtype(t *testing.T) {
+	assert.Equal(t, 4.0, elemBytesFromDtype("f32"))
+	assert.Equal(t, 2.0, elemBytesFromDtype("f16"))
+	assert.InDelta(t, 0.5625, elemBytesFromDtype("q4_0"), 0.001) // 18 bytes / 32 elements
+	assert.InDelta(t, 1.0625, elemBytesFromDtype("q8_0"), 0.001) // 34 bytes / 32 elements
+	assert.Equal(t, 4.0, elemBytesFromDtype("unknown"))
+}
+
+// TestMeasureMulMat_OutputShape verifies measureMulMat returns correct shape metadata.
+func TestMeasureMulMat_OutputShape(t *testing.T) {
+	pt := LatencyPoint{
+		Shape:     []int64{4096, 4096, 32},
+		LatencyUs: 5000.0,
+		StddevUs:  100.0,
+		Reps:      7,
+	}
+	assert.Len(t, pt.Shape, 3)
+	assert.Equal(t, int64(4096), pt.Shape[0]) // M
+	assert.Equal(t, int64(4096), pt.Shape[1]) // K
+	assert.Equal(t, int64(32), pt.Shape[2])   // N
 }
 
 func TestCountGrids_MulMatIsOne(t *testing.T) {

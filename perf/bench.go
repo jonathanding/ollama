@@ -409,8 +409,9 @@ func PredictMulMatLatency(hw *HardwareProfile, M, K, N int64, dtype string) floa
 	peakBW := hw.PeakBandwidthBytesPerSec
 
 	flops := 2.0 * float64(M) * float64(K) * float64(N)
-	elemBytes := float64(elemSizeFromDtype(dtype))
-	bytes := float64(M*K+K*N+M*N) * elemBytes
+	wElemBytes := elemBytesFromDtype(dtype)
+	// Weight: M*K at dtype, activation: K*N at f32, output: M*N at f32
+	bytes := float64(M*K)*wElemBytes + float64(K*N+M*N)*4
 
 	computeTime := flops / (eff.ComputeEff * peakTOPS) * 1e6 // microseconds
 	bwTime := bytes / (eff.BWEff * peakBW) * 1e6              // microseconds
@@ -418,21 +419,75 @@ func PredictMulMatLatency(hw *HardwareProfile, M, K, N int64, dtype string) floa
 	return math.Max(computeTime, bwTime) + eff.OverheadUs
 }
 
-// elemSizeFromDtype returns bytes per element for a dtype string.
-func elemSizeFromDtype(dtype string) int {
+// elemBytesFromDtype returns bytes per element for a dtype string.
+// Quantized types return fractional values based on block structure.
+func elemBytesFromDtype(dtype string) float64 {
 	switch dtype {
 	case "f32":
-		return 4
+		return 4.0
 	case "f16":
-		return 2
+		return 2.0
 	case "q4_0":
-		// q4_0: 32 elements in 18 bytes (16 nibbles + 2 byte scale)
-		// Effective: 0.5625 bytes per element, but for memory estimation use block size
-		return 1 // approximate: actual is 4.5 bits
+		return 18.0 / 32.0 // 18 bytes per 32-element block = 0.5625
 	case "q8_0":
-		return 1 // 8 bits per element
+		return 34.0 / 32.0 // 34 bytes per 32-element block = 1.0625
 	default:
-		return 4
+		return 4.0
+	}
+}
+
+// measureMulMat benchmarks a MUL_MAT at one shape point with mixed dtypes.
+// GGML mul_mat requires weight at weightDtype (e.g., q4_0) and activation at f32.
+// This is separate from measureOp because measureOp creates all inputs with same dtype.
+func measureMulMat(backend ml.Backend, M, K, N int64, weightDtype string, cfg BenchmarkConfig) LatencyPoint {
+	wdt, ok := parseDType(weightDtype)
+	if !ok {
+		slog.Warn("unsupported weight dtype", "dtype", weightDtype)
+		return LatencyPoint{Shape: []int64{M, K, N}}
+	}
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	// Weight: K×M at weightDtype (quantized or float)
+	weight := ctx.Input().Zeros(wdt, int(K), int(M))
+	// Activation: K×N at f32
+	activation := ctx.Input().Zeros(ml.DTypeF32, int(K), int(N))
+
+	out := weight.Mulmat(ctx, activation)
+	if out == nil {
+		slog.Warn("mulmat returned nil", "weight_dtype", weightDtype)
+		return LatencyPoint{Shape: []int64{M, K, N}}
+	}
+	ctx.Forward(out)
+
+	// Adaptive warmup
+	warmupStart := time.Now()
+	for i := 0; i < cfg.WarmupReps; i++ {
+		ctx.Compute(out)
+		if i == 0 {
+			elapsed := float64(time.Since(warmupStart).Microseconds())
+			if elapsed > 5e6 {
+				break
+			} else if elapsed > 1e6 {
+				ctx.Compute(out)
+				break
+			}
+		}
+	}
+
+	// Measure with convergence-based early stopping
+	med, sd, actualReps := convergentMeasure(func() float64 {
+		start := time.Now()
+		ctx.Compute(out)
+		return float64(time.Since(start).Microseconds())
+	}, cfg)
+
+	return LatencyPoint{
+		Shape:     []int64{M, K, N},
+		LatencyUs: med,
+		StddevUs:  sd,
+		Reps:      actualReps,
 	}
 }
 
