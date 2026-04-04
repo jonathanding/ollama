@@ -117,17 +117,12 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 		if len(shape) < 3 {
 			return 0, fmt.Errorf("MUL_MAT requires 3 shape dims, got %d", len(shape))
 		}
-		var curves []OperatorCurve
-		for _, c := range profile.Operators {
-			if c.Op == op && c.ComputeDtype == computeDtype &&
-				c.WeightDtype == weightDtype && c.Backend == backend {
-				curves = append(curves, c)
-			}
+		mappedWdt := mapWeightDtype(weightDtype)
+		lat := PredictMulMatLatency(&profile.Hardware, shape[0], shape[1], shape[2], mappedWdt)
+		if lat == 0 {
+			return 0, fmt.Errorf("no efficiency constants for MUL_MAT — run daop-bench first")
 		}
-		if len(curves) == 0 {
-			return 0, fmt.Errorf("uncalibrated: %s(%s/%s on %s)", op, computeDtype, weightDtype, backend)
-		}
-		return InterpolateMulMat(curves, shape[0], shape[1], shape[2]), nil
+		return lat, nil
 
 	case "FLASH_ATTN_EXT":
 		if len(shape) < 2 {

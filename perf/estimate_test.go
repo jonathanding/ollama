@@ -130,9 +130,13 @@ func makeTestProfileForEstimation() *Profile {
 		Version: 2,
 		Hardware: HardwareProfile{
 			Backends:                 []BackendInfo{{Name: "cuda", Device: "RTX 4090"}},
-			PeakTOPS:                 map[string]float64{"f16": 330e12},
+			PeakTOPS:                 map[string]float64{"f16": 330e12, "f32": 82.6e12},
 			PeakBandwidthBytesPerSec: 1008e9,
 			BalancePoints:            map[string]float64{"f16": 327.38},
+			EfficiencyConstants: map[string]OpEfficiency{
+				"MUL_MAT_f16":  {ComputeEff: 0.95, BWEff: 0.80, OverheadUs: 5},
+				"MUL_MAT_q4_0": {ComputeEff: 0.90, BWEff: 0.70, OverheadUs: 10},
+			},
 		},
 		Operators: []OperatorCurve{
 			// SILU 1D curve
@@ -146,29 +150,7 @@ func makeTestProfileForEstimation() *Profile {
 					{Shape: []int64{16777216}, LatencyUs: 3000.0},
 				},
 			},
-			// MUL_MAT curve 1: (M=4096, K=4096), points store [N] only
-			{
-				Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
-				Dimensions: []string{"N"},
-				FixedDims:  map[string]int64{"M": 4096, "K": 4096},
-				Points: []LatencyPoint{
-					{Shape: []int64{1}, LatencyUs: 10.0},
-					{Shape: []int64{32}, LatencyUs: 50.0},
-					{Shape: []int64{256}, LatencyUs: 200.0},
-					{Shape: []int64{4096}, LatencyUs: 3000.0},
-				},
-			},
-			// MUL_MAT curve 2: (M=14336, K=4096), points store [N] only
-			{
-				Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
-				Dimensions: []string{"N"},
-				FixedDims:  map[string]int64{"M": 14336, "K": 4096},
-				Points: []LatencyPoint{
-					{Shape: []int64{1}, LatencyUs: 25.0},
-					{Shape: []int64{32}, LatencyUs: 120.0},
-					{Shape: []int64{4096}, LatencyUs: 8000.0},
-				},
-			},
+			// MUL_MAT curves removed — lookupLatency now uses roofline via PredictMulMatLatency
 			// FLASH_ATTN_EXT curve
 			{
 				Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
@@ -204,19 +186,39 @@ func TestLookupLatency_SILU_Interpolated(t *testing.T) {
 	assert.Less(t, lat, 200.0)
 }
 
-func TestLookupLatency_MulMat_ExactMK(t *testing.T) {
+func TestLookupLatency_MulMat_Roofline(t *testing.T) {
 	p := makeTestProfileForEstimation()
 	lat, err := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_0", "cuda")
 	require.NoError(t, err)
-	assert.InDelta(t, 10.0, lat, 0.001, "exact M,K,N match")
+	assert.Greater(t, lat, 0.0, "roofline prediction should return positive latency")
 }
 
-func TestLookupLatency_MulMat_InterpolatedN(t *testing.T) {
+func TestLookupLatency_MulMat_ScalesWithN(t *testing.T) {
 	p := makeTestProfileForEstimation()
-	lat, err := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 128}, "f16", "q4_0", "cuda")
+	lat1, _ := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_0", "cuda")
+	lat4096, _ := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 4096}, "f16", "q4_0", "cuda")
+	assert.Greater(t, lat4096, lat1, "latency should increase with N")
+}
+
+func TestLookupLatency_MulMat_DtypeMapping(t *testing.T) {
+	p := makeTestProfileForEstimation()
+	// q4_K should map to q4_0
+	lat, err := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_K", "cuda")
 	require.NoError(t, err)
-	assert.Greater(t, lat, 50.0)
-	assert.Less(t, lat, 200.0)
+	assert.Greater(t, lat, 0.0, "q4_K should map to q4_0 and succeed")
+}
+
+func TestLookupLatency_MulMat_NoEfficiencyConstants(t *testing.T) {
+	p := &Profile{
+		Version: 2,
+		Hardware: HardwareProfile{
+			Backends:                 []BackendInfo{{Name: "cuda", Device: "RTX 4090"}},
+			PeakTOPS:                 map[string]float64{"f32": 50e9},
+			PeakBandwidthBytesPerSec: 27e9,
+		},
+	}
+	_, err := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_0", "cuda")
+	assert.Error(t, err, "should error when no efficiency constants available")
 }
 
 func TestLookupLatency_FlashAttn_Decode(t *testing.T) {

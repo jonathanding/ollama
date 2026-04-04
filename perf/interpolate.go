@@ -160,6 +160,8 @@ func extrapolateRightByDim(points []LatencyPoint, dimIdx int, logQ float64) floa
 // InterpolateMulMat interpolates mul_mat latency using inverse distance weighting in (M,K) space.
 // Each curve has fixed M and K values, varying N.
 // Returns interpolated latency at (queryM, queryK, queryN).
+// NOTE: As of Phase 1A, lookupLatency uses roofline prediction (PredictMulMatLatency) instead.
+// This function is retained for potential use in spot-check validation (Phase 2).
 func InterpolateMulMat(curves []OperatorCurve, queryM, queryK, queryN int64) float64 {
 	if len(curves) == 0 {
 		return 0
