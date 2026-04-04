@@ -1,5 +1,22 @@
 # DAOP Performance Estimation: High-Level Design
 
+> **TL;DR**: DAOP predicts LLM inference speed (tokens/sec) on a user's specific hardware without running the model. It calibrates the device once (~10 min) by benchmarking core operators, stores results as a reusable profile, then instantly estimates any model's performance. The key design choice is a **hybrid approach**: a physics-based roofline model with empirically-extracted efficiency constants for MUL_MAT (which dominates 70-90% of inference), and direct adaptive measurement for all other operators. This balances calibration speed (~10 min vs ~4 hours for full measurement) with prediction accuracy (±10%).
+
+## Document Map
+
+| Section | Content | Read If... |
+|---------|---------|-----------|
+| [1. Goals](#1-goals) | What DAOP achieves | You want the big picture |
+| [2. Limitations](#2-limitations-of-the-original-roofline-approach) | Why pure roofline isn't enough | You want to understand the problem |
+| [3. Design Evolution](#3-design-evolution-from-theory-to-empirical-hybrid) | How we arrived at the hybrid approach, with data | **Start here** for the full reasoning |
+| [4. Approach](#4-approach-hybrid-latency-model) | The hybrid model architecture | You want the solution |
+| [5-7. Math](#5-why-log-space) | Log space, interpolation, adaptive sampling | You want implementation details |
+| [8. Operator Registry](#8-operator-registry) | How operators are registered for benchmarking | You're adding new operators |
+| [9. Model Graph](#9-buildmodelgraphnodes) | How model architecture maps to ops | You're working on estimation |
+| [10. Estimation Flow](#10-estimation-flow) | End-to-end prediction pipeline | You want the full picture |
+| [11. Profile Format](#11-profile-data-structure) | JSON schema for calibration data | You're working on serialization |
+| [12. Summary](#12-summary-of-design-decisions) | Decision table with rationale | Quick reference |
+
 ## 1. Goals
 
 Predict model inference latency **before running the model**, enabling users to make informed decisions about model selection, quantization, and hardware utilization.
