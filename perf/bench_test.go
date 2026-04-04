@@ -171,7 +171,7 @@ func TestExtractEfficiencyConstants(t *testing.T) {
 		{Shape: []int64{4096}, LatencyUs: 2302781},
 	}
 
-	eff := extractEfficiencyConstants(points, 4096, 4096, peakTOPS, peakBW)
+	eff := extractEfficiencyConstants(points, 4096, 4096, peakTOPS, peakBW, "f32")
 
 	// Compute efficiency should be ~0.90-0.95
 	assert.Greater(t, eff.ComputeEff, 0.80, "compute efficiency should be > 80%%")
@@ -191,7 +191,7 @@ func TestPredictMulMatLatency_ComputeBound(t *testing.T) {
 		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
 		PeakBandwidthBytesPerSec: 40.7e9,
 		EfficiencyConstants: map[string]OpEfficiency{
-			"MUL_MAT": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 0},
+			"MUL_MAT_f32": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 0},
 		},
 	}
 
@@ -207,11 +207,12 @@ func TestPredictMulMatLatency_BWBound(t *testing.T) {
 		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
 		PeakBandwidthBytesPerSec: 40.7e9,
 		EfficiencyConstants: map[string]OpEfficiency{
-			"MUL_MAT": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 500},
+			"MUL_MAT_f32": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 500},
 		},
 	}
 
-	// M=K=4096, N=1: bytes ≈ 64MB, BW time = 64MB / (0.45 * 40.7 GB/s) ≈ 3,494 us + 500 overhead
+	// M=K=4096, N=1: weight=4096*4096*4=64MB, act=4096*1*4=16KB, out=4096*1*4=16KB
+	// bytes ≈ 64MB, BW time = 64MB / (0.45 * 40.7 GB/s) ≈ 3,494 us + 500 overhead
 	lat := PredictMulMatLatency(hw, 4096, 4096, 1, "f32")
 	assert.Greater(t, lat, 2000.0, "N=1 matmul should take > 2ms")
 	assert.Less(t, lat, 10000.0, "N=1 matmul should take < 10ms")
@@ -222,7 +223,7 @@ func TestPredictMulMatLatency_ScalesWithShape(t *testing.T) {
 		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
 		PeakBandwidthBytesPerSec: 40.7e9,
 		EfficiencyConstants: map[string]OpEfficiency{
-			"MUL_MAT": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 0},
+			"MUL_MAT_f32": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 0},
 		},
 	}
 
@@ -232,6 +233,65 @@ func TestPredictMulMatLatency_ScalesWithShape(t *testing.T) {
 	ratio := lat2 / lat1
 	expectedRatio := 14336.0 / 4096.0 // ~3.5x
 	assert.InDelta(t, expectedRatio, ratio, 0.3, "latency should scale with M")
+}
+
+func TestExtractEfficiencyConstants_Q40(t *testing.T) {
+	// q4_0: weight bytes = M*K*0.5625, much less than f32's M*K*4
+	// For q4_0 at M=K=4096, nearly ALL points are compute-bound because
+	// weight data is so small (~9.4MB vs 64MB for f32).
+	// Ideal compute times: N=1→522us, N=35→18264us, N=4096→2137636us
+	// Use ~90% efficiency for realistic latencies.
+	peakTOPS := 64.3e9
+	peakBW := 40.7e9
+
+	points := []LatencyPoint{
+		{Shape: []int64{1}, LatencyUs: 600},
+		{Shape: []int64{3}, LatencyUs: 1800},
+		{Shape: []int64{11}, LatencyUs: 6500},
+		{Shape: []int64{35}, LatencyUs: 20500},
+		{Shape: []int64{116}, LatencyUs: 68000},
+		{Shape: []int64{380}, LatencyUs: 222000},
+		{Shape: []int64{1248}, LatencyUs: 725000},
+		{Shape: []int64{4096}, LatencyUs: 2380000},
+	}
+
+	eff := extractEfficiencyConstants(points, 4096, 4096, peakTOPS, peakBW, "q4_0")
+
+	assert.Greater(t, eff.ComputeEff, 0.5, "compute efficiency should be reasonable")
+	assert.LessOrEqual(t, eff.ComputeEff, 1.0)
+	// For q4_0, most/all points may be compute-bound; BWEff may use default
+	assert.Greater(t, eff.BWEff, 0.0, "BW efficiency should be positive")
+}
+
+func TestPredictMulMatLatency_PerDtypeEfficiency(t *testing.T) {
+	hw := &HardwareProfile{
+		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
+		PeakBandwidthBytesPerSec: 40.7e9,
+		EfficiencyConstants: map[string]OpEfficiency{
+			"MUL_MAT_f32":  {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 500},
+			"MUL_MAT_q4_0": {ComputeEff: 0.85, BWEff: 0.55, OverheadUs: 300},
+		},
+	}
+
+	latF32 := PredictMulMatLatency(hw, 4096, 4096, 1, "f32")
+	latQ40 := PredictMulMatLatency(hw, 4096, 4096, 1, "q4_0")
+
+	assert.Greater(t, latF32, 0.0)
+	assert.Greater(t, latQ40, 0.0)
+	// q4_0 at N=1 should be faster (less data to read, BW-bound regime)
+	assert.Less(t, latQ40, latF32, "q4_0 should be faster than f32 at N=1 (BW-bound)")
+}
+
+func TestPredictMulMatLatency_FallbackToGeneric(t *testing.T) {
+	hw := &HardwareProfile{
+		PeakTOPS:                 map[string]float64{"f32": 64.3e9},
+		PeakBandwidthBytesPerSec: 40.7e9,
+		EfficiencyConstants: map[string]OpEfficiency{
+			"MUL_MAT": {ComputeEff: 0.90, BWEff: 0.40, OverheadUs: 0},
+		},
+	}
+	lat := PredictMulMatLatency(hw, 4096, 4096, 4096, "f16")
+	assert.Greater(t, lat, 0.0, "should fall back to generic MUL_MAT constants")
 }
 
 func TestElemBytesFromDtype(t *testing.T) {
@@ -256,11 +316,10 @@ func TestMeasureMulMat_OutputShape(t *testing.T) {
 	assert.Equal(t, int64(32), pt.Shape[2])   // N
 }
 
-func TestCountGrids_MulMatIsOne(t *testing.T) {
-	// MUL_MAT should count as 1 grid (reference curve), not 6*4=24
+func TestCountGrids_MulMatIsFour(t *testing.T) {
 	ops := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT"}
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
 	count := countGrids(ops, dtypes)
-	// SILU: 1 (f32 only), MUL_MAT: 1 (reference), FLASH_ATTN_EXT: 1 (f16 only)
-	assert.Equal(t, 3, count, "should be 3 grids: SILU + MUL_MAT ref + FLASH_ATTN")
+	// SILU: 1 (f32 only), MUL_MAT: 4 (one per weight dtype), FLASH_ATTN_EXT: 1 (f16 only)
+	assert.Equal(t, 6, count, "should be 6 grids: SILU + 4 MUL_MAT refs + FLASH_ATTN")
 }
