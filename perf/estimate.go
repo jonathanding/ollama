@@ -138,6 +138,12 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 		}
 		return 0, fmt.Errorf("uncalibrated: %s(%s on %s)", op, computeDtype, backend)
 
+	case "GET_ROWS":
+		// GET_ROWS is a pure memory copy (embedding lookup), called once per forward pass.
+		// Its cost is negligible (<10μs) relative to compute ops, so we use a fixed estimate
+		// rather than benchmarking it (which would require impractically large output tensors).
+		return 10.0, nil
+
 	default:
 		if len(shape) < 1 {
 			return 0, fmt.Errorf("op %s requires at least 1 shape dim", op)

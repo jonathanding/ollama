@@ -222,16 +222,6 @@ func makeTestProfileForEstimation() *Profile {
 				},
 			},
 			{
-				Op: "GET_ROWS", Backend: "cuda", ComputeDtype: "f32",
-				Dimensions: []string{"N"},
-				Points: []LatencyPoint{
-					{Shape: []int64{1}, LatencyUs: 5.0},
-					{Shape: []int64{32}, LatencyUs: 8.0},
-					{Shape: []int64{512}, LatencyUs: 30.0},
-					{Shape: []int64{4096}, LatencyUs: 200.0},
-				},
-			},
-			{
 				Op: "ROPE", Backend: "cuda", ComputeDtype: "f32",
 				Dimensions: []string{"N"},
 				Points: []LatencyPoint{
@@ -488,7 +478,6 @@ func TestLookupLatency_NewOps(t *testing.T) {
 		{"CONT", []int64{65536}},
 		{"RMS_NORM", []int64{65536}},
 		{"ROPE", []int64{4096}},
-		{"GET_ROWS", []int64{32}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.op, func(t *testing.T) {
@@ -497,6 +486,13 @@ func TestLookupLatency_NewOps(t *testing.T) {
 			assert.Greater(t, lat, 0.0, "op %s should return positive latency", tt.op)
 		})
 	}
+}
+
+func TestLookupLatency_GET_ROWS_FixedConstant(t *testing.T) {
+	p := makeTestProfileForEstimation()
+	lat, err := lookupLatency(p, "GET_ROWS", []int64{32}, "f32", "", "cuda")
+	require.NoError(t, err, "GET_ROWS should use fixed constant, not require a curve")
+	assert.InDelta(t, 10.0, lat, 0.001, "GET_ROWS fixed constant should be 10μs")
 }
 
 func TestLookupLatency_NewOps_Interpolated(t *testing.T) {

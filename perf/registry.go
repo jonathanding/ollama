@@ -150,39 +150,6 @@ var opRegistry = map[string]OpRunnerML{
 			return nil
 		},
 	},
-	"GET_ROWS": {
-		Dimensions: []string{"N"},
-		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
-			dt, _ := parseDType(dtypeStr)
-			tableShape, numIdx := getRowsInputParams(gridPoint[0])
-			table := randomTensor(ctx, dt, tableShape...)
-			indices := getRowsIndices(numIdx)
-			idxTensor := ctx.Input().FromInts(indices, numIdx)
-			return []ml.Tensor{table, idxTensor}
-		},
-		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
-			return in[0].Rows(ctx, in[1])
-		},
-	},
-}
-
-const (
-	getRowsHiddenDim = 4096
-	getRowsVocabSize = 32000
-)
-
-// getRowsInputParams returns the embedding table shape and number of indices for GET_ROWS.
-func getRowsInputParams(numRows int64) (tableShape []int, numIdx int) {
-	return []int{getRowsHiddenDim, getRowsVocabSize}, int(numRows)
-}
-
-// getRowsIndices returns random int32 indices in [0, vocabSize).
-func getRowsIndices(n int) []int32 {
-	indices := make([]int32, n)
-	for i := range indices {
-		indices[i] = int32(rand.IntN(getRowsVocabSize))
-	}
-	return indices
 }
 
 // ropeInputParams computes the 4D input tensor shape and seqLen for ROPE benchmarking.

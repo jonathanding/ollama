@@ -293,55 +293,6 @@ func TestRegistryROPE(t *testing.T) {
 	assert.NotNil(t, runner.Run)
 }
 
-func TestGetRowsInputParams(t *testing.T) {
-	tests := []struct {
-		name       string
-		numRows    int64
-		wantTable  []int
-		wantNumIdx int
-	}{
-		{"single_row", 1, []int{4096, 32000}, 1},
-		{"batch_32", 32, []int{4096, 32000}, 32},
-		{"large_batch", 4096, []int{4096, 32000}, 4096},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tableShape, numIdx := getRowsInputParams(tt.numRows)
-			assert.Equal(t, tt.wantTable, tableShape, "table shape")
-			assert.Equal(t, tt.wantNumIdx, numIdx, "num indices")
-		})
-	}
-}
-
-func TestGetRowsIndices_InRange(t *testing.T) {
-	indices := getRowsIndices(100)
-	require.Len(t, indices, 100)
-	for i, v := range indices {
-		assert.GreaterOrEqual(t, v, int32(0), "index %d", i)
-		assert.Less(t, v, int32(32000), "index %d should be < vocabSize", i)
-	}
-}
-
-func TestGetRowsIndices_NotAllSame(t *testing.T) {
-	indices := getRowsIndices(100)
-	allSame := true
-	for _, v := range indices {
-		if v != indices[0] {
-			allSame = false
-			break
-		}
-	}
-	assert.False(t, allSame, "random indices should not all be the same value")
-}
-
-func TestRegistryGET_ROWS(t *testing.T) {
-	runner, ok := opRegistry["GET_ROWS"]
-	assert.True(t, ok, "GET_ROWS must be in registry")
-	assert.Equal(t, []string{"N"}, runner.Dimensions)
-	assert.NotNil(t, runner.CreateInputs, "GET_ROWS needs custom tensor creation")
-	assert.NotNil(t, runner.Run)
-}
-
 func TestDefaultBenchmarkOps_ContainsAllRegistered(t *testing.T) {
 	ops := DefaultBenchmarkOps()
 	assert.Len(t, ops, len(opRegistry), "should contain all registered ops")
@@ -352,7 +303,7 @@ func TestDefaultBenchmarkOps_ContainsAllRegistered(t *testing.T) {
 
 func TestDefaultBenchmarkOps_ContainsExpectedOps(t *testing.T) {
 	ops := DefaultBenchmarkOps()
-	expected := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT", "ADD", "MUL", "GELU", "ROPE", "GET_ROWS", "RMS_NORM", "SOFT_MAX", "CONT", "RELU"}
+	expected := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT", "ADD", "MUL", "GELU", "ROPE", "RMS_NORM", "SOFT_MAX", "CONT", "RELU"}
 	for _, e := range expected {
 		assert.Contains(t, ops, e, "should contain %s", e)
 	}
