@@ -107,8 +107,10 @@ type BenchmarkConfig struct {
 	ErrorThreshold float64 // relative error threshold for adaptive refinement
 	MaxPointsPerOp int     // maximum number of sample points per operator
 	WarmupReps     int     // number of warmup iterations before measurement
-	MeasureReps    int     // number of measurement iterations
+	MeasureReps    int     // number of measurement iterations (max ceiling)
 	TrimPercent    float64 // percentage of outliers to trim (e.g., 0.1 = 10%)
+	ConvergenceCV  float64 // CV threshold for early stopping (0.05 = 5%)
+	MinReps        int     // minimum reps before checking convergence
 }
 
 // DefaultBenchmarkConfig returns sensible defaults for production benchmarking.
@@ -119,6 +121,8 @@ func DefaultBenchmarkConfig() BenchmarkConfig {
 		TrimPercent:    0.1,
 		ErrorThreshold: 0.05,
 		MaxPointsPerOp: 20,
+		ConvergenceCV:  0.05,
+		MinReps:        5,
 	}
 }
 

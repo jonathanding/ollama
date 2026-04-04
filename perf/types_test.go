@@ -147,6 +147,21 @@ func TestEstimateResultJSON(t *testing.T) {
 	assert.Len(t, decoded.Warnings, 1)
 }
 
+func TestDefaultBenchmarkConfig_ConvergenceFields(t *testing.T) {
+	cfg := DefaultBenchmarkConfig()
+	assert.Equal(t, 0.05, cfg.ConvergenceCV, "default CV threshold should be 5%")
+	assert.Equal(t, 5, cfg.MinReps, "default min reps should be 5")
+}
+
+func TestBenchmarkConfig_ConvergenceFieldsExist(t *testing.T) {
+	cfg := BenchmarkConfig{
+		ConvergenceCV: 0.03,
+		MinReps:       10,
+	}
+	assert.Equal(t, 0.03, cfg.ConvergenceCV)
+	assert.Equal(t, 10, cfg.MinReps)
+}
+
 func TestHWCharResult(t *testing.T) {
 	result := HWCharResult{
 		PeakTOPS:     map[string]float64{"f16": 330e12, "f32": 165e12},
