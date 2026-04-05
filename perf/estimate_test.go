@@ -566,3 +566,279 @@ func TestEstimatePhase_GemmaDecodeLayerNoWarnings(t *testing.T) {
 	assert.Empty(t, warnings, "should have no uncalibrated warnings for Gemma-like ops")
 	assert.Greater(t, result.TotalLatencyMs, 0.0)
 }
+
+// --- v3 estimation tests ---
+
+func TestLookupLatencyV3_MulMatVecRouting(t *testing.T) {
+	// Profile with both MUL_MAT and MUL_MAT_VEC efficiency constants
+	profile := &Profile{
+		Version: 3,
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f16": 55e9, "f32": 59e9},
+			PeakBandwidthBytesPerSec: 37e9,
+			EfficiencyConstants: map[string]OpEfficiency{
+				"MUL_MAT_f16":     {ComputeEff: 0.8, BWEff: 0.5, OverheadUs: 100},
+				"MUL_MAT_VEC_f16": {ComputeEff: 0.5, BWEff: 0.7, OverheadUs: 10},
+			},
+		},
+	}
+	caps := GetBackendCapabilities("Vulkan") // HasMulMatVec=true, MulMatVecMaxN=8
+
+	// N=1 should route to MUL_MAT_VEC (has lower overhead)
+	latVec, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 1}, "f32", "f16", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, latVec, 0.0)
+
+	// N=8 boundary — still routes to VEC
+	latVec8, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 8}, "f32", "f16", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, latVec8, 0.0)
+
+	// N=9 — routes to regular MUL_MAT (exceeds MulMatVecMaxN=8)
+	latMat9, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 9}, "f32", "f16", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, latMat9, 0.0)
+
+	// N=512 — definitely regular MUL_MAT
+	latMat512, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 512}, "f32", "f16", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, latMat512, 0.0)
+
+	// VEC overhead (10μs) < MAT overhead (100μs), so N=1 VEC should be faster
+	assert.Less(t, latVec, latMat512, "VEC at N=1 should be faster than MAT at N=512")
+}
+
+func TestLookupLatencyV3_MulMatVecFallback(t *testing.T) {
+	// Profile with MUL_MAT constants but NO MUL_MAT_VEC constants
+	profile := &Profile{
+		Version: 3,
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f16": 55e9},
+			PeakBandwidthBytesPerSec: 37e9,
+			EfficiencyConstants: map[string]OpEfficiency{
+				"MUL_MAT_f16": {ComputeEff: 0.8, BWEff: 0.5, OverheadUs: 100},
+			},
+		},
+	}
+	caps := GetBackendCapabilities("Vulkan")
+
+	// N=1 should try VEC, fail, then fallback to regular MUL_MAT
+	lat, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 1}, "f32", "f16", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, lat, 0.0, "should fallback to regular MUL_MAT")
+}
+
+func TestLookupLatencyV3_MulMatNoCapsNoVec(t *testing.T) {
+	profile := &Profile{
+		Version: 3,
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f16": 55e9},
+			PeakBandwidthBytesPerSec: 37e9,
+			EfficiencyConstants: map[string]OpEfficiency{
+				"MUL_MAT_f16": {ComputeEff: 0.8, BWEff: 0.5, OverheadUs: 100},
+			},
+		},
+	}
+	cpuCaps := GetBackendCapabilities("CPU") // HasMulMatVec=false
+
+	lat, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 1}, "f32", "f16", "CPU", &cpuCaps)
+	require.NoError(t, err)
+	assert.Greater(t, lat, 0.0, "should use regular MUL_MAT path for CPU")
+}
+
+func TestLookupLatencyV3_MulMatAdd(t *testing.T) {
+	profile := &Profile{
+		Version: 3,
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f16": 55e9},
+			PeakBandwidthBytesPerSec: 37e9,
+			EfficiencyConstants: map[string]OpEfficiency{
+				"MUL_MAT_f16":     {ComputeEff: 0.8, BWEff: 0.5, OverheadUs: 100},
+				"MUL_MAT_VEC_f16": {ComputeEff: 0.5, BWEff: 0.7, OverheadUs: 10},
+			},
+		},
+	}
+	caps := GetBackendCapabilities("Vulkan")
+
+	// MUL_MAT_ADD with N=1 should route to VEC
+	lat, err := lookupLatencyV3(profile, "MUL_MAT_ADD", []int64{4096, 4096, 1}, "f32", "f16", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, lat, 0.0)
+}
+
+func TestLookupLatencyV3_DelegatesNonMulMat(t *testing.T) {
+	profile := newTestProfile() // already has SILU curve
+	caps := GetBackendCapabilities("Vulkan")
+
+	// SILU should delegate to lookupLatency (v2 path)
+	lat, err := lookupLatencyV3(profile, "SILU", []int64{4096}, "f32", "", "cuda", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, lat, 0.0)
+}
+
+func TestEstimatePhaseV3_Fusion(t *testing.T) {
+	profile := &Profile{
+		Version: 3,
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f32": 59e9},
+			PeakBandwidthBytesPerSec: 37e9,
+		},
+		Operators: []OperatorCurve{
+			{
+				Op: "RMS_NORM_MUL", Backend: "Vulkan", ComputeDtype: "f32",
+				Dimensions: []string{"N"},
+				Points: []LatencyPoint{
+					{Shape: []int64{1024}, LatencyUs: 12},
+					{Shape: []int64{4096}, LatencyUs: 15},
+				},
+			},
+		},
+	}
+	caps := GetBackendCapabilities("Vulkan")
+
+	// Graph: RMS_NORM + MUL → should fuse to RMS_NORM_MUL
+	nodes := []ml.GraphNode{
+		{Op: "RMS_NORM", Backend: "Vulkan", ComputeDtype: "f32", Shape: [4]int64{2048, 1, 1, 1}},
+		{Op: "MUL", Backend: "Vulkan", ComputeDtype: "f32", Shape: [4]int64{2048, 1, 1, 1}},
+	}
+	var warnings []string
+	result := estimatePhaseV3(profile, nodes, &caps, &warnings)
+
+	assert.Greater(t, result.TotalLatencyMs, 0.0)
+	// Should have 1 fused op in breakdown, not 2 separate ops
+	assert.Len(t, result.TopOps, 1)
+	assert.Equal(t, "RMS_NORM_MUL", result.TopOps[0].Op)
+	assert.Equal(t, 1, result.TopOps[0].Count)
+}
+
+func TestEstimatePhaseV3_NilCaps(t *testing.T) {
+	profile := newTestProfile()
+
+	nodes := []ml.GraphNode{
+		{Op: "SILU", Backend: "cuda", ComputeDtype: "f32", Shape: [4]int64{4096, 1, 1, 1}},
+	}
+	var warnings []string
+	result := estimatePhaseV3(profile, nodes, nil, &warnings)
+
+	assert.Greater(t, result.TotalLatencyMs, 0.0)
+	assert.Len(t, result.TopOps, 1)
+	assert.Equal(t, "SILU", result.TopOps[0].Op)
+}
+
+func TestEstimatePhaseV3_OrchestrationOverhead(t *testing.T) {
+	profile := &Profile{
+		Version: 3,
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f32": 59e9},
+			PeakBandwidthBytesPerSec: 37e9,
+		},
+		Operators: []OperatorCurve{
+			{
+				Op: "ADD", Backend: "Vulkan", ComputeDtype: "f32",
+				Dimensions: []string{"N"},
+				Points: []LatencyPoint{
+					{Shape: []int64{1024}, LatencyUs: 5},
+					{Shape: []int64{4096}, LatencyUs: 8},
+				},
+			},
+			{
+				Op: "ORCHESTRATION_OVERHEAD", Backend: "Vulkan", ComputeDtype: "f32",
+				Dimensions: []string{"num_nodes"},
+				Points: []LatencyPoint{
+					{Shape: []int64{50}, LatencyUs: 3000},
+					{Shape: []int64{100}, LatencyUs: 5500},
+					{Shape: []int64{300}, LatencyUs: 15000},
+				},
+			},
+		},
+	}
+	caps := GetBackendCapabilities("Vulkan")
+
+	// 10 ADD nodes
+	nodes := make([]ml.GraphNode, 10)
+	for i := range nodes {
+		nodes[i] = ml.GraphNode{Op: "ADD", Backend: "Vulkan", ComputeDtype: "f32",
+			Shape: [4]int64{2048, 1, 1, 1}}
+	}
+
+	var warnings []string
+	result := estimatePhaseV3(profile, nodes, &caps, &warnings)
+
+	// Total includes GPU time + orchestration overhead
+	assert.Greater(t, result.TotalLatencyMs, 0.0)
+	// Verify overhead is non-zero (interpolated from overhead curve)
+	gpuOnlyUs := float64(0)
+	for _, op := range result.TopOps {
+		gpuOnlyUs += op.TotalUs
+	}
+	totalUs := result.TotalLatencyMs * 1000
+	assert.Greater(t, totalUs, gpuOnlyUs, "total should include overhead beyond GPU time")
+}
+
+func TestLookupOrchestrationOverhead(t *testing.T) {
+	profile := &Profile{
+		Operators: []OperatorCurve{
+			{
+				Op: "ORCHESTRATION_OVERHEAD", Backend: "Vulkan", ComputeDtype: "f32",
+				Dimensions: []string{"num_nodes"},
+				Points: []LatencyPoint{
+					{Shape: []int64{50}, LatencyUs: 3000},
+					{Shape: []int64{100}, LatencyUs: 5500},
+				},
+			},
+		},
+	}
+
+	// Exact match
+	oh50 := lookupOrchestrationOverhead(profile, 50, "Vulkan")
+	assert.InDelta(t, 3000.0, oh50, 1.0)
+
+	// Interpolated
+	oh75 := lookupOrchestrationOverhead(profile, 75, "Vulkan")
+	assert.Greater(t, oh75, 3000.0)
+	assert.Less(t, oh75, 5500.0)
+
+	// Wrong backend → 0
+	ohCPU := lookupOrchestrationOverhead(profile, 50, "CPU")
+	assert.Equal(t, 0.0, ohCPU)
+
+	// No overhead curve → 0
+	emptyProfile := &Profile{}
+	oh := lookupOrchestrationOverhead(emptyProfile, 50, "Vulkan")
+	assert.Equal(t, 0.0, oh)
+}
+
+func TestNodeToQueryShape_MulMatAdd(t *testing.T) {
+	node := ml.GraphNode{
+		Op:           "MUL_MAT_ADD",
+		Backend:      "Vulkan",
+		ComputeDtype: "f16",
+		WeightDtype:  "q4_0",
+		InputShapes:  [][]int64{{4096, 4096}, {4096, 1}},
+	}
+	op, shape, cdt, wdt := nodeToQueryShape(node)
+	assert.Equal(t, "MUL_MAT_ADD", op)
+	require.Len(t, shape, 3)
+	assert.Equal(t, int64(4096), shape[0]) // M
+	assert.Equal(t, int64(4096), shape[1]) // K
+	assert.Equal(t, int64(1), shape[2])    // N
+	assert.Equal(t, "f16", cdt)
+	assert.Equal(t, "q4_0", wdt)
+}
+
+func TestEstimatePhaseV3_BackwardCompatV2(t *testing.T) {
+	// With a v2-style profile (no BackendCaps), estimatePhaseV3 should still work
+	// (delegation to lookupLatency v2 path)
+	profile := newTestProfile() // has SILU curve
+
+	nodes := []ml.GraphNode{
+		{Op: "SILU", Backend: "cuda", ComputeDtype: "f32", Shape: [4]int64{4096, 1, 1, 1}},
+	}
+	caps := BackendCapabilities{Name: "cuda", HasGPUTimestamp: false}
+	var warnings []string
+	result := estimatePhaseV3(profile, nodes, &caps, &warnings)
+
+	assert.Greater(t, result.TotalLatencyMs, 0.0)
+	// No overhead (HasGPUTimestamp=false)
+	assert.Empty(t, warnings)
+}

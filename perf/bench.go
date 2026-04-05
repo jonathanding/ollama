@@ -630,8 +630,18 @@ func extractEfficiencyConstants(points []LatencyPoint, refM, refK int64, peakTOP
 // PredictMulMatLatency computes MUL_MAT latency using the roofline model
 // with measured efficiency constants.
 func PredictMulMatLatency(hw *HardwareProfile, M, K, N int64, dtype string) float64 {
-	// Try per-dtype key first, then fall back to generic
-	effKey := "MUL_MAT_" + dtype
+	return predictMulMatLatencyKeyed(hw, M, K, N, dtype, "MUL_MAT_"+dtype)
+}
+
+// PredictMulMatVecLatency computes MUL_MAT_VEC latency using the roofline model
+// with VEC-specific efficiency constants. Returns 0 if no VEC constants are available.
+func PredictMulMatVecLatency(hw *HardwareProfile, M, K, N int64, dtype string) float64 {
+	return predictMulMatLatencyKeyed(hw, M, K, N, dtype, "MUL_MAT_VEC_"+dtype)
+}
+
+// predictMulMatLatencyKeyed is the shared roofline computation with a caller-specified
+// efficiency constant key. The dtype parameter is used for TOPS and elem-bytes lookup.
+func predictMulMatLatencyKeyed(hw *HardwareProfile, M, K, N int64, dtype, effKey string) float64 {
 	eff, ok := hw.EfficiencyConstants[effKey]
 	if !ok {
 		eff, ok = hw.EfficiencyConstants["MUL_MAT"]

@@ -2,6 +2,9 @@ package perf
 
 import (
 	"fmt"
+	"log/slog"
+	"os"
+	"runtime"
 	"sort"
 
 	"github.com/ollama/ollama/ml"
@@ -16,7 +19,7 @@ func nodeToQueryShape(node ml.GraphNode) (op string, shape []int64, computeDtype
 	weightDtype = node.WeightDtype
 
 	switch op {
-	case "MUL_MAT":
+	case "MUL_MAT", "MUL_MAT_ADD":
 		if len(node.InputShapes) >= 2 && len(node.InputShapes[0]) >= 2 && len(node.InputShapes[1]) >= 2 {
 			// GGML weight tensor: ne[0]=K (inner dim), ne[1]=M (output dim)
 			// Activation tensor:  ne[0]=K (inner dim), ne[1]=N (batch/seq)
@@ -56,13 +59,80 @@ func totalElements(shape [4]int64) int64 {
 	return total
 }
 
-// buildModelGraphNodes loads a model and captures prefill+decode computation graphs.
-func buildModelGraphNodes(modelPath string) (prefill, decode []ml.GraphNode, err error) {
+// fullOffloadSchedule constructs a GPULayers list that offloads all model layers
+// (including the output layer) to the primary GPU device.
+// Returns nil if no GPU devices are available (CPU-only system).
+func fullOffloadSchedule(backend ml.Backend, numLayers int) ml.GPULayersList {
+	devices := backend.BackendDevices()
+	if len(devices) == 0 {
+		return nil
+	}
+	// numLayers repeating layers + 1 output layer
+	layers := make([]int, numLayers+1)
+	for i := range layers {
+		layers[i] = i
+	}
+	return ml.GPULayersList{{
+		DeviceID: devices[0].DeviceID,
+		Layers:   layers,
+	}}
+}
+
+// ensureLibraryPath sets OLLAMA_LIBRARY_PATH and PATH so that GGML can discover
+// backend DLLs (e.g., ggml-vulkan.dll) in the development build directory.
+// Same logic as NewForBench — needed here because model.New also calls initDevices.
+func ensureLibraryPath() {
+	if _, ok := os.LookupEnv("OLLAMA_LIBRARY_PATH"); !ok {
+		os.Setenv("OLLAMA_LIBRARY_PATH", ml.LibOllamaPath)
+	}
+	if runtime.GOOS == "windows" {
+		os.Setenv("PATH", ml.LibOllamaPath+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+}
+
+// discoverModelSchedule loads the model once (lightweight, no weights) to discover
+// GPU devices and layer count, then constructs the schedule (GPULayers).
+func discoverModelSchedule(modelPath string) (ml.GPULayersList, error) {
+	ensureLibraryPath()
+
+	// First pass: load with no GPU offload to discover metadata
 	m, err := model.New(modelPath, ml.BackendParams{AllocMemory: false})
+	if err != nil {
+		return nil, fmt.Errorf("load model for discovery: %w", err)
+	}
+	defer m.Backend().Close()
+
+	numLayers := int(m.Backend().Config().Uint("block_count"))
+	schedule := fullOffloadSchedule(m.Backend(), numLayers)
+	if schedule != nil {
+		slog.Info("estimate schedule", "strategy", "full_offload",
+			"device", schedule[0].DeviceID.Library, "layers", len(schedule[0].Layers))
+	} else {
+		slog.Info("estimate schedule", "strategy", "cpu_only")
+	}
+	return schedule, nil
+}
+
+// buildModelGraphNodes loads a model with the given schedule and captures
+// prefill+decode computation graphs. The schedule determines which layers
+// run on which backend (GPU/CPU), affecting backend assignment in the graph.
+func buildModelGraphNodes(modelPath string, schedule ml.GPULayersList) (prefill, decode []ml.GraphNode, err error) {
+	m, err := model.New(modelPath, ml.BackendParams{
+		AllocMemory:    false,
+		GPULayers:      schedule,
+		FlashAttention: ml.FlashAttentionEnabled,
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("load model: %w", err)
 	}
 	defer m.Backend().Close()
+
+	// Initialize the KV cache before graph capture. The cache is created by model.New()
+	// but Init() (which sets config, allocates cells, etc.) is normally called by the runner.
+	// We need it initialized so that StartForward/buildMask don't hit nil config.
+	if cache := m.Config().Cache; cache != nil {
+		cache.Init(m.Backend(), ml.DTypeF16, 1, 2048, 512)
+	}
 
 	captureGraph := func(batchSize int) ([]ml.GraphNode, error) {
 		ctx := m.Backend().NewContext()
@@ -92,8 +162,11 @@ func buildModelGraphNodes(modelPath string) (prefill, decode []ml.GraphNode, err
 			return nil, fmt.Errorf("forward: %w", err)
 		}
 
+		// PlanGraph: split_graph (backend assignment + graph_optimize) + capture + reset.
+		// Unlike Reserve(), does not allocate memory — only captures graph structure.
 		ctx.SetBatchSize(batchSize)
-		ctx.Forward(t).Reserve()
+		ctx.Forward(t)
+		ctx.PlanGraph()
 
 		return ctx.GraphNodes(), nil
 	}
@@ -130,9 +203,11 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 		if len(shape) < 2 {
 			return 0, fmt.Errorf("FLASH_ATTN_EXT requires 2 shape dims, got %d", len(shape))
 		}
+		// FLASH_ATTN_EXT output tensor is f32 but the op runs on f16 Q/K/V inputs.
+		// Match by op + backend only (benchmark only produces one dtype config).
 		for i := range profile.Operators {
 			c := &profile.Operators[i]
-			if c.Op == op && c.ComputeDtype == computeDtype && c.Backend == backend {
+			if c.Op == op && c.Backend == backend {
 				return InterpolateFlashAttn(c, shape[0], shape[1]), nil
 			}
 		}
@@ -157,6 +232,140 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 	}
 }
 
+// lookupLatencyV3 extends lookupLatency with MUL_MAT_VEC routing based on backend caps.
+func lookupLatencyV3(profile *Profile, op string, shape []int64,
+	computeDtype, weightDtype, backend string, caps *BackendCapabilities) (float64, error) {
+
+	switch op {
+	case "MUL_MAT":
+		if len(shape) < 3 {
+			return 0, fmt.Errorf("MUL_MAT requires 3 shape dims, got %d", len(shape))
+		}
+		M, K, N := shape[0], shape[1], shape[2]
+		mappedWdt := mapWeightDtype(weightDtype)
+
+		// Route to MUL_MAT_VEC when N is small enough and backend supports it
+		if caps != nil && caps.HasMulMatVec && N <= int64(caps.MulMatVecMaxN) {
+			lat := PredictMulMatVecLatency(&profile.Hardware, M, K, N, mappedWdt)
+			if lat > 0 {
+				return lat, nil
+			}
+			// Fallback to regular MUL_MAT roofline if no VEC constants
+		}
+		lat := PredictMulMatLatency(&profile.Hardware, M, K, N, mappedWdt)
+		if lat == 0 {
+			return 0, fmt.Errorf("no efficiency constants for MUL_MAT — run daop-bench first")
+		}
+		return lat, nil
+
+	case "MUL_MAT_ADD":
+		// Fused MUL_MAT+ADD: same shape extraction as MUL_MAT, routes through VEC when applicable
+		if len(shape) < 3 {
+			return 0, fmt.Errorf("MUL_MAT_ADD requires 3 shape dims, got %d", len(shape))
+		}
+		M, K, N := shape[0], shape[1], shape[2]
+		mappedWdt := mapWeightDtype(weightDtype)
+		// MUL_MAT_ADD only triggers for N≤8 (vec range), so always try VEC first
+		if caps != nil && caps.HasMulMatVec && N <= int64(caps.MulMatVecMaxN) {
+			lat := PredictMulMatVecLatency(&profile.Hardware, M, K, N, mappedWdt)
+			if lat > 0 {
+				return lat, nil // ADD overhead negligible (<1μs)
+			}
+		}
+		// Fallback to regular MUL_MAT
+		lat := PredictMulMatLatency(&profile.Hardware, M, K, N, mappedWdt)
+		if lat == 0 {
+			return 0, fmt.Errorf("no efficiency constants for MUL_MAT_ADD — run daop-bench first")
+		}
+		return lat, nil
+
+	default:
+		// Delegate to existing lookupLatency for all other ops
+		return lookupLatency(profile, op, shape, computeDtype, weightDtype, backend)
+	}
+}
+
+// lookupOrchestrationOverhead queries the CPU overhead curve for a given graph size.
+func lookupOrchestrationOverhead(profile *Profile, numNodes int, backend string) float64 {
+	for _, c := range profile.Operators {
+		if c.Op == "ORCHESTRATION_OVERHEAD" && c.Backend == backend {
+			return Interpolate1D(c.Points, int64(numNodes))
+		}
+	}
+	return 0
+}
+
+// estimatePhaseV3 computes total latency with fusion simulation and orchestration overhead.
+func estimatePhaseV3(profile *Profile, nodes []ml.GraphNode, caps *BackendCapabilities, warnings *[]string) PhaseEstimation {
+	// 1. Apply fusion
+	var fusedNodes []ml.GraphNode
+	if caps != nil {
+		fusedNodes = ApplyFusion(nodes, caps.FusionRules)
+	} else {
+		fusedNodes = nodes
+	}
+
+	// 2. Sum per-op GPU time
+	opStats := make(map[OpKey]*OpBreakdown)
+	var totalGPUUs float64
+
+	for _, fnode := range fusedNodes {
+		if IsZeroCostOp(fnode.Op) {
+			continue
+		}
+		op, shape, cdt, wdt := nodeToQueryShape(fnode)
+		lat, err := lookupLatencyV3(profile, op, shape, cdt, wdt, fnode.Backend, caps)
+		if err != nil {
+			*warnings = append(*warnings, err.Error())
+			continue
+		}
+		totalGPUUs += lat
+
+		key := OpKey{op, fnode.Backend, cdt, wdt}
+		if s, ok := opStats[key]; ok {
+			s.Count++
+			s.TotalUs += lat
+		} else {
+			opStats[key] = &OpBreakdown{
+				Op: op, Backend: fnode.Backend,
+				ComputeDtype: cdt, WeightDtype: wdt,
+				Count: 1, TotalUs: lat,
+			}
+		}
+	}
+
+	// 3. Add orchestration overhead
+	var overheadUs float64
+	if caps != nil && caps.HasGPUTimestamp {
+		overheadUs = lookupOrchestrationOverhead(profile, len(nodes), caps.Name)
+	}
+	totalUs := totalGPUUs + overheadUs
+
+	// 4. Build top-ops breakdown
+	var topOps []OpBreakdown
+	for _, s := range opStats {
+		if totalUs > 0 {
+			s.Percentage = s.TotalUs / totalUs
+		}
+		topOps = append(topOps, *s)
+	}
+	sort.Slice(topOps, func(i, j int) bool { return topOps[i].TotalUs > topOps[j].TotalUs })
+	if len(topOps) > 10 {
+		topOps = topOps[:10]
+	}
+
+	tokPerSec := 0.0
+	if totalUs > 0 {
+		tokPerSec = 1e6 / totalUs
+	}
+
+	return PhaseEstimation{
+		TotalLatencyMs: totalUs / 1000,
+		TokensPerSec:   tokPerSec,
+		TopOps:         topOps,
+	}
+}
+
 // estimatePhase computes total latency for a set of graph nodes with per-op breakdown.
 func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) PhaseEstimation {
 	opStats := make(map[OpKey]*OpBreakdown)
@@ -171,6 +380,15 @@ func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) P
 		if err != nil {
 			*warnings = append(*warnings, err.Error())
 			continue
+		}
+		// DEBUG: print per-op details for high-latency suspects
+		if op == "MUL_MAT" && wdt == "f16" {
+			slog.Info("DEBUG f16 MUL_MAT", "name", node.Name, "shape", shape,
+				"inputShapes", node.InputShapes, "latency_us", fmt.Sprintf("%.1f", lat), "backend", node.Backend)
+		}
+		if (op == "MUL" || op == "RMS_NORM" || op == "ADD" || op == "ROPE") && lat > 500 {
+			slog.Info("DEBUG 1D op", "op", op, "name", node.Name, "shape", shape,
+				"dtype", cdt, "latency_us", fmt.Sprintf("%.1f", lat), "backend", node.Backend)
 		}
 		totalUs += lat
 
@@ -213,14 +431,32 @@ func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) P
 
 // EstimateModel estimates inference performance for a model using a calibrated profile.
 func EstimateModel(profile *Profile, modelPath string) (*EstimateResult, error) {
-	prefillNodes, decodeNodes, err := buildModelGraphNodes(modelPath)
+	schedule, err := discoverModelSchedule(modelPath)
+	if err != nil {
+		return nil, err
+	}
+
+	prefillNodes, decodeNodes, err := buildModelGraphNodes(modelPath, schedule)
 	if err != nil {
 		return nil, err
 	}
 
 	result := &EstimateResult{Model: modelPath}
-	result.Prefill = estimatePhase(profile, prefillNodes, &result.Warnings)
-	result.Decode = estimatePhase(profile, decodeNodes, &result.Warnings)
+
+	// Use v3 path if backend caps are available, otherwise fall back to v2
+	if profile.Version >= 3 && len(profile.BackendCaps) > 0 {
+		var caps *BackendCapabilities
+		for name := range profile.BackendCaps {
+			c := GetBackendCapabilities(name)
+			caps = &c
+			break
+		}
+		result.Prefill = estimatePhaseV3(profile, prefillNodes, caps, &result.Warnings)
+		result.Decode = estimatePhaseV3(profile, decodeNodes, caps, &result.Warnings)
+	} else {
+		result.Prefill = estimatePhase(profile, prefillNodes, &result.Warnings)
+		result.Decode = estimatePhase(profile, decodeNodes, &result.Warnings)
+	}
 
 	result.PrefillLatencyUs = result.Prefill.TotalLatencyMs * 1000
 	result.PrefillMs = result.Prefill.TotalLatencyMs
