@@ -5,9 +5,11 @@ package ggml
 // #cgo CPPFLAGS: -I${SRCDIR}/ggml/include
 // #include <stdlib.h>
 // #include <stdint.h>
+// #include <stdio.h>
 // #include "ggml.h"
 // #include "ggml-cpu.h"
 // #include "ggml-backend.h"
+// #include "ggml-alloc.h"
 //
 // // GPU Timestamp API — resolved at runtime via ggml_backend_reg_get_proc_address.
 // // The Vulkan backend (ggml-vulkan.dll) registers these functions; they are not
@@ -28,10 +30,14 @@ package ggml
 // static void resolve_vk_timestamps(ggml_backend_dev_t dev) {
 //     if (_vk_is_vk) return; // already resolved
 //     ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
-//     if (!reg) return;
+//     if (!reg) { fprintf(stderr, "DEBUG: resolve_vk_timestamps: reg is NULL\n"); return; }
+//     const char * reg_name = ggml_backend_reg_name(reg);
+//     fprintf(stderr, "DEBUG: resolve_vk_timestamps: reg=%p reg_name=%s\n", (void*)reg, reg_name ? reg_name : "(null)");
 //     _vk_is_vk = (vk_is_vk_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_backend_is_vk");
 //     _vk_enable_timestamps = (vk_enable_timestamps_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_vk_enable_timestamps");
 //     _vk_get_op_timings = (vk_get_op_timings_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_vk_get_op_timings");
+//     fprintf(stderr, "DEBUG: resolve_vk_timestamps: is_vk=%p enable=%p get_timings=%p\n",
+//         (void*)_vk_is_vk, (void*)_vk_enable_timestamps, (void*)_vk_get_op_timings);
 // }
 //
 // static bool call_vk_is_vk(ggml_backend_t b) {
@@ -42,6 +48,23 @@ package ggml
 // }
 // static struct ggml_vk_op_timing * call_vk_get_op_timings(ggml_backend_t b, int * n) {
 //     return _vk_get_op_timings ? _vk_get_op_timings(b, n) : NULL;
+// }
+//
+// // Reset all tensor allocations in a ggml_context so they can be re-allocated.
+// // Frees old_buffers[0..n_old-1], then sets data=NULL and buffer=NULL on all tensors.
+// static void reset_ctx_tensor_allocs(
+//     struct ggml_context * ctx,
+//     ggml_backend_buffer_t * old_buffers,
+//     int n_old) {
+//     for (int i = 0; i < n_old; i++) {
+//         ggml_backend_buffer_free(old_buffers[i]);
+//     }
+//     for (struct ggml_tensor * t = ggml_get_first_tensor(ctx);
+//          t != NULL;
+//          t = ggml_get_next_tensor(ctx, t)) {
+//         t->data   = NULL;
+//         t->buffer = NULL;
+//     }
 // }
 import "C"
 
@@ -798,8 +821,9 @@ func (b *Backend) NewContextSize(n int) ml.Context {
 			mem_size: C.size_t(n)*C.ggml_tensor_overhead() + C.ggml_graph_overhead_custom(C.size_t(n), false),
 			no_alloc: true,
 		}),
-		allocatedBuffers: &allocatedBuffers,
-		layer:            -1,
+		allocatedBuffers:   &allocatedBuffers,
+		layer:              -1,
+		directBackendIdx:   -1,
 	}
 }
 
@@ -859,18 +883,22 @@ func (b *Backend) BackendDevices() []ml.DeviceInfo {
 }
 
 func (b *Backend) EnableGPUTimestamps(enable bool) {
-	for _, be := range b.schedBackends {
-		if C.call_vk_is_vk(be) {
+	slog.Info("DEBUG EnableGPUTimestamps", "enable", enable, "num_backends", len(b.schedBackends))
+	for i, be := range b.schedBackends {
+		isVk := C.call_vk_is_vk(be)
+		slog.Info("DEBUG EnableGPUTimestamps backend", "idx", i, "is_vk", isVk)
+		if isVk {
 			C.call_vk_enable_timestamps(be, C.bool(enable))
 		}
 	}
 }
 
 func (b *Backend) GetOpTimings() []ml.OpTiming {
-	for _, be := range b.schedBackends {
+	for i, be := range b.schedBackends {
 		if C.call_vk_is_vk(be) {
 			var nTimings C.int
 			timings := C.call_vk_get_op_timings(be, &nTimings)
+			slog.Info("DEBUG GetOpTimings", "backend_idx", i, "nTimings", int(nTimings), "timings_nil", timings == nil)
 			if timings == nil || nTimings == 0 {
 				return nil
 			}
@@ -915,6 +943,13 @@ type Context struct {
 
 	// graphNodes stores node info captured during Reserve for performance estimation
 	graphNodes []ml.GraphNode
+
+	// directBackendIdx tracks which backend tensors have been allocated on
+	// for direct (non-scheduler) compute. -1 means not yet allocated.
+	directBackendIdx int
+	// directBuffer holds the GPU buffer allocated by ComputeOnBackend,
+	// freed on Context.Close().
+	directBuffer C.ggml_backend_buffer_t
 }
 
 func (c *Context) Input() ml.Context {
@@ -994,6 +1029,70 @@ func (c *Context) ComputeWithNotify(cb func(), tensors ...ml.Tensor) {
 	for _, t := range tensors {
 		if C.ggml_nbytes(t.(*Tensor).t) > 0 {
 			t.(*Tensor).sync = sync
+		}
+	}
+}
+
+// ComputeOnBackend bypasses the ggml_backend_sched scheduler and executes
+// the computation graph directly on the specified backend.
+//
+// backendIdx indexes into schedBackends (0 = first GPU, typically Vulkan/CUDA).
+//
+// On the first call, all tensors in this context are reallocated from their
+// current buffer (typically CPU) onto the target backend's buffer type.
+// Subsequent calls reuse the GPU allocation and just re-execute the graph.
+//
+// This is used by benchmark to ensure ops run on the intended hardware,
+// bypassing the scheduler's heuristic that keeps small ops on CPU.
+func (c *Context) ComputeOnBackend(backendIdx int, tensors ...ml.Tensor) {
+	c.b.schedMu.Lock()
+	defer c.b.schedMu.Unlock()
+
+	if backendIdx < 0 || backendIdx >= len(c.b.schedBackends) {
+		panic(fmt.Errorf("ComputeOnBackend: backendIdx %d out of range [0, %d)",
+			backendIdx, len(c.b.schedBackends)))
+	}
+
+	backend := c.b.schedBackends[backendIdx]
+	buft := c.b.schedBufts[backendIdx]
+
+	// First call: reallocate all context tensors on the target backend
+	if c.directBackendIdx != backendIdx {
+		// Free old CPU-allocated buffers and reset tensor pointers
+		if c.allocatedBuffers != nil && len(*c.allocatedBuffers) > 0 {
+			C.reset_ctx_tensor_allocs(
+				c.ctx,
+				&(*c.allocatedBuffers)[0],
+				C.int(len(*c.allocatedBuffers)),
+			)
+			*c.allocatedBuffers = nil
+		}
+
+		// Free any previous direct buffer
+		if c.directBuffer != nil {
+			C.ggml_backend_buffer_free(c.directBuffer)
+		}
+
+		// Allocate all tensors on the target backend's buffer type
+		c.directBuffer = C.ggml_backend_alloc_ctx_tensors_from_buft(c.ctx, buft)
+		if c.directBuffer == nil {
+			panic("ComputeOnBackend: failed to allocate tensors on target backend")
+		}
+
+		c.directBackendIdx = backendIdx
+	}
+
+	// Execute graph directly on the target backend (no scheduler)
+	if status := C.ggml_backend_graph_compute(backend, c.graph); status != C.GGML_STATUS_SUCCESS {
+		panic(fmt.Errorf("ComputeOnBackend: graph compute failed: %v", status))
+	}
+
+	C.ggml_backend_synchronize(backend)
+
+	// Mark output tensors as already synchronized
+	for _, t := range tensors {
+		if C.ggml_nbytes(t.(*Tensor).t) > 0 {
+			t.(*Tensor).sync = func() {}
 		}
 	}
 }
@@ -1250,6 +1349,11 @@ func (c Context) Arange(start, stop, step float32, dtype ml.DType) ml.Tensor {
 
 func (c *Context) Close() {
 	if c != nil {
+		if c.directBuffer != nil {
+			C.ggml_backend_buffer_free(c.directBuffer)
+			c.directBuffer = nil
+		}
+
 		for _, b := range *c.allocatedBuffers {
 			C.ggml_backend_buffer_free(b)
 		}

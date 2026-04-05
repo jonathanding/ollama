@@ -147,6 +147,11 @@ type Context interface {
 	Compute(...Tensor)
 	ComputeWithNotify(func(), ...Tensor) // notify callback once compute has begun
 
+	// ComputeOnBackend bypasses the scheduler and executes the graph
+	// directly on the specified backend. backendIdx 0 = first GPU.
+	// Used by benchmark to ensure ops run on the intended hardware.
+	ComputeOnBackend(backendIdx int, tensors ...Tensor)
+
 	// Reserve is analogous to Compute but rather than executing a
 	// graph, simply preallocates memory. Typically called with a
 	// worst case graph to ensure all resources are available for
