@@ -333,7 +333,7 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 		"gpu_timestamp", caps.HasGPUTimestamp, "fusion_rules", len(caps.FusionRules),
 		"mul_mat_vec", caps.HasMulMatVec)
 
-	plan := buildBenchmarkPlan(ops, dtypes, caps)
+	plan := buildBenchmarkPlan(ops, dtypes, caps, cfg)
 	slog.Info("benchmark plan", "steps", len(plan))
 
 	profile := &Profile{
@@ -569,7 +569,11 @@ func predictMulMatLatencyKeyed(hw *HardwareProfile, M, K, N int64, dtype, effKey
 	computeTime := flops / (eff.ComputeEff * peakTOPS) * 1e6 // microseconds
 	bwTime := bytes / (eff.BWEff * peakBW) * 1e6              // microseconds
 
-	return math.Max(computeTime, bwTime) + eff.OverheadUs
+	// Don't add per-op OverheadUs here. The overhead from the reference curve fit
+	// is a benchmark artifact (per-invocation context/sync cost), not a real per-op
+	// cost in inference. Real dispatch overhead is async and pipelined — accounted
+	// for once via ORCHESTRATION_OVERHEAD in estimatePhaseV3.
+	return math.Max(computeTime, bwTime)
 }
 
 // elemBytesFromDtype returns bytes per element for a dtype string.

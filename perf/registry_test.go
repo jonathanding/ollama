@@ -295,7 +295,7 @@ func TestRegistryROPE(t *testing.T) {
 
 func TestDefaultBenchmarkOps_ContainsAllRegistered(t *testing.T) {
 	ops := DefaultBenchmarkOps()
-	assert.Len(t, ops, len(opRegistry), "should contain all registered ops")
+	assert.Len(t, ops, len(opRegistry)+1, "should contain all registered ops + ORCHESTRATION_OVERHEAD")
 	for i := 1; i < len(ops); i++ {
 		assert.Less(t, ops[i-1], ops[i], "ops should be sorted alphabetically")
 	}

@@ -15,6 +15,7 @@ import (
 // RunBenchmarkCLI is the entry point for `ollama daop-bench`.
 func RunBenchmarkCLI(backend ml.Backend, opts BenchmarkCLIOptions) error {
 	cfg := DefaultBenchmarkConfig()
+	cfg.SkipHWChar = opts.SkipHWChar
 
 	ops := DefaultBenchmarkOps()
 	if opts.Ops != "" {
@@ -113,6 +114,7 @@ type BenchmarkCLIOptions struct {
 	Dtypes     string // --dtypes: comma-separated dtype list
 	Viewer     bool   // --viewer: generate HTML viewer after benchmarking
 	Verbose    bool   // --verbose: show per-point results
+	SkipHWChar bool   // --skip-hwchar: skip hardware characterization
 }
 
 // EstimateCLIOptions controls `ollama daop-estimate`.

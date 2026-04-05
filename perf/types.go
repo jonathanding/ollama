@@ -112,6 +112,7 @@ type BenchmarkConfig struct {
 	TrimPercent    float64 // percentage of outliers to trim (e.g., 0.1 = 10%)
 	ConvergenceCV  float64 // CV threshold for early stopping (0.05 = 5%)
 	MinReps        int     // minimum reps before checking convergence
+	SkipHWChar     bool    // skip hardware characterization (peak TOPS, bandwidth)
 }
 
 // DefaultBenchmarkConfig returns sensible defaults for production benchmarking.

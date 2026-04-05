@@ -28,25 +28,62 @@ type BenchmarkPlan []BenchmarkStep
 // buildBenchmarkPlan creates the complete list of benchmark steps based on parameters.
 // This is the single point where filtering and ordering decisions are made.
 // RunBenchmark simply iterates this list — no scattered conditionals.
-func buildBenchmarkPlan(ops []string, dtypes []string, caps BackendCapabilities) BenchmarkPlan {
+//
+// The ops list fully controls which benchmarks run: regular ops become StepOperator,
+// fused ops become StepFusedOp, MUL_MAT becomes StepMulMatRef. Orchestration overhead
+// runs only when the full default op set is used.
+func buildBenchmarkPlan(ops []string, dtypes []string, caps BackendCapabilities, cfg BenchmarkConfig) BenchmarkPlan {
 	var plan BenchmarkPlan
 
-	// 1. Hardware characterization — always first
-	plan = append(plan, BenchmarkStep{Type: StepHWChar})
+	// 1. Hardware characterization — first unless skipped
+	if !cfg.SkipHWChar {
+		plan = append(plan, BenchmarkStep{Type: StepHWChar})
+	}
 
-	// Known fused ops — benchmarked separately, not in the main op loop
+	// Fused ops are routed to StepFusedOp instead of StepOperator
 	fusedOps := map[string]bool{
 		"RMS_NORM_MUL":      true,
 		"RMS_NORM_MUL_ROPE": true,
 		"MUL_MAT_ADD":       true,
 	}
 
-	// 2. Main operator benchmarks
+	// Build a set for quick lookup
+	opsSet := make(map[string]bool, len(ops))
 	for _, op := range ops {
+		opsSet[op] = true
+	}
+
+	// 2. All operator benchmarks — unified loop
+	for _, op := range ops {
+		// Fused ops: route to StepFusedOp (requires backend fusion support)
 		if fusedOps[op] {
+			if len(caps.FusionRules) == 0 {
+				continue
+			}
+			if _, ok := LookupRegistry(op); !ok {
+				continue
+			}
+			if op == "MUL_MAT_ADD" {
+				for _, wdt := range Phase1Dtypes() {
+					plan = append(plan, BenchmarkStep{
+						Type:        StepFusedOp,
+						Op:          op,
+						Dtype:       "f32",
+						WeightDtype: wdt,
+						FixedDims:   map[string]int64{"M": 4096, "K": 4096},
+					})
+				}
+			} else {
+				plan = append(plan, BenchmarkStep{
+					Type:  StepFusedOp,
+					Op:    op,
+					Dtype: "f32",
+				})
+			}
 			continue
 		}
 
+		// MUL_MAT: generate reference curves per weight dtype
 		if op == "MUL_MAT" {
 			for _, wdt := range Phase1Dtypes() {
 				plan = append(plan, BenchmarkStep{
@@ -59,6 +96,7 @@ func buildBenchmarkPlan(ops []string, dtypes []string, caps BackendCapabilities)
 			continue
 		}
 
+		// Regular ops
 		opDtypes := dtypes
 		if op == "FLASH_ATTN_EXT" {
 			opDtypes = []string{"f16"}
@@ -85,35 +123,8 @@ func buildBenchmarkPlan(ops []string, dtypes []string, caps BackendCapabilities)
 		}
 	}
 
-	// 3. Fused op benchmarks — if backend supports fusion
-	if len(caps.FusionRules) > 0 {
-		fusedList := []string{"RMS_NORM_MUL", "RMS_NORM_MUL_ROPE", "MUL_MAT_ADD"}
-		for _, fop := range fusedList {
-			if _, ok := LookupRegistry(fop); !ok {
-				continue
-			}
-			if fop == "MUL_MAT_ADD" {
-				for _, wdt := range Phase1Dtypes() {
-					plan = append(plan, BenchmarkStep{
-						Type:        StepFusedOp,
-						Op:          fop,
-						Dtype:       "f32",
-						WeightDtype: wdt,
-						FixedDims:   map[string]int64{"M": 4096, "K": 4096},
-					})
-				}
-			} else {
-				plan = append(plan, BenchmarkStep{
-					Type:  StepFusedOp,
-					Op:    fop,
-					Dtype: "f32",
-				})
-			}
-		}
-	}
-
-	// 4. Orchestration overhead — for GPU backends with timestamp support
-	if caps.HasGPUTimestamp {
+	// 3. Orchestration overhead — only for full calibration (not custom --ops)
+	if caps.HasGPUTimestamp && opsSet["ORCHESTRATION_OVERHEAD"] {
 		plan = append(plan, BenchmarkStep{Type: StepOverhead})
 	}
 

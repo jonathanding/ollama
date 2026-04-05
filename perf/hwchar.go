@@ -23,8 +23,8 @@ func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResul
 
 	slog.Info("hardware characterization", "devices", len(devices), "backend", caps.Name)
 
-	// Measure peak TOPS for f16 and f32
-	for _, dtypeStr := range []string{"f16", "f32"} {
+	// Measure peak TOPS for all relevant dtypes
+	for _, dtypeStr := range []string{"f16", "f32", "q8_0", "q4_0"} {
 		dt, ok := parseDType(dtypeStr)
 		if !ok {
 			continue
@@ -60,13 +60,16 @@ func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResul
 
 // benchPeakTOPS measures peak TOPS via large MUL_MAT (M=K=N=4096).
 // TOPS = FLOPs / latency, where FLOPs = 2 * M * K * N.
+// Uses random data to avoid potential hardware fast-paths for zero-filled tensors.
 func benchPeakTOPS(backend ml.Backend, caps BackendCapabilities, dtype ml.DType, cfg BenchmarkConfig) (float64, error) {
 	const M, K, N = 4096, 4096, 4096
 	ctx := backend.NewContext()
 	defer ctx.Close()
 
-	a := ctx.Input().Zeros(dtype, M, K)
-	b := ctx.Input().Zeros(dtype, K, N)
+	// Weight uses target dtype; activation is always f32
+	// (matches real inference: quantized weights, f32 activations)
+	a := randomTensor(ctx, dtype, M, K)
+	b := randomTensor(ctx, ml.DTypeF32, K, N)
 	out := a.Mulmat(ctx, b)
 	ctx.Forward(out)
 
@@ -101,12 +104,13 @@ func benchPeakTOPS(backend ml.Backend, caps BackendCapabilities, dtype ml.DType,
 
 // benchPeakBandwidth measures peak memory bandwidth via large CONT (copy).
 // Size: 64M elements * 4 bytes = 256MB. Bytes = 2 * 256MB (read + write).
+// Uses random data to avoid potential hardware fast-paths for zero-filled memory.
 func benchPeakBandwidth(backend ml.Backend, caps BackendCapabilities, cfg BenchmarkConfig) (float64, error) {
 	const size = 64 * 1024 * 1024 // 64M elements
 	ctx := backend.NewContext()
 	defer ctx.Close()
 
-	src := ctx.Input().Zeros(ml.DTypeF32, size)
+	src := randomTensor(ctx, ml.DTypeF32, size)
 	dst := src.Contiguous(ctx)
 	ctx.Forward(dst)
 

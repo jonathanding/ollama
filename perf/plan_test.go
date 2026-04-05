@@ -11,7 +11,7 @@ func TestBuildBenchmarkPlan_FullPipeline(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
 	ops := DefaultBenchmarkOps()
 	dtypes := Phase1Dtypes()
-	plan := buildBenchmarkPlan(ops, dtypes, caps)
+	plan := buildBenchmarkPlan(ops, dtypes, caps, DefaultBenchmarkConfig())
 	require.NotEmpty(t, plan)
 	assert.Equal(t, StepHWChar, plan[0].Type)
 	hwCharCount, opCount, fusedCount, overheadCount, mulMatRefCount := 0, 0, 0, 0, 0
@@ -38,7 +38,7 @@ func TestBuildBenchmarkPlan_FullPipeline(t *testing.T) {
 
 func TestBuildBenchmarkPlan_SpecificOps(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
-	plan := buildBenchmarkPlan([]string{"ADD", "SILU"}, []string{"f32"}, caps)
+	plan := buildBenchmarkPlan([]string{"ADD", "SILU"}, []string{"f32"}, caps, DefaultBenchmarkConfig())
 	require.NotEmpty(t, plan)
 	stepOps := make(map[string]int)
 	for _, s := range plan {
@@ -53,7 +53,7 @@ func TestBuildBenchmarkPlan_SpecificOps(t *testing.T) {
 
 func TestBuildBenchmarkPlan_NoFusionOnCPU(t *testing.T) {
 	caps := GetBackendCapabilities("CPU")
-	plan := buildBenchmarkPlan(DefaultBenchmarkOps(), Phase1Dtypes(), caps)
+	plan := buildBenchmarkPlan(DefaultBenchmarkOps(), Phase1Dtypes(), caps, DefaultBenchmarkConfig())
 	fusedCount, overheadCount := 0, 0
 	for _, s := range plan {
 		if s.Type == StepFusedOp {
@@ -69,7 +69,7 @@ func TestBuildBenchmarkPlan_NoFusionOnCPU(t *testing.T) {
 
 func TestBuildBenchmarkPlan_MulMatGeneratesRefCurves(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
-	plan := buildBenchmarkPlan([]string{"MUL_MAT"}, Phase1Dtypes(), caps)
+	plan := buildBenchmarkPlan([]string{"MUL_MAT"}, Phase1Dtypes(), caps, DefaultBenchmarkConfig())
 	refCount := 0
 	for _, s := range plan {
 		if s.Type == StepMulMatRef {
@@ -81,7 +81,7 @@ func TestBuildBenchmarkPlan_MulMatGeneratesRefCurves(t *testing.T) {
 
 func TestBuildBenchmarkPlan_1DOpsUseF32Only(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
-	plan := buildBenchmarkPlan([]string{"ADD", "SILU", "RMS_NORM"}, []string{"f32", "f16", "q4_0"}, caps)
+	plan := buildBenchmarkPlan([]string{"ADD", "SILU", "RMS_NORM"}, []string{"f32", "f16", "q4_0"}, caps, DefaultBenchmarkConfig())
 	for _, s := range plan {
 		if s.Type == StepOperator {
 			assert.Equal(t, "f32", s.Dtype, "1D op %s should only use f32", s.Op)
@@ -91,7 +91,7 @@ func TestBuildBenchmarkPlan_1DOpsUseF32Only(t *testing.T) {
 
 func TestBuildBenchmarkPlan_FusedOpsExcludedFromMainLoop(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
-	plan := buildBenchmarkPlan(DefaultBenchmarkOps(), Phase1Dtypes(), caps)
+	plan := buildBenchmarkPlan(DefaultBenchmarkOps(), Phase1Dtypes(), caps, DefaultBenchmarkConfig())
 	for _, s := range plan {
 		if s.Type == StepOperator {
 			assert.NotContains(t, []string{"RMS_NORM_MUL", "RMS_NORM_MUL_ROPE", "MUL_MAT_ADD"}, s.Op)
@@ -101,13 +101,13 @@ func TestBuildBenchmarkPlan_FusedOpsExcludedFromMainLoop(t *testing.T) {
 
 func TestBuildBenchmarkPlan_StepCount(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
-	plan := buildBenchmarkPlan([]string{"ADD"}, []string{"f32"}, caps)
-	assert.GreaterOrEqual(t, len(plan), 3) // HWChar + ADD + Overhead at minimum
+	plan := buildBenchmarkPlan([]string{"ADD"}, []string{"f32"}, caps, DefaultBenchmarkConfig())
+	assert.Equal(t, 2, len(plan)) // HWChar + ADD (no overhead unless explicitly requested)
 }
 
 func TestBuildBenchmarkPlan_EmptyOps(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
-	plan := buildBenchmarkPlan(nil, nil, caps)
+	plan := buildBenchmarkPlan(nil, nil, caps, DefaultBenchmarkConfig())
 	hwCount := 0
 	for _, s := range plan {
 		if s.Type == StepHWChar {
@@ -115,4 +115,15 @@ func TestBuildBenchmarkPlan_EmptyOps(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, hwCount)
+}
+
+func TestBuildBenchmarkPlan_SkipHWChar(t *testing.T) {
+	caps := GetBackendCapabilities("Vulkan")
+	cfg := DefaultBenchmarkConfig()
+	cfg.SkipHWChar = true
+	plan := buildBenchmarkPlan(DefaultBenchmarkOps(), Phase1Dtypes(), caps, cfg)
+	for _, s := range plan {
+		assert.NotEqual(t, StepHWChar, s.Type, "plan should not contain StepHWChar when SkipHWChar=true")
+	}
+	assert.Greater(t, len(plan), 0, "plan should still have operator steps")
 }

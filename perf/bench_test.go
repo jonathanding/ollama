@@ -320,7 +320,7 @@ func TestPlanStepCount_AllOps(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
 	ops := DefaultBenchmarkOps()
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
-	plan := buildBenchmarkPlan(ops, dtypes, caps)
+	plan := buildBenchmarkPlan(ops, dtypes, caps, DefaultBenchmarkConfig())
 	// Plan should contain: HWChar + MulMatRef + Operators + FusedOps + Overhead
 	require.NotEmpty(t, plan)
 	assert.Equal(t, StepHWChar, plan[0].Type)
@@ -331,7 +331,7 @@ func TestPlanStepCount_SubsetOps(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
 
-	plan := buildBenchmarkPlan([]string{"SILU"}, dtypes, caps)
+	plan := buildBenchmarkPlan([]string{"SILU"}, dtypes, caps, DefaultBenchmarkConfig())
 	opCount := 0
 	for _, s := range plan {
 		if s.Type == StepOperator {
@@ -340,7 +340,7 @@ func TestPlanStepCount_SubsetOps(t *testing.T) {
 	}
 	assert.Equal(t, 1, opCount, "SILU is 1D, f32 only -> 1 operator step")
 
-	plan = buildBenchmarkPlan([]string{"MUL_MAT"}, dtypes, caps)
+	plan = buildBenchmarkPlan([]string{"MUL_MAT"}, dtypes, caps, DefaultBenchmarkConfig())
 	refCount := 0
 	for _, s := range plan {
 		if s.Type == StepMulMatRef {

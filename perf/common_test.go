@@ -1,6 +1,7 @@
 package perf
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,11 +60,49 @@ func TestGetBackendCapabilities(t *testing.T) {
 	assert.False(t, unknown.HasGPUTimestamp)
 }
 
+func TestGetBackendCapabilities_CUDA(t *testing.T) {
+	cuda := GetBackendCapabilities("CUDA")
+	assert.Equal(t, "CUDA", cuda.Name)
+	assert.False(t, cuda.HasGPUTimestamp, "CUDA does not yet expose GPU timestamps")
+	assert.True(t, cuda.HasMulMatVec, "CUDA has MUL_MAT_VEC kernel")
+	assert.Equal(t, 8, cuda.MulMatVecMaxN)
+	assert.Nil(t, cuda.FusionRules, "CUDA has no fusion rules yet")
+}
+
 func TestBackendCapabilitiesToJSON(t *testing.T) {
+	// Vulkan: all features enabled
 	caps := GetBackendCapabilities("Vulkan")
 	j := caps.ToJSON()
 	assert.Equal(t, "Vulkan", j.Name)
 	assert.True(t, j.HasGPUTimestamp)
 	assert.True(t, j.HasMulMatVec)
 	assert.Equal(t, 8, j.MulMatVecMaxN)
+
+	// CPU: all features disabled
+	cpuCaps := GetBackendCapabilities("CPU")
+	cpuJ := cpuCaps.ToJSON()
+	assert.Equal(t, "CPU", cpuJ.Name)
+	assert.False(t, cpuJ.HasGPUTimestamp)
+	assert.False(t, cpuJ.HasMulMatVec)
+	assert.Equal(t, 0, cpuJ.MulMatVecMaxN)
+}
+
+func TestBackendCapabilitiesJSON_RoundTrip(t *testing.T) {
+	// Verify JSON serialization/deserialization round-trip
+	caps := GetBackendCapabilities("Vulkan")
+	j := caps.ToJSON()
+
+	// Marshal to JSON
+	data, err := json.Marshal(j)
+	assert.NoError(t, err)
+
+	// Unmarshal back
+	var loaded BackendCapabilitiesJSON
+	err = json.Unmarshal(data, &loaded)
+	assert.NoError(t, err)
+
+	assert.Equal(t, j.Name, loaded.Name)
+	assert.Equal(t, j.HasGPUTimestamp, loaded.HasGPUTimestamp)
+	assert.Equal(t, j.HasMulMatVec, loaded.HasMulMatVec)
+	assert.Equal(t, j.MulMatVecMaxN, loaded.MulMatVecMaxN)
 }

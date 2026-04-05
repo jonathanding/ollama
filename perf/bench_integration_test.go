@@ -134,14 +134,14 @@ func TestPlanFusedOpsExcludedFromMainSteps(t *testing.T) {
 	caps := GetBackendCapabilities("Vulkan")
 
 	// Fused ops only → no StepOperator or StepMulMatRef steps
-	plan := buildBenchmarkPlan([]string{"MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"}, caps)
+	plan := buildBenchmarkPlan([]string{"MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"}, caps, DefaultBenchmarkConfig())
 	for _, s := range plan {
 		assert.NotEqual(t, StepOperator, s.Type, "MUL_MAT_ADD should not appear as StepOperator")
 		assert.NotEqual(t, StepMulMatRef, s.Type, "MUL_MAT_ADD should not appear as StepMulMatRef")
 	}
 
 	// Mix of regular and fused ops — fused ops become StepFusedOp
-	plan = buildBenchmarkPlan([]string{"ADD", "MUL_MAT", "MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"}, caps)
+	plan = buildBenchmarkPlan([]string{"ADD", "MUL_MAT", "MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"}, caps, DefaultBenchmarkConfig())
 	opCount, refCount, fusedCount := 0, 0, 0
 	for _, s := range plan {
 		switch s.Type {

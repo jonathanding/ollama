@@ -89,6 +89,14 @@ var opRegistry = map[string]OpRunnerML{
 	},
 	"FLASH_ATTN_EXT": {
 		Dimensions: []string{"seq_q", "seq_kv"},
+		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+			// Q is f32 (matmul output in real inference), K/V are f16 (KV cache)
+			seqQ, seqKV := gridPoint[0], gridPoint[1]
+			q := randomTensor(ctx, ml.DTypeF32, 128, 32, int(seqQ), 1)
+			k := randomTensor(ctx, ml.DTypeF16, 128, 32, int(seqKV), 1)
+			v := randomTensor(ctx, ml.DTypeF16, 128, 32, int(seqKV), 1)
+			return []ml.Tensor{q, k, v}
+		},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
 			sdpa, ok := in[0].(ml.ScaledDotProductAttention)
 			if !ok {
@@ -318,12 +326,14 @@ func Phase1MulMatFixedDims() [][2]int64 {
 }
 
 // DefaultBenchmarkOps returns the list of ops to benchmark by default.
-// This includes all registered ops.
+// This includes all registered ops plus ORCHESTRATION_OVERHEAD (a pseudo-op
+// that triggers orchestration overhead measurement in the benchmark plan).
 func DefaultBenchmarkOps() []string {
-	ops := make([]string, 0, len(opRegistry))
+	ops := make([]string, 0, len(opRegistry)+1)
 	for name := range opRegistry {
 		ops = append(ops, name)
 	}
+	ops = append(ops, "ORCHESTRATION_OVERHEAD")
 	sort.Strings(ops)
 	return ops
 }

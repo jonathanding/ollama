@@ -2093,11 +2093,13 @@ func daopBenchHandler(cmd *cobra.Command, args []string) error {
 	verbose, _ := cmd.Flags().GetBool("detail")
 	opsFlag, _ := cmd.Flags().GetString("ops")
 	dtypesFlag, _ := cmd.Flags().GetString("dtypes")
+	skipHWChar, _ := cmd.Flags().GetBool("skip-hwchar")
 	opts := perf.BenchmarkCLIOptions{
 		Verbose:    verbose,
 		Viewer:     true, // always generate HTML viewer
 		Ops:        opsFlag,
 		Dtypes:     dtypesFlag,
+		SkipHWChar: skipHWChar,
 	}
 	return perf.RunBenchmarkCLI(backend, opts)
 }
@@ -2373,6 +2375,7 @@ func NewCLI() *cobra.Command {
 	daopBenchCmd.Flags().Bool("detail", false, "Show detailed operator eta values")
 	daopBenchCmd.Flags().String("ops", "", "Comma-separated ops to benchmark (e.g. ADD,SILU)")
 	daopBenchCmd.Flags().String("dtypes", "", "Comma-separated dtypes (e.g. f32,q4_0)")
+	daopBenchCmd.Flags().Bool("skip-hwchar", false, "Skip hardware characterization (peak TOPS, bandwidth)")
 
 
 	daopEstimateCmd := &cobra.Command{
