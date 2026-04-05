@@ -312,17 +312,19 @@ func Phase1Dtypes() []string {
 	return []string{"f32", "f16", "q4_0", "q8_0"}
 }
 
-// Phase1MulMatFixedDims returns representative (M, K) pairs for MUL_MAT benchmarks.
-// These cover common transformer architectures (Llama 7B/8B, 13B, 70B).
+// Phase1MulMatFixedDims returns the 3×3 log-spaced (M, K) grid for MUL_MAT benchmarks.
+// Grid values: {512, 2048, 8192} — factor of 4 between steps.
+// Covers any transformer architecture with dimensions in [512, 8192].
+// Total: 9 (M,K) pairs × 4 dtypes × 3 N values = 108 measurements.
 func Phase1MulMatFixedDims() [][2]int64 {
-	return [][2]int64{
-		{4096, 4096},   // Llama-7B/8B: hidden_dim
-		{14336, 4096},  // Llama-8B: FFN up/gate (intermediate_size × hidden_size)
-		{4096, 14336},  // Llama-8B: FFN down (hidden_size × intermediate_size)
-		{8192, 8192},   // Llama-70B: hidden_dim
-		{28672, 8192},  // Llama-70B: FFN up/gate
-		{8192, 28672},  // Llama-70B: FFN down
+	gridValues := []int64{512, 2048, 8192}
+	var pairs [][2]int64
+	for _, m := range gridValues {
+		for _, k := range gridValues {
+			pairs = append(pairs, [2]int64{m, k})
+		}
 	}
+	return pairs
 }
 
 // DefaultBenchmarkOps returns the list of ops to benchmark by default.

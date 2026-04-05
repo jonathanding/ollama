@@ -54,8 +54,8 @@ func TestBuildSamplingGrids_SILU(t *testing.T) {
 
 func TestBuildSamplingGrids_MulMat(t *testing.T) {
 	grids := buildSamplingGrids("MUL_MAT", "f16", "q4_0")
-	// One grid per (M, K) pair from Phase1MulMatFixedDims
-	assert.GreaterOrEqual(t, len(grids), 4, "MUL_MAT should have multiple (M,K) grids")
+	// 3×3 grid = 9 (M,K) pairs
+	assert.Equal(t, 9, len(grids), "MUL_MAT should have 9 (M,K) grids from 3×3 grid")
 	for _, g := range grids {
 		assert.Equal(t, "MUL_MAT", g.Op)
 		assert.Equal(t, "q4_0", g.WeightDtype)
@@ -63,6 +63,18 @@ func TestBuildSamplingGrids_MulMat(t *testing.T) {
 		assert.Contains(t, g.FixedDims, "M")
 		assert.Contains(t, g.FixedDims, "K")
 	}
+
+	// Verify specific grid values
+	expectedDims := []int64{512, 2048, 8192}
+	seen := make(map[[2]int64]bool)
+	for _, g := range grids {
+		M := g.FixedDims["M"]
+		K := g.FixedDims["K"]
+		seen[[2]int64{M, K}] = true
+		assert.Contains(t, expectedDims, M, "M=%d not in expected grid values", M)
+		assert.Contains(t, expectedDims, K, "K=%d not in expected grid values", K)
+	}
+	assert.Equal(t, 9, len(seen), "should have 9 unique (M,K) pairs")
 }
 
 func TestBuildSamplingGrids_FlashAttn(t *testing.T) {
@@ -294,6 +306,123 @@ func TestPredictMulMatLatency_FallbackToGeneric(t *testing.T) {
 	assert.Greater(t, lat, 0.0, "should fall back to generic MUL_MAT constants")
 }
 
+func TestPredictMulMatDirect_SingleCurve(t *testing.T) {
+	// With a single reference curve at (4096,4096), direct lookup should return
+	// the interpolated latency at the exact reference shape.
+	profile := &Profile{
+		Operators: []OperatorCurve{{
+			Op:          "MUL_MAT",
+			WeightDtype: "q4_0",
+			FixedDims:   map[string]int64{"M": 4096, "K": 4096},
+			Points: []LatencyPoint{
+				{Shape: []int64{1}, LatencyUs: 2021},
+				{Shape: []int64{3}, LatencyUs: 1968},
+				{Shape: []int64{6}, LatencyUs: 2105},
+				{Shape: []int64{35}, LatencyUs: 2863},
+				{Shape: []int64{380}, LatencyUs: 8610},
+				{Shape: []int64{4096}, LatencyUs: 95381},
+			},
+		}},
+	}
+
+	// Exact match at reference shape (4096,4096,N=1) → measured value
+	lat := PredictMulMatDirect(profile, 4096, 4096, 1, "q4_0")
+	assert.InDelta(t, 2021, lat, 1.0)
+
+	// N=3 interpolation
+	lat = PredictMulMatDirect(profile, 4096, 4096, 3, "q4_0")
+	assert.InDelta(t, 1968, lat, 1.0)
+
+	// Wrong dtype → 0
+	lat = PredictMulMatDirect(profile, 4096, 4096, 1, "f16")
+	assert.Equal(t, 0.0, lat)
+}
+
+func TestPredictMulMatDirect_MultiCurve(t *testing.T) {
+	// With two reference curves, IDW should interpolate between them.
+	profile := &Profile{
+		Operators: []OperatorCurve{
+			{
+				Op:          "MUL_MAT",
+				WeightDtype: "q4_0",
+				FixedDims:   map[string]int64{"M": 4096, "K": 4096},
+				Points: []LatencyPoint{
+					{Shape: []int64{1}, LatencyUs: 2000},
+				},
+			},
+			{
+				Op:          "MUL_MAT",
+				WeightDtype: "q4_0",
+				FixedDims:   map[string]int64{"M": 2048, "K": 2048},
+				Points: []LatencyPoint{
+					{Shape: []int64{1}, LatencyUs: 500},
+				},
+			},
+		},
+	}
+
+	// At (4096,4096): should return ~2000 (exact match)
+	lat := PredictMulMatDirect(profile, 4096, 4096, 1, "q4_0")
+	assert.InDelta(t, 2000, lat, 1.0)
+
+	// At (2048,2048): should return ~500 (exact match)
+	lat = PredictMulMatDirect(profile, 2048, 2048, 1, "q4_0")
+	assert.InDelta(t, 500, lat, 1.0)
+
+	// At (3072,3072): should interpolate between 500 and 2000
+	lat = PredictMulMatDirect(profile, 3072, 3072, 1, "q4_0")
+	assert.Greater(t, lat, 500.0)
+	assert.Less(t, lat, 2000.0)
+	t.Logf("IDW interpolation at (3072,3072,N=1): %.1f μs (between 500 and 2000)", lat)
+}
+
+func TestPredictMulMatDirect_VsRoofline(t *testing.T) {
+	// Demonstrate the difference between roofline and direct interpolation
+	// when reference curves at multiple (M,K) pairs exist.
+	profile := &Profile{
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"q4_0": 1569e9},
+			PeakBandwidthBytesPerSec: 48.75e9,
+			EfficiencyConstants: map[string]OpEfficiency{
+				"MUL_MAT_q4_0": {ComputeEff: 0.872, BWEff: 0.096},
+			},
+		},
+		Operators: []OperatorCurve{
+			{
+				Op: "MUL_MAT", WeightDtype: "q4_0",
+				FixedDims: map[string]int64{"M": 4096, "K": 4096},
+				Points: []LatencyPoint{
+					{Shape: []int64{1}, LatencyUs: 2021},
+				},
+			},
+			{
+				Op: "MUL_MAT", WeightDtype: "q4_0",
+				FixedDims: map[string]int64{"M": 2048, "K": 2048},
+				Points: []LatencyPoint{
+					// Hypothetical: smaller matrix is faster per byte (better cache)
+					{Shape: []int64{1}, LatencyUs: 400},
+				},
+			},
+		},
+	}
+
+	// Roofline prediction for (2048,2048,N=1,q4_0):
+	// bytes = 2048*2048*0.5625 + (2048+2048)*4 ≈ 2.36MB
+	// bwTime = 2.36e6 / (0.096 * 48.75e9) * 1e6 ≈ 504 μs
+	roofline := PredictMulMatLatency(&profile.Hardware, 2048, 2048, 1, "q4_0")
+	t.Logf("Roofline prediction (2048,2048,N=1): %.1f μs", roofline)
+
+	// Direct interpolation: should use measured 400 μs (exact match at 2048,2048)
+	direct := PredictMulMatDirect(profile, 2048, 2048, 1, "q4_0")
+	t.Logf("Direct prediction (2048,2048,N=1): %.1f μs", direct)
+
+	// With actual data at (2048,2048)=400μs, direct is much closer to truth
+	assert.InDelta(t, 400, direct, 1.0, "direct should match measured data")
+	assert.Greater(t, roofline, 450.0, "roofline should overpredict for smaller shapes")
+
+	t.Logf("Roofline/Direct ratio: %.2fx — direct interpolation wins when reference data exists", roofline/direct)
+}
+
 func TestElemBytesFromDtype(t *testing.T) {
 	assert.Equal(t, 4.0, elemBytesFromDtype("f32"))
 	assert.Equal(t, 2.0, elemBytesFromDtype("f16"))
@@ -347,7 +476,7 @@ func TestPlanStepCount_SubsetOps(t *testing.T) {
 			refCount++
 		}
 	}
-	assert.Equal(t, 4, refCount, "MUL_MAT -> 4 ref curves (one per weight dtype)")
+	assert.Equal(t, 36, refCount, "MUL_MAT -> 4 dtypes × 9 (M,K) pairs = 36 ref curves")
 }
 
 // --- Direct backend measurement tests ---

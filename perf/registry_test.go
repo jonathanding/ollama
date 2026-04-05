@@ -311,16 +311,18 @@ func TestDefaultBenchmarkOps_ContainsExpectedOps(t *testing.T) {
 
 func TestPhase1MulMatShapePairs(t *testing.T) {
 	pairs := Phase1MulMatFixedDims()
-	assert.NotEmpty(t, pairs)
-	// Should include the standard 4096x4096 pair
-	found := false
+	assert.Len(t, pairs, 9, "3×3 grid should produce 9 pairs")
+	// Should include the grid corner values
+	gridValues := []int64{512, 2048, 8192}
+	seen := make(map[[2]int64]bool)
 	for _, p := range pairs {
-		if p[0] == 4096 && p[1] == 4096 {
-			found = true
-			break
+		seen[p] = true
+	}
+	for _, m := range gridValues {
+		for _, k := range gridValues {
+			assert.True(t, seen[[2]int64{m, k}], "must include (%d, %d) pair", m, k)
 		}
 	}
-	assert.True(t, found, "must include (4096, 4096) pair")
 }
 
 // --- Fused op tests ---
