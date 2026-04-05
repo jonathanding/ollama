@@ -321,285 +321,162 @@ func benchOrchestrationOverhead(backend ml.Backend, cfg BenchmarkConfig) []Laten
 	return points
 }
 
-// RunBenchmark executes the full v3 calibration pipeline:
-// 1. Hardware characterization (peak TOPS, BW) + backend discovery
-// 2. MUL_MAT: one reference curve + extract efficiency constants (roofline extrapolation)
-// 3. Other ops: adaptive sampling → OperatorCurves
-// 4. Fused ops: benchmark fused kernels when backend supports fusion
-// 5. Orchestration overhead: measure CPU dispatch cost for GPU backends
+// RunBenchmark executes the full v3 calibration pipeline using a work plan pattern:
+// buildBenchmarkPlan produces a flat list of BenchmarkStep entries, then this function
+// iterates the list uniformly with a single loop — no scattered conditionals.
 // Returns a complete Profile ready for estimation.
 func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg BenchmarkConfig) (*Profile, error) {
 	benchStart := time.Now()
-
-	// Step 1: Hardware characterization
-	var hwProfile HardwareProfile
-	if cfg.SkipHWChar {
-		slog.Info("skipping hardware characterization (debug mode)")
-		hwProfile = HardwareProfile{
-			PeakTOPS:                 map[string]float64{"f16": 44e9, "f32": 44e9},
-			PeakBandwidthBytesPerSec: 38e9,
-		}
-	} else {
-		hwStart := time.Now()
-		hwResult, err := CharacterizeHardware(backend, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("hardware characterization: %w", err)
-		}
-		hwProfile = HWCharResultToHardwareProfile(hwResult, backend)
-		slog.Info("hardware characterization complete", "duration", time.Since(hwStart).Round(time.Second))
-	}
 
 	caps := DiscoverBackend(backend)
 	slog.Info("backend capabilities", "name", caps.Name,
 		"gpu_timestamp", caps.HasGPUTimestamp, "fusion_rules", len(caps.FusionRules),
 		"mul_mat_vec", caps.HasMulMatVec)
 
+	plan := buildBenchmarkPlan(ops, dtypes, caps)
+	slog.Info("benchmark plan", "steps", len(plan))
+
 	profile := &Profile{
 		Version:   3,
 		Timestamp: time.Now(),
-		Hardware:  hwProfile,
 		BackendCaps: map[string]BackendCapabilitiesJSON{
 			caps.Name: caps.ToJSON(),
 		},
 	}
 
-	// Count grids: MUL_MAT = 1 reference curve, others = normal counting
-	totalGrids := countGrids(ops, dtypes)
-	slog.Info("starting operator calibration", "ops", len(ops), "dtypes", len(dtypes), "total_grids", totalGrids)
-	calibrationStart := time.Now()
-	gridIdx := 0
+	for i, step := range plan {
+		elapsed := time.Since(benchStart).Round(time.Second)
+		progress := fmt.Sprintf("[%d/%d]", i+1, len(plan))
 
-	// Fused ops are benchmarked separately in Step 3 — skip them in the main loop
-	fusedOps := map[string]bool{"RMS_NORM_MUL": true, "RMS_NORM_MUL_ROPE": true, "MUL_MAT_ADD": true}
-
-	// Step 2: Benchmark each op
-	for _, op := range ops {
-		if fusedOps[op] {
-			continue
-		}
-		if op == "MUL_MAT" {
-			// MUL_MAT: one reference curve per weight dtype
-			for _, wdt := range Phase1Dtypes() {
-				gridIdx++
-				elapsed := time.Since(calibrationStart).Round(time.Second)
-				slog.Info("benchmarking MUL_MAT reference curve",
-					"progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
-					"M", 4096, "K", 4096, "weight_dtype", wdt, "elapsed", elapsed)
-
-				gridStart := time.Now()
-				refPoints := benchmarkMulMat(backend, caps, wdt, map[string]int64{"M": 4096, "K": 4096}, cfg)
-
-				if len(refPoints) == 0 {
-					slog.Warn("MUL_MAT reference curve produced no points", "weight_dtype", wdt)
-					continue
-				}
-
-				refCurve := OperatorCurve{
-					Op:           "MUL_MAT",
-					ComputeDtype: wdt,
-					WeightDtype:  wdt,
-					Dimensions:   []string{"N"},
-					FixedDims:    map[string]int64{"M": 4096, "K": 4096},
-					Points:       refPoints,
-				}
-				devices := backend.BackendDevices()
-				if len(devices) > 0 {
-					refCurve.Backend = devices[0].Library
-				}
-				profile.Operators = append(profile.Operators, refCurve)
-
-				// Extract per-dtype efficiency constants
-				peakTOPS := hwProfile.PeakTOPS["f32"]
-				if tops, ok := hwProfile.PeakTOPS[wdt]; ok {
-					peakTOPS = tops
-				}
-				eff := extractEfficiencyConstants(refPoints, 4096, 4096, peakTOPS, hwProfile.PeakBandwidthBytesPerSec, wdt)
-				if profile.Hardware.EfficiencyConstants == nil {
-					profile.Hardware.EfficiencyConstants = make(map[string]OpEfficiency)
-				}
-				effKey := "MUL_MAT_" + wdt
-				profile.Hardware.EfficiencyConstants[effKey] = eff
-
-				gridDuration := time.Since(gridStart).Round(time.Second)
-				slog.Info("completed MUL_MAT reference",
-					"progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
-					"weight_dtype", wdt, "points", len(refPoints),
-					"eff_compute", fmt.Sprintf("%.2f", eff.ComputeEff),
-					"eff_bw", fmt.Sprintf("%.2f", eff.BWEff),
-					"grid_duration", gridDuration)
+		switch step.Type {
+		case StepHWChar:
+			slog.Info("hardware characterization", "progress", progress, "elapsed", elapsed)
+			hwStart := time.Now()
+			hwResult, err := CharacterizeHardware(backend, cfg)
+			if err != nil {
+				return nil, fmt.Errorf("hardware characterization: %w", err)
 			}
-			continue
-		}
+			profile.Hardware = HWCharResultToHardwareProfile(hwResult, backend)
+			slog.Info("hardware characterization complete",
+				"progress", progress, "duration", time.Since(hwStart).Round(time.Second))
 
-		// Non-MUL_MAT ops: adaptive sampling as before
-		opDtypes := dtypes
-		if op == "FLASH_ATTN_EXT" {
-			opDtypes = []string{"f16"}
-		}
-		runner, ok := LookupRegistry(op)
-		if !ok {
-			slog.Warn("skipping unknown op", "op", op)
-			continue
-		}
-		if len(runner.Dimensions) == 1 && runner.Dimensions[0] == "N" {
-			opDtypes = []string{"f32"}
-		}
+		case StepMulMatRef:
+			slog.Info("benchmarking MUL_MAT reference curve",
+				"progress", progress, "weight_dtype", step.WeightDtype, "elapsed", elapsed)
+			gridStart := time.Now()
 
-		for _, dtype := range opDtypes {
-			grids := buildSamplingGrids(op, dtype, "")
-
-			for _, grid := range grids {
-				gridIdx++
-				elapsed := time.Since(calibrationStart).Round(time.Second)
-				slog.Info("benchmarking", "progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
-					"op", op, "dtype", dtype, "fixed", grid.FixedDims, "elapsed", elapsed)
-
-				gridStart := time.Now()
-
-				var curve OperatorCurve
-				curve.Op = op
-				curve.ComputeDtype = dtype
-				curve.Dimensions = sweepDimensions(op)
-				curve.FixedDims = grid.FixedDims
-
-				devices := backend.BackendDevices()
-				if len(devices) > 0 {
-					curve.Backend = devices[0].Library
-				}
-
-				switch op {
-				case "FLASH_ATTN_EXT":
-					curve.Points = benchmarkFlashAttn(backend, caps, dtype, grid.FixedDims, cfg)
-				default:
-					curve.Points = benchmarkElementwise(backend, caps, op, dtype, cfg)
-				}
-
-				gridDuration := time.Since(gridStart).Round(time.Second)
-				if len(curve.Points) > 0 {
-					minLat, maxLat := curve.Points[0].LatencyUs, curve.Points[0].LatencyUs
-					for _, p := range curve.Points[1:] {
-						if p.LatencyUs < minLat {
-							minLat = p.LatencyUs
-						}
-						if p.LatencyUs > maxLat {
-							maxLat = p.LatencyUs
-						}
-					}
-					slog.Info("completed", "progress", fmt.Sprintf("[%d/%d]", gridIdx, totalGrids),
-						"op", op, "dtype", dtype, "fixed", grid.FixedDims,
-						"points", len(curve.Points),
-						"latency_range_us", fmt.Sprintf("%.0f-%.0f", minLat, maxLat),
-						"grid_duration", gridDuration)
-					profile.Operators = append(profile.Operators, curve)
-				} else {
-					slog.Warn("no points collected", "op", op, "dtype", dtype, "fixed", grid.FixedDims)
-				}
-			}
-		}
-	}
-
-	// Step 3: Benchmark fused ops (if backend supports fusion)
-	if len(caps.FusionRules) > 0 && !cfg.SkipHWChar {
-		fusedOps := []string{"RMS_NORM_MUL", "RMS_NORM_MUL_ROPE", "MUL_MAT_ADD"}
-		for _, fop := range fusedOps {
-			if _, ok := LookupRegistry(fop); !ok {
+			refPoints := benchmarkMulMat(backend, caps, step.WeightDtype, step.FixedDims, cfg)
+			if len(refPoints) == 0 {
+				slog.Warn("MUL_MAT reference curve produced no points", "weight_dtype", step.WeightDtype)
 				continue
 			}
-			slog.Info("benchmarking fused op", "op", fop)
 
-			switch fop {
+			refCurve := OperatorCurve{
+				Op: "MUL_MAT", ComputeDtype: step.WeightDtype, WeightDtype: step.WeightDtype,
+				Dimensions: []string{"N"}, FixedDims: step.FixedDims, Points: refPoints,
+			}
+			if devices := backend.BackendDevices(); len(devices) > 0 {
+				refCurve.Backend = devices[0].Library
+			}
+			profile.Operators = append(profile.Operators, refCurve)
+
+			peakTOPS := profile.Hardware.PeakTOPS["f32"]
+			if tops, ok := profile.Hardware.PeakTOPS[step.WeightDtype]; ok {
+				peakTOPS = tops
+			}
+			eff := extractEfficiencyConstants(refPoints, 4096, 4096, peakTOPS,
+				profile.Hardware.PeakBandwidthBytesPerSec, step.WeightDtype)
+			if profile.Hardware.EfficiencyConstants == nil {
+				profile.Hardware.EfficiencyConstants = make(map[string]OpEfficiency)
+			}
+			profile.Hardware.EfficiencyConstants["MUL_MAT_"+step.WeightDtype] = eff
+
+			slog.Info("completed MUL_MAT reference", "progress", progress,
+				"weight_dtype", step.WeightDtype, "points", len(refPoints),
+				"eff_compute", fmt.Sprintf("%.2f", eff.ComputeEff),
+				"eff_bw", fmt.Sprintf("%.2f", eff.BWEff),
+				"duration", time.Since(gridStart).Round(time.Second))
+
+		case StepOperator:
+			slog.Info("benchmarking", "progress", progress,
+				"op", step.Op, "dtype", step.Dtype, "fixed", step.FixedDims, "elapsed", elapsed)
+			gridStart := time.Now()
+
+			var curve OperatorCurve
+			curve.Op = step.Op
+			curve.ComputeDtype = step.Dtype
+			curve.Dimensions = sweepDimensions(step.Op)
+			curve.FixedDims = step.FixedDims
+			if devices := backend.BackendDevices(); len(devices) > 0 {
+				curve.Backend = devices[0].Library
+			}
+
+			switch step.Op {
+			case "FLASH_ATTN_EXT":
+				curve.Points = benchmarkFlashAttn(backend, caps, step.Dtype, step.FixedDims, cfg)
+			default:
+				curve.Points = benchmarkElementwise(backend, caps, step.Op, step.Dtype, cfg)
+			}
+
+			if len(curve.Points) > 0 {
+				slog.Info("completed", "progress", progress,
+					"op", step.Op, "dtype", step.Dtype, "points", len(curve.Points),
+					"duration", time.Since(gridStart).Round(time.Second))
+				profile.Operators = append(profile.Operators, curve)
+			} else {
+				slog.Warn("no points collected", "op", step.Op, "dtype", step.Dtype)
+			}
+
+		case StepFusedOp:
+			slog.Info("benchmarking fused op", "progress", progress,
+				"op", step.Op, "weight_dtype", step.WeightDtype, "elapsed", elapsed)
+
+			switch step.Op {
 			case "MUL_MAT_ADD":
-				for _, wdt := range Phase1Dtypes() {
-					points := benchmarkMulMat(backend, caps, wdt,
-						map[string]int64{"M": 4096, "K": 4096}, cfg)
-					var vecPoints []LatencyPoint
-					for _, p := range points {
-						if len(p.Shape) > 0 && p.Shape[0] <= 8 {
-							vecPoints = append(vecPoints, p)
-						}
+				points := benchmarkMulMat(backend, caps, step.WeightDtype, step.FixedDims, cfg)
+				var vecPoints []LatencyPoint
+				for _, p := range points {
+					if len(p.Shape) > 0 && p.Shape[0] <= 8 {
+						vecPoints = append(vecPoints, p)
 					}
-					if len(vecPoints) > 0 {
-						profile.Operators = append(profile.Operators, OperatorCurve{
-							Op:           fop,
-							Backend:      caps.Name,
-							ComputeDtype: "f32",
-							WeightDtype:  wdt,
-							Dimensions:   []string{"N"},
-							FixedDims:    map[string]int64{"M": 4096, "K": 4096},
-							Points:       vecPoints,
-						})
-					}
+				}
+				if len(vecPoints) > 0 {
+					profile.Operators = append(profile.Operators, OperatorCurve{
+						Op: step.Op, Backend: caps.Name, ComputeDtype: "f32",
+						WeightDtype: step.WeightDtype, Dimensions: []string{"N"},
+						FixedDims: step.FixedDims, Points: vecPoints,
+					})
 				}
 			default:
 				measure := func(shape []int64) LatencyPoint {
-					return measureOpForBackend(backend, caps, fop, shape, "f32", cfg)
+					return measureOpForBackend(backend, caps, step.Op, shape, "f32", cfg)
 				}
 				points := AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
 				if len(points) > 0 {
 					profile.Operators = append(profile.Operators, OperatorCurve{
-						Op:           fop,
-						Backend:      caps.Name,
-						ComputeDtype: "f32",
-						Dimensions:   []string{"N"},
-						Points:       points,
+						Op: step.Op, Backend: caps.Name, ComputeDtype: "f32",
+						Dimensions: []string{"N"}, Points: points,
 					})
 				}
+			}
+
+		case StepOverhead:
+			slog.Info("benchmarking orchestration overhead", "progress", progress, "elapsed", elapsed)
+			ohPoints := benchOrchestrationOverhead(backend, cfg)
+			if len(ohPoints) > 0 {
+				profile.Operators = append(profile.Operators, OperatorCurve{
+					Op: "ORCHESTRATION_OVERHEAD", Backend: caps.Name,
+					ComputeDtype: "f32", Dimensions: []string{"num_nodes"},
+					Points: ohPoints,
+				})
 			}
 		}
 	}
 
-	// Step 4: Benchmark orchestration overhead (GPU backends only)
-	if caps.HasGPUTimestamp && !cfg.SkipHWChar {
-		slog.Info("benchmarking orchestration overhead")
-		ohPoints := benchOrchestrationOverhead(backend, cfg)
-		if len(ohPoints) > 0 {
-			profile.Operators = append(profile.Operators, OperatorCurve{
-				Op:           "ORCHESTRATION_OVERHEAD",
-				Backend:      caps.Name,
-				ComputeDtype: "f32",
-				Dimensions:   []string{"num_nodes"},
-				Points:       ohPoints,
-			})
-		}
-	}
-
 	totalDuration := time.Since(benchStart).Round(time.Second)
-	slog.Info("calibration complete", "grids", len(profile.Operators), "total_duration", totalDuration)
+	slog.Info("calibration complete", "operators", len(profile.Operators), "total_duration", totalDuration)
 
 	return profile, nil
-}
-
-// countGrids pre-counts the total number of sampling grids to run.
-// MUL_MAT counts as 1 (reference curve only), not 6×4=24.
-func countGrids(ops []string, dtypes []string) int {
-	total := 0
-	// Fused ops are benchmarked in Step 3, not counted here
-	fusedOps := map[string]bool{"RMS_NORM_MUL": true, "RMS_NORM_MUL_ROPE": true, "MUL_MAT_ADD": true}
-	for _, op := range ops {
-		if fusedOps[op] {
-			continue
-		}
-		if op == "MUL_MAT" {
-			total += len(Phase1Dtypes()) // one reference curve per weight dtype
-			continue
-		}
-		opDtypes := dtypes
-		if op == "FLASH_ATTN_EXT" {
-			opDtypes = []string{"f16"}
-		}
-		runner, ok := LookupRegistry(op)
-		if !ok {
-			continue
-		}
-		if len(runner.Dimensions) == 1 && runner.Dimensions[0] == "N" {
-			opDtypes = []string{"f32"}
-		}
-		for _, dtype := range opDtypes {
-			grids := buildSamplingGrids(op, dtype, "")
-			total += len(grids)
-		}
-	}
-	return total
 }
 
 // extractEfficiencyConstants computes compute and BW efficiency from a MUL_MAT reference curve.

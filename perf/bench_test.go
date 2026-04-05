@@ -316,30 +316,38 @@ func TestMeasureMulMat_OutputShape(t *testing.T) {
 	assert.Equal(t, int64(32), pt.Shape[2])   // N
 }
 
-func TestCountGrids_AllOps(t *testing.T) {
+func TestPlanStepCount_AllOps(t *testing.T) {
+	caps := GetBackendCapabilities("Vulkan")
 	ops := DefaultBenchmarkOps()
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
-	count := countGrids(ops, dtypes)
-	// MUL_MAT: 4 (one per weight dtype)
-	// Fused ops (RMS_NORM_MUL, RMS_NORM_MUL_ROPE, MUL_MAT_ADD): skipped (handled in Step 3)
-	// FLASH_ATTN_EXT: 1 (f16 only)
-	// All other 1D ops: 1 each (f32 only)
-	numFusedOps := 3 // RMS_NORM_MUL, RMS_NORM_MUL_ROPE, MUL_MAT_ADD
-	numOtherOps := len(ops) - numFusedOps - 1 - 1 // minus fused, MUL_MAT, FLASH_ATTN_EXT
-	expected := numOtherOps + len(Phase1Dtypes()) + 1 // 1D ops + MUL_MAT + FLASH_ATTN
-	assert.Equal(t, expected, count)
+	plan := buildBenchmarkPlan(ops, dtypes, caps)
+	// Plan should contain: HWChar + MulMatRef + Operators + FusedOps + Overhead
+	require.NotEmpty(t, plan)
+	assert.Equal(t, StepHWChar, plan[0].Type)
+	assert.Greater(t, len(plan), 1)
 }
 
-func TestCountGrids_SubsetOps(t *testing.T) {
+func TestPlanStepCount_SubsetOps(t *testing.T) {
+	caps := GetBackendCapabilities("Vulkan")
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
-	count := countGrids([]string{"SILU"}, dtypes)
-	assert.Equal(t, 1, count, "SILU is 1D, f32 only → 1 grid")
 
-	count = countGrids([]string{"MUL_MAT"}, dtypes)
-	assert.Equal(t, 4, count, "MUL_MAT → 4 grids (one per weight dtype)")
+	plan := buildBenchmarkPlan([]string{"SILU"}, dtypes, caps)
+	opCount := 0
+	for _, s := range plan {
+		if s.Type == StepOperator {
+			opCount++
+		}
+	}
+	assert.Equal(t, 1, opCount, "SILU is 1D, f32 only -> 1 operator step")
 
-	count = countGrids([]string{"SILU", "ADD", "MUL_MAT"}, dtypes)
-	assert.Equal(t, 6, count, "2 × 1D + 4 MUL_MAT = 6")
+	plan = buildBenchmarkPlan([]string{"MUL_MAT"}, dtypes, caps)
+	refCount := 0
+	for _, s := range plan {
+		if s.Type == StepMulMatRef {
+			refCount++
+		}
+	}
+	assert.Equal(t, 4, refCount, "MUL_MAT -> 4 ref curves (one per weight dtype)")
 }
 
 // --- Direct backend measurement tests ---

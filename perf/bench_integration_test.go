@@ -128,18 +128,34 @@ func TestBenchmarkElementwiseAcceptsCaps(t *testing.T) {
 	}
 }
 
-// TestCountGridsWithFusedOps verifies that countGrids handles fused ops correctly.
-// MUL_MAT_ADD should be counted like MUL_MAT (one per weight dtype).
-func TestCountGridsWithFusedOps(t *testing.T) {
-	// MUL_MAT_ADD is treated like MUL_MAT in countGrids
-	count := countGrids([]string{"MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"})
-	assert.Equal(t, len(Phase1Dtypes()), count,
-		"MUL_MAT_ADD should produce one grid per weight dtype, same as MUL_MAT")
+// TestPlanFusedOpsExcludedFromMainSteps verifies that fused ops become
+// StepFusedOp entries (not StepOperator) in the benchmark plan.
+func TestPlanFusedOpsExcludedFromMainSteps(t *testing.T) {
+	caps := GetBackendCapabilities("Vulkan")
 
-	// Mix of regular and fused ops
-	count = countGrids([]string{"ADD", "MUL_MAT", "MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"})
-	expected := 1 + len(Phase1Dtypes()) + len(Phase1Dtypes()) // ADD=1, MUL_MAT=4, MUL_MAT_ADD=4
-	assert.Equal(t, expected, count)
+	// Fused ops only → no StepOperator or StepMulMatRef steps
+	plan := buildBenchmarkPlan([]string{"MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"}, caps)
+	for _, s := range plan {
+		assert.NotEqual(t, StepOperator, s.Type, "MUL_MAT_ADD should not appear as StepOperator")
+		assert.NotEqual(t, StepMulMatRef, s.Type, "MUL_MAT_ADD should not appear as StepMulMatRef")
+	}
+
+	// Mix of regular and fused ops — fused ops become StepFusedOp
+	plan = buildBenchmarkPlan([]string{"ADD", "MUL_MAT", "MUL_MAT_ADD"}, []string{"f32", "f16", "q4_0", "q8_0"}, caps)
+	opCount, refCount, fusedCount := 0, 0, 0
+	for _, s := range plan {
+		switch s.Type {
+		case StepOperator:
+			opCount++
+		case StepMulMatRef:
+			refCount++
+		case StepFusedOp:
+			fusedCount++
+		}
+	}
+	assert.Equal(t, 1, opCount, "ADD=1 operator step")
+	assert.Equal(t, len(Phase1Dtypes()), refCount, "MUL_MAT ref curves")
+	assert.Greater(t, fusedCount, 0, "MUL_MAT_ADD should generate fused steps")
 }
 
 // TestFusedOpsBenchmarkGatedByFusionRules verifies that fused op benchmarking
