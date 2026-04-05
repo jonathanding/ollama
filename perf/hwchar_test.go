@@ -3,7 +3,9 @@ package perf
 import (
 	"testing"
 
+	"github.com/ollama/ollama/ml"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHWCharResult_BalancePoint(t *testing.T) {
@@ -203,5 +205,49 @@ func TestConvergentMeasure_TrimmedCV(t *testing.T) {
 	assert.Less(t, reps, 30, "should converge after trimming removes outliers")
 }
 
-// Integration tests for benchPeakTOPS and benchPeakBandwidth require a real
-// GGML backend. They are in integration_test.go (Task 14).
+// parseDTypeUnsafe is a test helper that panics if dtype is invalid.
+func parseDTypeUnsafe(s string) ml.DType {
+	dt, ok := parseDType(s)
+	if !ok {
+		panic("invalid dtype: " + s)
+	}
+	return dt
+}
+
+func TestBenchPeakTOPS_DirectBackend(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if caps.Name == "CPU" {
+		t.Skip("no GPU backend available")
+	}
+
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 10
+	cfg.MinReps = 5
+
+	tops, err := benchPeakTOPS(backend, caps, parseDTypeUnsafe("f32"), cfg)
+	require.NoError(t, err)
+
+	t.Logf("measured peak TOPS: %.2f GFLOPS (theoretical Iris Xe: ~1690 GFLOPS)", tops/1e9)
+	assert.Greater(t, tops, 100e9,
+		"peak TOPS should be > 100 GFLOPS — if lower, likely still running on CPU")
+}
+
+func TestBenchPeakBandwidth_DirectBackend(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if caps.Name == "CPU" {
+		t.Skip("no GPU backend available")
+	}
+
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 10
+	cfg.MinReps = 5
+
+	bw, err := benchPeakBandwidth(backend, caps, cfg)
+	require.NoError(t, err)
+
+	t.Logf("measured peak BW: %.2f GB/s (theoretical DDR4-3200: 51.2 GB/s)", bw/1e9)
+	assert.Greater(t, bw, 10e9,
+		"peak bandwidth should be > 10 GB/s")
+}

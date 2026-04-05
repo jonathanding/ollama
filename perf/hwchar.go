@@ -14,13 +14,14 @@ import (
 // Returns an HWCharResult and populates the given HardwareProfile.
 func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResult, error) {
 	devices := backend.BackendDevices()
+	caps := DiscoverBackend(backend)
 
 	result := &HWCharResult{
 		PeakTOPS:     make(map[string]float64),
 		BalancePoint: make(map[string]float64),
 	}
 
-	slog.Info("hardware characterization", "devices", len(devices))
+	slog.Info("hardware characterization", "devices", len(devices), "backend", caps.Name)
 
 	// Measure peak TOPS for f16 and f32
 	for _, dtypeStr := range []string{"f16", "f32"} {
@@ -29,7 +30,7 @@ func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResul
 			continue
 		}
 		slog.Info("measuring peak TOPS", "dtype", dtypeStr)
-		tops, err := benchPeakTOPS(backend, dt, cfg)
+		tops, err := benchPeakTOPS(backend, caps, dt, cfg)
 		if err != nil {
 			slog.Warn("peak TOPS failed", "dtype", dtypeStr, "error", err)
 			continue
@@ -40,7 +41,7 @@ func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResul
 
 	// Measure peak bandwidth
 	slog.Info("measuring peak bandwidth")
-	bw, err := benchPeakBandwidth(backend, cfg)
+	bw, err := benchPeakBandwidth(backend, caps, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("peak bandwidth failed: %w", err)
 	}
@@ -59,7 +60,7 @@ func CharacterizeHardware(backend ml.Backend, cfg BenchmarkConfig) (*HWCharResul
 
 // benchPeakTOPS measures peak TOPS via large MUL_MAT (M=K=N=4096).
 // TOPS = FLOPs / latency, where FLOPs = 2 * M * K * N.
-func benchPeakTOPS(backend ml.Backend, dtype ml.DType, cfg BenchmarkConfig) (float64, error) {
+func benchPeakTOPS(backend ml.Backend, caps BackendCapabilities, dtype ml.DType, cfg BenchmarkConfig) (float64, error) {
 	const M, K, N = 4096, 4096, 4096
 	ctx := backend.NewContext()
 	defer ctx.Close()
@@ -69,16 +70,18 @@ func benchPeakTOPS(backend ml.Backend, dtype ml.DType, cfg BenchmarkConfig) (flo
 	out := a.Mulmat(ctx, b)
 	ctx.Forward(out)
 
+	backendIdx := 0
+
 	// Adaptive warmup
 	warmupStart := time.Now()
 	for i := 0; i < cfg.WarmupReps; i++ {
-		ctx.Compute(out)
+		ctx.ComputeOnBackend(backendIdx, out)
 		if i == 0 {
 			elapsed := float64(time.Since(warmupStart).Microseconds())
 			if elapsed > 5e6 {
 				break
 			} else if elapsed > 1e6 {
-				ctx.Compute(out)
+				ctx.ComputeOnBackend(backendIdx, out)
 				break
 			}
 		}
@@ -87,7 +90,7 @@ func benchPeakTOPS(backend ml.Backend, dtype ml.DType, cfg BenchmarkConfig) (flo
 	// Measure with convergence-based early stopping
 	med, _, _ := convergentMeasure(func() float64 {
 		start := time.Now()
-		ctx.Compute(out)
+		ctx.ComputeOnBackend(backendIdx, out)
 		return float64(time.Since(start).Microseconds())
 	}, cfg)
 
@@ -98,7 +101,7 @@ func benchPeakTOPS(backend ml.Backend, dtype ml.DType, cfg BenchmarkConfig) (flo
 
 // benchPeakBandwidth measures peak memory bandwidth via large CONT (copy).
 // Size: 64M elements * 4 bytes = 256MB. Bytes = 2 * 256MB (read + write).
-func benchPeakBandwidth(backend ml.Backend, cfg BenchmarkConfig) (float64, error) {
+func benchPeakBandwidth(backend ml.Backend, caps BackendCapabilities, cfg BenchmarkConfig) (float64, error) {
 	const size = 64 * 1024 * 1024 // 64M elements
 	ctx := backend.NewContext()
 	defer ctx.Close()
@@ -107,16 +110,18 @@ func benchPeakBandwidth(backend ml.Backend, cfg BenchmarkConfig) (float64, error
 	dst := src.Contiguous(ctx)
 	ctx.Forward(dst)
 
+	backendIdx := 0
+
 	// Adaptive warmup
 	warmupStart := time.Now()
 	for i := 0; i < cfg.WarmupReps; i++ {
-		ctx.Compute(dst)
+		ctx.ComputeOnBackend(backendIdx, dst)
 		if i == 0 {
 			elapsed := float64(time.Since(warmupStart).Microseconds())
 			if elapsed > 5e6 {
 				break
 			} else if elapsed > 1e6 {
-				ctx.Compute(dst)
+				ctx.ComputeOnBackend(backendIdx, dst)
 				break
 			}
 		}
@@ -125,7 +130,7 @@ func benchPeakBandwidth(backend ml.Backend, cfg BenchmarkConfig) (float64, error
 	// Measure with convergence-based early stopping
 	med, _, _ := convergentMeasure(func() float64 {
 		start := time.Now()
-		ctx.Compute(dst)
+		ctx.ComputeOnBackend(backendIdx, dst)
 		return float64(time.Since(start).Microseconds())
 	}, cfg)
 
