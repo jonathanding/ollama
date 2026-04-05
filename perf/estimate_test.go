@@ -569,8 +569,10 @@ func TestEstimatePhase_GemmaDecodeLayerNoWarnings(t *testing.T) {
 
 // --- v3 estimation tests ---
 
-func TestLookupLatencyV3_MulMatVecRouting(t *testing.T) {
-	// Profile with both MUL_MAT and MUL_MAT_VEC efficiency constants
+func TestLookupLatencyV3_MulMatRooflineFallback(t *testing.T) {
+	// Profile with roofline efficiency constants but no reference curves.
+	// All N values fall through PredictMulMatDirect (returns 0, no curves)
+	// and use PredictMulMatLatency (roofline) as fallback.
 	profile := &Profile{
 		Version: 3,
 		Hardware: HardwareProfile{
@@ -582,34 +584,35 @@ func TestLookupLatencyV3_MulMatVecRouting(t *testing.T) {
 			},
 		},
 	}
-	caps := GetBackendCapabilities("Vulkan") // HasMulMatVec=true, MulMatVecMaxN=8
+	caps := GetBackendCapabilities("Vulkan")
 
-	// N=1 should route to MUL_MAT_VEC (has lower overhead)
-	latVec, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 1}, "f32", "f16", "Vulkan", &caps)
+	// N=1 — routes through direct (no curves) → roofline fallback
+	latN1, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 1}, "f32", "f16", "Vulkan", &caps)
 	require.NoError(t, err)
-	assert.Greater(t, latVec, 0.0)
+	assert.Greater(t, latN1, 0.0)
 
-	// N=8 boundary — still routes to VEC
-	latVec8, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 8}, "f32", "f16", "Vulkan", &caps)
+	// N=8
+	latN8, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 8}, "f32", "f16", "Vulkan", &caps)
 	require.NoError(t, err)
-	assert.Greater(t, latVec8, 0.0)
+	assert.Greater(t, latN8, 0.0)
 
-	// N=9 — routes to regular MUL_MAT (exceeds MulMatVecMaxN=8)
-	latMat9, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 9}, "f32", "f16", "Vulkan", &caps)
+	// N=9
+	latN9, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 9}, "f32", "f16", "Vulkan", &caps)
 	require.NoError(t, err)
-	assert.Greater(t, latMat9, 0.0)
+	assert.Greater(t, latN9, 0.0)
 
-	// N=512 — definitely regular MUL_MAT
-	latMat512, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 512}, "f32", "f16", "Vulkan", &caps)
+	// N=512
+	latN512, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 512}, "f32", "f16", "Vulkan", &caps)
 	require.NoError(t, err)
-	assert.Greater(t, latMat512, 0.0)
+	assert.Greater(t, latN512, 0.0)
 
-	// VEC overhead (10μs) < MAT overhead (100μs), so N=1 VEC should be faster
-	assert.Less(t, latVec, latMat512, "VEC at N=1 should be faster than MAT at N=512")
+	// N=1 should be faster than N=512 (roofline: both BW and compute scale with N)
+	assert.Less(t, latN1, latN512, "N=1 should be faster than N=512")
 }
 
-func TestLookupLatencyV3_MulMatVecFallback(t *testing.T) {
-	// Profile with MUL_MAT constants but NO MUL_MAT_VEC constants
+func TestLookupLatencyV3_MulMatRooflineOnly(t *testing.T) {
+	// Profile with MUL_MAT roofline constants only (no reference curves).
+	// Direct interpolation returns 0, roofline provides the estimate.
 	profile := &Profile{
 		Version: 3,
 		Hardware: HardwareProfile{
@@ -622,10 +625,10 @@ func TestLookupLatencyV3_MulMatVecFallback(t *testing.T) {
 	}
 	caps := GetBackendCapabilities("Vulkan")
 
-	// N=1 should try VEC, fail, then fallback to regular MUL_MAT
+	// No curves → direct returns 0 → roofline fallback
 	lat, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 4096, 1}, "f32", "f16", "Vulkan", &caps)
 	require.NoError(t, err)
-	assert.Greater(t, lat, 0.0, "should fallback to regular MUL_MAT")
+	assert.Greater(t, lat, 0.0, "roofline fallback should produce positive latency")
 }
 
 func TestLookupLatencyV3_MulMatNoCapsNoVec(t *testing.T) {
@@ -647,6 +650,8 @@ func TestLookupLatencyV3_MulMatNoCapsNoVec(t *testing.T) {
 }
 
 func TestLookupLatencyV3_MulMatAdd(t *testing.T) {
+	// MUL_MAT_ADD shares the same routing path as MUL_MAT.
+	// With no reference curves, falls through to roofline.
 	profile := &Profile{
 		Version: 3,
 		Hardware: HardwareProfile{
@@ -660,7 +665,7 @@ func TestLookupLatencyV3_MulMatAdd(t *testing.T) {
 	}
 	caps := GetBackendCapabilities("Vulkan")
 
-	// MUL_MAT_ADD with N=1 should route to VEC
+	// MUL_MAT_ADD routes through same path as MUL_MAT
 	lat, err := lookupLatencyV3(profile, "MUL_MAT_ADD", []int64{4096, 4096, 1}, "f32", "f16", "Vulkan", &caps)
 	require.NoError(t, err)
 	assert.Greater(t, lat, 0.0)

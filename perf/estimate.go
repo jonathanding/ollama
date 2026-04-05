@@ -330,52 +330,30 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 	}
 }
 
-// lookupLatencyV3 extends lookupLatency with MUL_MAT_VEC routing based on backend caps.
+// lookupLatencyV3 extends lookupLatency with MUL_MAT direct interpolation and roofline fallback.
 func lookupLatencyV3(profile *Profile, op string, shape []int64,
 	computeDtype, weightDtype, backend string, caps *BackendCapabilities) (float64, error) {
 
 	switch op {
-	case "MUL_MAT":
+	case "MUL_MAT", "MUL_MAT_ADD":
 		if len(shape) < 3 {
 			return 0, fmt.Errorf("MUL_MAT requires 3 shape dims, got %d", len(shape))
 		}
 		M, K, N := shape[0], shape[1], shape[2]
 		mappedWdt := mapWeightDtype(weightDtype)
 
-		// Route to MUL_MAT_VEC when N is small enough and backend supports it
-		if caps != nil && caps.HasMulMatVec && N <= int64(caps.MulMatVecMaxN) {
-			lat := PredictMulMatVecLatency(&profile.Hardware, M, K, N, mappedWdt)
-			if lat > 0 {
-				return lat, nil
-			}
-			// Fallback to regular MUL_MAT roofline if no VEC constants
+		// Primary: direct interpolation from reference curves (Phase 2 design)
+		lat := PredictMulMatDirect(profile, M, K, N, mappedWdt)
+		if lat > 0 {
+			return lat, nil
 		}
-		lat := PredictMulMatLatency(&profile.Hardware, M, K, N, mappedWdt)
-		if lat == 0 {
-			return 0, fmt.Errorf("no efficiency constants for MUL_MAT — run daop-bench first")
+		// Fallback: roofline (for backward compatibility with v2 profiles
+		// that lack multi-(M,K) reference curves)
+		lat = PredictMulMatLatency(&profile.Hardware, M, K, N, mappedWdt)
+		if lat > 0 {
+			return lat, nil
 		}
-		return lat, nil
-
-	case "MUL_MAT_ADD":
-		// Fused MUL_MAT+ADD: same shape extraction as MUL_MAT, routes through VEC when applicable
-		if len(shape) < 3 {
-			return 0, fmt.Errorf("MUL_MAT_ADD requires 3 shape dims, got %d", len(shape))
-		}
-		M, K, N := shape[0], shape[1], shape[2]
-		mappedWdt := mapWeightDtype(weightDtype)
-		// MUL_MAT_ADD only triggers for N≤8 (vec range), so always try VEC first
-		if caps != nil && caps.HasMulMatVec && N <= int64(caps.MulMatVecMaxN) {
-			lat := PredictMulMatVecLatency(&profile.Hardware, M, K, N, mappedWdt)
-			if lat > 0 {
-				return lat, nil // ADD overhead negligible (<1μs)
-			}
-		}
-		// Fallback to regular MUL_MAT
-		lat := PredictMulMatLatency(&profile.Hardware, M, K, N, mappedWdt)
-		if lat == 0 {
-			return 0, fmt.Errorf("no efficiency constants for MUL_MAT_ADD — run daop-bench first")
-		}
-		return lat, nil
+		return 0, fmt.Errorf("no MUL_MAT calibration data for dtype %s — run daop-bench first", mappedWdt)
 
 	default:
 		// Delegate to existing lookupLatency for all other ops

@@ -560,3 +560,57 @@ func TestMeasureOpGPU_ConvergenceEarlyExit(t *testing.T) {
 	assert.Less(t, pt.Reps, 50, "should converge before max reps with lenient CV")
 	t.Logf("converged in %d reps, latency: %.1f ± %.1f us", pt.Reps, pt.LatencyUs, pt.StddevUs)
 }
+
+func TestLookupLatencyV3_MulMatAllNUsesDirect(t *testing.T) {
+	// Profile with 3×3 grid reference curves (3 points each)
+	profile := &Profile{
+		Version: 3,
+		Hardware: HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f32": 64.3e9},
+			PeakBandwidthBytesPerSec: 40.7e9,
+			EfficiencyConstants: map[string]OpEfficiency{
+				"MUL_MAT_f32": {ComputeEff: 0.93, BWEff: 0.45, OverheadUs: 500},
+			},
+		},
+		Operators: []OperatorCurve{
+			{
+				Op: "MUL_MAT", WeightDtype: "f32",
+				FixedDims:  map[string]int64{"M": 2048, "K": 2048},
+				Dimensions: []string{"N"},
+				Points: []LatencyPoint{
+					{Shape: []int64{1}, LatencyUs: 500},
+					{Shape: []int64{32}, LatencyUs: 800},
+					{Shape: []int64{512}, LatencyUs: 50000},
+				},
+			},
+			{
+				Op: "MUL_MAT", WeightDtype: "f32",
+				FixedDims:  map[string]int64{"M": 8192, "K": 2048},
+				Dimensions: []string{"N"},
+				Points: []LatencyPoint{
+					{Shape: []int64{1}, LatencyUs: 2000},
+					{Shape: []int64{32}, LatencyUs: 3000},
+					{Shape: []int64{512}, LatencyUs: 200000},
+				},
+			},
+		},
+	}
+	caps := GetBackendCapabilities("Vulkan")
+
+	// N=1 (VEC range) — should use direct interpolation, NOT roofline
+	lat1, err := lookupLatencyV3(profile, "MUL_MAT", []int64{2048, 2048, 1}, "f32", "f32", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.InDelta(t, 500.0, lat1, 50.0, "N=1 at exact grid point should be ~500μs from curve")
+
+	// N=256 (MAT range) — should ALSO use direct interpolation
+	lat256, err := lookupLatencyV3(profile, "MUL_MAT", []int64{2048, 2048, 256}, "f32", "f32", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, lat256, 800.0, "N=256 should be > N=32 latency")
+	assert.Less(t, lat256, 50000.0, "N=256 should be < N=512 latency")
+
+	// Query at (M,K) between grid points — should IDW blend
+	latBlend, err := lookupLatencyV3(profile, "MUL_MAT", []int64{4096, 2048, 1}, "f32", "f32", "Vulkan", &caps)
+	require.NoError(t, err)
+	assert.Greater(t, latBlend, 500.0, "IDW blend should be > nearest small curve")
+	assert.Less(t, latBlend, 2000.0, "IDW blend should be < nearest large curve")
+}
