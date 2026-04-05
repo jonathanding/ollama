@@ -303,7 +303,7 @@ func TestDefaultBenchmarkOps_ContainsAllRegistered(t *testing.T) {
 
 func TestDefaultBenchmarkOps_ContainsExpectedOps(t *testing.T) {
 	ops := DefaultBenchmarkOps()
-	expected := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT", "ADD", "MUL", "GELU", "ROPE", "RMS_NORM", "SOFT_MAX", "CONT", "RELU"}
+	expected := []string{"SILU", "MUL_MAT", "FLASH_ATTN_EXT", "ADD", "MUL", "GELU", "ROPE", "RMS_NORM", "SOFT_MAX", "CONT", "RELU", "RMS_NORM_MUL", "RMS_NORM_MUL_ROPE", "MUL_MAT_ADD"}
 	for _, e := range expected {
 		assert.Contains(t, ops, e, "should contain %s", e)
 	}
@@ -321,4 +321,112 @@ func TestPhase1MulMatShapePairs(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "must include (4096, 4096) pair")
+}
+
+// --- Fused op tests ---
+
+func TestFusedOpRegistryEntries(t *testing.T) {
+	fusedOps := []struct {
+		name string
+		dims []string
+	}{
+		{"RMS_NORM_MUL", []string{"N"}},
+		{"RMS_NORM_MUL_ROPE", []string{"N"}},
+		{"MUL_MAT_ADD", []string{"M", "K", "N"}},
+	}
+	for _, tt := range fusedOps {
+		t.Run(tt.name, func(t *testing.T) {
+			runner, ok := opRegistry[tt.name]
+			require.True(t, ok, "op %q must be in registry", tt.name)
+			assert.Equal(t, tt.dims, runner.Dimensions)
+			assert.NotNil(t, runner.Run, "Run must not be nil")
+			assert.NotNil(t, runner.CreateInputs, "CreateInputs must not be nil for fused ops")
+		})
+	}
+}
+
+func TestFusedOpRMSNormMulCreateInputs(t *testing.T) {
+	runner, ok := opRegistry["RMS_NORM_MUL"]
+	require.True(t, ok)
+	assert.NotNil(t, runner.CreateInputs)
+
+	// Verify the function signature expectations: gridPoint[0] = N
+	// We can't call CreateInputs without a real context, but we can verify
+	// it exists and that the op uses 1D dimensions
+	assert.Equal(t, []string{"N"}, runner.Dimensions,
+		"RMS_NORM_MUL should be a 1D op (input and scale have the same N)")
+}
+
+func TestFusedOpRMSNormMulRopeCreateInputs(t *testing.T) {
+	runner, ok := opRegistry["RMS_NORM_MUL_ROPE"]
+	require.True(t, ok)
+	assert.NotNil(t, runner.CreateInputs)
+
+	// This op needs 3 tensors: input, scale, positions
+	// It reuses ropeInputParams for shape computation, same as ROPE
+	assert.Equal(t, []string{"N"}, runner.Dimensions,
+		"RMS_NORM_MUL_ROPE should be a 1D op like ROPE")
+}
+
+func TestFusedOpMulMatAddCreateInputs(t *testing.T) {
+	runner, ok := opRegistry["MUL_MAT_ADD"]
+	require.True(t, ok)
+	assert.NotNil(t, runner.CreateInputs)
+
+	// MUL_MAT_ADD needs 3 tensors: weight, activation, bias
+	// It uses mulMatInputShapes for weight/activation, plus a bias vector of size M
+	assert.Equal(t, []string{"M", "K", "N"}, runner.Dimensions,
+		"MUL_MAT_ADD should have the same 3D dimensions as MUL_MAT")
+}
+
+func TestFusedOpMulMatAddDimensions(t *testing.T) {
+	// MUL_MAT_ADD should share the same dimension convention as MUL_MAT
+	mulMatRunner, ok := opRegistry["MUL_MAT"]
+	require.True(t, ok)
+	mulMatAddRunner, ok := opRegistry["MUL_MAT_ADD"]
+	require.True(t, ok)
+
+	assert.Equal(t, mulMatRunner.Dimensions, mulMatAddRunner.Dimensions,
+		"MUL_MAT_ADD must use the same dimension names as MUL_MAT")
+}
+
+func TestFusedOpBuildSamplingGrids(t *testing.T) {
+	t.Run("RMS_NORM_MUL_gets_single_grid", func(t *testing.T) {
+		grids := buildSamplingGrids("RMS_NORM_MUL", "f32", "")
+		require.Len(t, grids, 1, "1D fused ops should get a single grid")
+		assert.Equal(t, "RMS_NORM_MUL", grids[0].Op)
+		assert.Equal(t, "f32", grids[0].Dtype)
+		assert.Nil(t, grids[0].FixedDims, "1D ops should not have fixed dims")
+	})
+
+	t.Run("RMS_NORM_MUL_ROPE_gets_single_grid", func(t *testing.T) {
+		grids := buildSamplingGrids("RMS_NORM_MUL_ROPE", "f32", "")
+		require.Len(t, grids, 1, "1D fused ops should get a single grid")
+		assert.Equal(t, "RMS_NORM_MUL_ROPE", grids[0].Op)
+		assert.Nil(t, grids[0].FixedDims)
+	})
+
+	t.Run("MUL_MAT_ADD_gets_per_MK_grids", func(t *testing.T) {
+		grids := buildSamplingGrids("MUL_MAT_ADD", "f16", "q4_0")
+		pairs := Phase1MulMatFixedDims()
+		require.Len(t, grids, len(pairs),
+			"MUL_MAT_ADD should get one grid per (M,K) pair, same as MUL_MAT")
+
+		for i, g := range grids {
+			assert.Equal(t, "MUL_MAT_ADD", g.Op)
+			assert.Equal(t, "q4_0", g.WeightDtype)
+			assert.NotNil(t, g.FixedDims)
+			assert.Contains(t, g.FixedDims, "M")
+			assert.Contains(t, g.FixedDims, "K")
+			assert.Equal(t, pairs[i][0], g.FixedDims["M"])
+			assert.Equal(t, pairs[i][1], g.FixedDims["K"])
+		}
+	})
+
+	t.Run("MUL_MAT_ADD_grid_count_matches_MUL_MAT", func(t *testing.T) {
+		mulMatGrids := buildSamplingGrids("MUL_MAT", "f16", "q4_0")
+		mulMatAddGrids := buildSamplingGrids("MUL_MAT_ADD", "f16", "q4_0")
+		assert.Equal(t, len(mulMatGrids), len(mulMatAddGrids),
+			"MUL_MAT_ADD should have the same number of grids as MUL_MAT")
+	})
 }

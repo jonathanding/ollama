@@ -321,10 +321,12 @@ func TestCountGrids_AllOps(t *testing.T) {
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
 	count := countGrids(ops, dtypes)
 	// MUL_MAT: 4 (one per weight dtype)
+	// MUL_MAT_ADD: 4 (one per weight dtype, same as MUL_MAT)
 	// FLASH_ATTN_EXT: 1 (f16 only)
 	// All other ops: 1 each (f32 only, 1D)
-	numOtherOps := len(ops) - 2 // minus MUL_MAT and FLASH_ATTN_EXT
-	expected := numOtherOps + 4 + 1
+	numMatMulOps := 2 // MUL_MAT and MUL_MAT_ADD
+	numOtherOps := len(ops) - numMatMulOps - 1 // minus MUL_MAT, MUL_MAT_ADD, FLASH_ATTN_EXT
+	expected := numOtherOps + numMatMulOps*len(Phase1Dtypes()) + 1
 	assert.Equal(t, expected, count)
 }
 

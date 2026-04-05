@@ -19,10 +19,10 @@ type SamplingGridWithFixed struct {
 }
 
 // buildSamplingGrids creates the grid specifications for one operator + dtype combo.
-// For 1D ops: one grid. For MUL_MAT: one grid per (M, K) pair. For FLASH_ATTN: one grid.
+// For 1D ops: one grid. For MUL_MAT/MUL_MAT_ADD: one grid per (M, K) pair. For FLASH_ATTN: one grid.
 func buildSamplingGrids(op, computeDtype, weightDtype string) []SamplingGridWithFixed {
 	switch op {
-	case "MUL_MAT":
+	case "MUL_MAT", "MUL_MAT_ADD":
 		pairs := Phase1MulMatFixedDims()
 		grids := make([]SamplingGridWithFixed, len(pairs))
 		for i, pair := range pairs {
@@ -432,7 +432,7 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 func countGrids(ops []string, dtypes []string) int {
 	total := 0
 	for _, op := range ops {
-		if op == "MUL_MAT" {
+		if op == "MUL_MAT" || op == "MUL_MAT_ADD" {
 			total += len(Phase1Dtypes()) // one reference curve per weight dtype
 			continue
 		}
@@ -558,7 +558,7 @@ func elemBytesFromDtype(dtype string) float64 {
 // sweepDimensions returns the sweep (non-fixed) dimensions for an op.
 func sweepDimensions(op string) []string {
 	switch op {
-	case "MUL_MAT":
+	case "MUL_MAT", "MUL_MAT_ADD":
 		return []string{"N"}
 	case "FLASH_ATTN_EXT":
 		return []string{"seq_q", "seq_kv"}

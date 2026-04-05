@@ -150,6 +150,62 @@ var opRegistry = map[string]OpRunnerML{
 			return nil
 		},
 	},
+
+	// Fused ops: these construct small graphs containing fusable patterns.
+	// When Vulkan processes them with GPU timestamps, the backend fuses them
+	// and returns fused kernel timing.
+
+	"RMS_NORM_MUL": {
+		Dimensions: []string{"N"},
+		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+			N := int(gridPoint[0])
+			input := randomTensor(ctx, ml.DTypeF32, N)
+			scale := randomTensor(ctx, ml.DTypeF32, N)
+			return []ml.Tensor{input, scale}
+		},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			normed := in[0].RMSNorm(ctx, nil, 1e-5)
+			return normed.Mul(ctx, in[1])
+		},
+	},
+	"RMS_NORM_MUL_ROPE": {
+		Dimensions: []string{"N"},
+		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+			shape, seqLen := ropeInputParams(gridPoint[0])
+			input := randomTensor(ctx, ml.DTypeF32, shape...)
+			scale := randomTensor(ctx, ml.DTypeF32, shape...)
+			pos := ropePositions(seqLen)
+			posTensor := ctx.Input().FromInts(pos, int(seqLen))
+			return []ml.Tensor{input, scale, posTensor}
+		},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			normed := in[0].RMSNorm(ctx, nil, 1e-5)
+			scaled := normed.Mul(ctx, in[1])
+			type roper interface {
+				RoPE(ctx ml.Context, positions ml.Tensor, dim int, base, scale float32, options ...func(*rope.Options)) ml.Tensor
+			}
+			if t, ok := scaled.(roper); ok {
+				return t.RoPE(ctx, in[2], 128, 10000.0, 1.0)
+			}
+			return nil
+		},
+	},
+	"MUL_MAT_ADD": {
+		Dimensions: []string{"M", "K", "N"},
+		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+			dt, _ := parseDType(dtypeStr)
+			wShape, aShape := mulMatInputShapes(gridPoint)
+			weight := randomTensor(ctx, dt, wShape...)
+			activation := randomTensor(ctx, ml.DTypeF32, aShape...)
+			M := int(gridPoint[0])
+			bias := randomTensor(ctx, ml.DTypeF32, M)
+			return []ml.Tensor{weight, activation, bias}
+		},
+		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
+			mm := in[0].Mulmat(ctx, in[1])
+			return mm.Add(ctx, in[2])
+		},
+	},
 }
 
 // ropeInputParams computes the 4D input tensor shape and seqLen for ROPE benchmarking.
@@ -193,7 +249,7 @@ func expandShapes(op string, gridPoint []int64) [][]int64 {
 		}
 	case "ADD", "MUL":
 		return [][]int64{gridPoint, gridPoint}
-	case "MUL_MAT":
+	case "MUL_MAT", "MUL_MAT_ADD":
 		// gridPoint = [M, K, N]
 		// GGML mul_mat computes weight^T * activation, so weight ne[0] must equal activation ne[0].
 		// weight: {K, M} (ne[0]=K, ne[1]=M), activation: {K, N} (ne[0]=K, ne[1]=N)
