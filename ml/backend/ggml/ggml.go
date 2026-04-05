@@ -5,7 +5,6 @@ package ggml
 // #cgo CPPFLAGS: -I${SRCDIR}/ggml/include
 // #include <stdlib.h>
 // #include <stdint.h>
-// #include <stdio.h>
 // #include "ggml.h"
 // #include "ggml-cpu.h"
 // #include "ggml-backend.h"
@@ -30,14 +29,10 @@ package ggml
 // static void resolve_vk_timestamps(ggml_backend_dev_t dev) {
 //     if (_vk_is_vk) return; // already resolved
 //     ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
-//     if (!reg) { fprintf(stderr, "DEBUG: resolve_vk_timestamps: reg is NULL\n"); return; }
-//     const char * reg_name = ggml_backend_reg_name(reg);
-//     fprintf(stderr, "DEBUG: resolve_vk_timestamps: reg=%p reg_name=%s\n", (void*)reg, reg_name ? reg_name : "(null)");
+//     if (!reg) return;
 //     _vk_is_vk = (vk_is_vk_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_backend_is_vk");
 //     _vk_enable_timestamps = (vk_enable_timestamps_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_vk_enable_timestamps");
 //     _vk_get_op_timings = (vk_get_op_timings_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_vk_get_op_timings");
-//     fprintf(stderr, "DEBUG: resolve_vk_timestamps: is_vk=%p enable=%p get_timings=%p\n",
-//         (void*)_vk_is_vk, (void*)_vk_enable_timestamps, (void*)_vk_get_op_timings);
 // }
 //
 // static bool call_vk_is_vk(ggml_backend_t b) {
@@ -883,10 +878,8 @@ func (b *Backend) BackendDevices() []ml.DeviceInfo {
 }
 
 func (b *Backend) EnableGPUTimestamps(enable bool) {
-	slog.Info("DEBUG EnableGPUTimestamps", "enable", enable, "num_backends", len(b.schedBackends))
-	for i, be := range b.schedBackends {
+	for _, be := range b.schedBackends {
 		isVk := C.call_vk_is_vk(be)
-		slog.Info("DEBUG EnableGPUTimestamps backend", "idx", i, "is_vk", isVk)
 		if isVk {
 			C.call_vk_enable_timestamps(be, C.bool(enable))
 		}
@@ -894,11 +887,10 @@ func (b *Backend) EnableGPUTimestamps(enable bool) {
 }
 
 func (b *Backend) GetOpTimings() []ml.OpTiming {
-	for i, be := range b.schedBackends {
+	for _, be := range b.schedBackends {
 		if C.call_vk_is_vk(be) {
 			var nTimings C.int
 			timings := C.call_vk_get_op_timings(be, &nTimings)
-			slog.Info("DEBUG GetOpTimings", "backend_idx", i, "nTimings", int(nTimings), "timings_nil", timings == nil)
 			if timings == nil || nTimings == 0 {
 				return nil
 			}

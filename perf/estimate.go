@@ -381,15 +381,6 @@ func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) P
 			*warnings = append(*warnings, err.Error())
 			continue
 		}
-		// DEBUG: print per-op details for high-latency suspects
-		if op == "MUL_MAT" && wdt == "f16" {
-			slog.Info("DEBUG f16 MUL_MAT", "name", node.Name, "shape", shape,
-				"inputShapes", node.InputShapes, "latency_us", fmt.Sprintf("%.1f", lat), "backend", node.Backend)
-		}
-		if (op == "MUL" || op == "RMS_NORM" || op == "ADD" || op == "ROPE") && lat > 500 {
-			slog.Info("DEBUG 1D op", "op", op, "name", node.Name, "shape", shape,
-				"dtype", cdt, "latency_us", fmt.Sprintf("%.1f", lat), "backend", node.Backend)
-		}
 		totalUs += lat
 
 		key := OpKey{op, node.Backend, cdt, wdt}

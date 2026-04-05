@@ -2091,9 +2091,13 @@ func daopBenchHandler(cmd *cobra.Command, args []string) error {
 	defer backend.Close()
 
 	verbose, _ := cmd.Flags().GetBool("detail")
+	opsFlag, _ := cmd.Flags().GetString("ops")
+	dtypesFlag, _ := cmd.Flags().GetString("dtypes")
 	opts := perf.BenchmarkCLIOptions{
-		Verbose: verbose,
-		Viewer:  true, // always generate HTML viewer
+		Verbose:    verbose,
+		Viewer:     true, // always generate HTML viewer
+		Ops:        opsFlag,
+		Dtypes:     dtypesFlag,
 	}
 	return perf.RunBenchmarkCLI(backend, opts)
 }
@@ -2367,6 +2371,9 @@ func NewCLI() *cobra.Command {
 	daopBenchCmd.Flags().Bool("update", false, "Graph-driven discovery: scan model for uncalibrated ops")
 	daopBenchCmd.Flags().String("model", "", "Model to scan for --update")
 	daopBenchCmd.Flags().Bool("detail", false, "Show detailed operator eta values")
+	daopBenchCmd.Flags().String("ops", "", "Comma-separated ops to benchmark (e.g. ADD,SILU)")
+	daopBenchCmd.Flags().String("dtypes", "", "Comma-separated dtypes (e.g. f32,q4_0)")
+
 
 	daopEstimateCmd := &cobra.Command{
 		Use:   "daop-estimate MODEL [flags]",

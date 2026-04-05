@@ -108,11 +108,11 @@ func RunViewerCLI(opts ViewerCLIOptions) error {
 
 // BenchmarkCLIOptions controls `ollama daop-bench`.
 type BenchmarkCLIOptions struct {
-	Output  string // --output: profile output path
-	Ops     string // --ops: comma-separated op list
-	Dtypes  string // --dtypes: comma-separated dtype list
-	Viewer  bool   // --viewer: generate HTML viewer after benchmarking
-	Verbose bool   // --verbose: show per-point results
+	Output     string // --output: profile output path
+	Ops        string // --ops: comma-separated op list
+	Dtypes     string // --dtypes: comma-separated dtype list
+	Viewer     bool   // --viewer: generate HTML viewer after benchmarking
+	Verbose    bool   // --verbose: show per-point results
 }
 
 // EstimateCLIOptions controls `ollama daop-estimate`.
