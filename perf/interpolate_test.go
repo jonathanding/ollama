@@ -292,7 +292,10 @@ func TestInterpolateMulMat_SingleCurve(t *testing.T) {
 		func(m, k, n int64) float64 { return float64(m*k*n) / 1e6 },
 	)
 	result := InterpolateMulMat(curves, 256, 8192, 16)
-	expected := Interpolate1DByDim(curves[0].Points, 0, 16)
+	baseLat := Interpolate1DByDim(curves[0].Points, 0, 16)
+	// Single curve with out-of-grid query: should apply M*K scaling
+	// Scale = (256*8192)/(128*4096) = 4.0
+	expected := baseLat * float64(256*8192) / float64(128*4096)
 	assert.InDelta(t, expected, result, 1e-9)
 }
 
@@ -493,6 +496,48 @@ func TestInterpolateFlashAttn_EmptyBothRegimes(t *testing.T) {
 	}
 	result := InterpolateFlashAttn(curve, 1, 200)
 	assert.Equal(t, 0.0, result) // no matching regime
+}
+
+func TestInterpolateMulMat_Extrapolation(t *testing.T) {
+	// Grid with max M=8192. Query at M=16384 (2x outside grid).
+	curves := []OperatorCurve{
+		{
+			Op: "MUL_MAT", WeightDtype: "f32",
+			FixedDims: map[string]int64{"M": 8192, "K": 2048},
+			Points: []LatencyPoint{
+				{Shape: []int64{1}, LatencyUs: 1000},
+				{Shape: []int64{32}, LatencyUs: 5000},
+				{Shape: []int64{512}, LatencyUs: 80000},
+			},
+		},
+		{
+			Op: "MUL_MAT", WeightDtype: "f32",
+			FixedDims: map[string]int64{"M": 2048, "K": 2048},
+			Points: []LatencyPoint{
+				{Shape: []int64{1}, LatencyUs: 250},
+				{Shape: []int64{32}, LatencyUs: 1250},
+				{Shape: []int64{512}, LatencyUs: 20000},
+			},
+		},
+	}
+
+	// At N=1 (BW-bound), latency ∝ M*K (weight size).
+	// M=16384, K=2048: nearest is (8192, 2048) with lat=1000μs.
+	// Scale factor = (16384*2048)/(8192*2048) = 2.0
+	// Expected: ~2000μs
+	lat := InterpolateMulMat(curves, 16384, 2048, 1)
+	assert.InDelta(t, 2000, lat, 500, "BW-bound extrapolation should scale ~2x for 2x M")
+
+	// At N=512 (compute-bound), latency ∝ M*K*N (FLOPs).
+	// Same scale factor for fixed N: (16384*2048)/(8192*2048) = 2.0
+	// Expected: ~160000μs
+	lat = InterpolateMulMat(curves, 16384, 2048, 512)
+	assert.InDelta(t, 160000, lat, 40000, "compute-bound extrapolation should scale ~2x for 2x M")
+
+	// Inside grid range should still use IDW (no scaling)
+	latInside := InterpolateMulMat(curves, 4096, 2048, 1)
+	assert.Greater(t, latInside, 250.0, "inside grid should be > smallest curve")
+	assert.Less(t, latInside, 1000.0, "inside grid should be < largest curve")
 }
 
 func TestInterpolateFlashAttn_BlendMonotonicity(t *testing.T) {

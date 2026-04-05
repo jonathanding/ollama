@@ -76,7 +76,7 @@ func TestBuildBenchmarkPlan_MulMatGeneratesRefCurves(t *testing.T) {
 			refCount++
 		}
 	}
-	assert.Equal(t, len(Phase1Dtypes()), refCount)
+	assert.Equal(t, len(Phase1Dtypes())*len(Phase1MulMatFixedDims()), refCount)
 }
 
 func TestBuildBenchmarkPlan_1DOpsUseF32Only(t *testing.T) {

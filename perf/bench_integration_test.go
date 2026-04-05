@@ -154,7 +154,7 @@ func TestPlanFusedOpsExcludedFromMainSteps(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, opCount, "ADD=1 operator step")
-	assert.Equal(t, len(Phase1Dtypes()), refCount, "MUL_MAT ref curves")
+	assert.Equal(t, len(Phase1Dtypes())*len(Phase1MulMatFixedDims()), refCount, "MUL_MAT ref curves")
 	assert.Greater(t, fusedCount, 0, "MUL_MAT_ADD should generate fused steps")
 }
 

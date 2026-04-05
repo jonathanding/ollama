@@ -160,8 +160,7 @@ func extrapolateRightByDim(points []LatencyPoint, dimIdx int, logQ float64) floa
 // InterpolateMulMat interpolates mul_mat latency using inverse distance weighting in (M,K) space.
 // Each curve has fixed M and K values, varying N.
 // Returns interpolated latency at (queryM, queryK, queryN).
-// NOTE: As of Phase 1A, lookupLatency uses roofline prediction (PredictMulMatLatency) instead.
-// This function is retained for potential use in spot-check validation (Phase 2).
+// For queries outside the grid (distance > ln(2)), uses physics-informed scaling fallback.
 func InterpolateMulMat(curves []OperatorCurve, queryM, queryK, queryN int64) float64 {
 	if len(curves) == 0 {
 		return 0
@@ -182,23 +181,45 @@ func InterpolateMulMat(curves []OperatorCurve, queryM, queryK, queryN int64) flo
 		candidates = append(candidates, candidate{&curves[i], dist})
 	}
 
-	// Sort by distance
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].logDist < candidates[j].logDist
 	})
 
 	// Exact match or single curve
-	// Points store 1D shapes [N] since M,K are fixed per curve
 	if candidates[0].logDist == 0 || len(candidates) == 1 {
-		return Interpolate1DByDim(candidates[0].curve.Points, 0, queryN)
+		lat := Interpolate1DByDim(candidates[0].curve.Points, 0, queryN)
+		if candidates[0].logDist == 0 {
+			return lat
+		}
+		// Single curve, may need scaling
+		return scaleMulMatLatency(lat, candidates[0].curve, queryM, queryK)
 	}
 
-	// Inverse distance weighting between two nearest curves
+	// Check if query is outside the grid convex hull.
+	// Heuristic: if nearest distance > ln(2) (~0.69) in combined log-(M,K) space,
+	// the query is too far from the nearest grid point — use scaling.
+	const extrapolationThreshold = 0.69 // ln(2)
+	if candidates[0].logDist > extrapolationThreshold {
+		lat := Interpolate1DByDim(candidates[0].curve.Points, 0, queryN)
+		return scaleMulMatLatency(lat, candidates[0].curve, queryM, queryK)
+	}
+
+	// Inside grid: IDW blend between two nearest curves
 	lat1 := Interpolate1DByDim(candidates[0].curve.Points, 0, queryN)
 	lat2 := Interpolate1DByDim(candidates[1].curve.Points, 0, queryN)
 	w1 := 1.0 / candidates[0].logDist
 	w2 := 1.0 / candidates[1].logDist
 	return (lat1*w1 + lat2*w2) / (w1 + w2)
+}
+
+// scaleMulMatLatency applies physics-informed scaling when extrapolating
+// beyond the measured (M,K) grid. At any N, MUL_MAT latency scales
+// proportionally to M*K (weight size dominates both BW and compute terms).
+func scaleMulMatLatency(nearestLat float64, nearest *OperatorCurve, queryM, queryK int64) float64 {
+	refM := nearest.FixedDims["M"]
+	refK := nearest.FixedDims["K"]
+	scaleFactor := float64(queryM*queryK) / float64(refM*refK)
+	return nearestLat * scaleFactor
 }
 
 // InterpolateFlashAttn interpolates flash_attn latency between decode and prefill regimes.

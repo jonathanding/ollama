@@ -83,15 +83,17 @@ func buildBenchmarkPlan(ops []string, dtypes []string, caps BackendCapabilities,
 			continue
 		}
 
-		// MUL_MAT: generate reference curves per weight dtype
+		// MUL_MAT: generate reference curves per weight dtype × (M,K) grid
 		if op == "MUL_MAT" {
 			for _, wdt := range Phase1Dtypes() {
-				plan = append(plan, BenchmarkStep{
-					Type:        StepMulMatRef,
-					Op:          "MUL_MAT",
-					WeightDtype: wdt,
-					FixedDims:   map[string]int64{"M": 4096, "K": 4096},
-				})
+				for _, dims := range Phase1MulMatFixedDims() {
+					plan = append(plan, BenchmarkStep{
+						Type:        StepMulMatRef,
+						Op:          "MUL_MAT",
+						WeightDtype: wdt,
+						FixedDims:   map[string]int64{"M": dims[0], "K": dims[1]},
+					})
+				}
 			}
 			continue
 		}
