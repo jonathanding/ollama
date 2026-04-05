@@ -269,10 +269,56 @@ func measureOpForBackend(backend ml.Backend, caps BackendCapabilities, op string
 	return measureOp(backend, op, gridPoint, computeDtype, cfg)
 }
 
-// RunBenchmark executes the full v2 calibration pipeline:
-// 1. Hardware characterization (peak TOPS, BW)
+// benchOrchestrationOverhead measures CPU orchestration overhead for different graph sizes.
+// Builds N chained trivial ops (16-element ADD), GPU compute ≈ 0, wall-clock ≈ CPU overhead.
+// Used by estimate to add CPU-side cost to GPU op time sum.
+func benchOrchestrationOverhead(backend ml.Backend, cfg BenchmarkConfig) []LatencyPoint {
+	graphSizes := []int{50, 100, 200, 300, 500}
+	var points []LatencyPoint
+
+	for _, n := range graphSizes {
+		ctx := backend.NewContext()
+
+		a := randomTensor(ctx, ml.DTypeF32, 16)
+		b := randomTensor(ctx, ml.DTypeF32, 16)
+		last := a.Add(ctx, b)
+		for i := 1; i < n; i++ {
+			last = last.Add(ctx, b) // Chain: each op depends on the previous output
+		}
+		ctx.Forward(last)
+
+		// Warmup
+		for range 3 {
+			ctx.Compute(last)
+		}
+
+		// Measure wall-clock (GPU compute ≈ 0 for 16-element ADD)
+		med, sd, reps := convergentMeasure(func() float64 {
+			start := time.Now()
+			ctx.Compute(last)
+			return float64(time.Since(start).Microseconds())
+		}, cfg)
+
+		points = append(points, LatencyPoint{
+			Shape:     []int64{int64(n)},
+			LatencyUs: med,
+			StddevUs:  sd,
+			Reps:      reps,
+		})
+
+		ctx.Close()
+		slog.Info("orchestration overhead", "nodes", n, "latency_us", fmt.Sprintf("%.0f", med))
+	}
+
+	return points
+}
+
+// RunBenchmark executes the full v3 calibration pipeline:
+// 1. Hardware characterization (peak TOPS, BW) + backend discovery
 // 2. MUL_MAT: one reference curve + extract efficiency constants (roofline extrapolation)
 // 3. Other ops: adaptive sampling → OperatorCurves
+// 4. Fused ops: benchmark fused kernels when backend supports fusion
+// 5. Orchestration overhead: measure CPU dispatch cost for GPU backends
 // Returns a complete Profile ready for estimation.
 func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg BenchmarkConfig) (*Profile, error) {
 	benchStart := time.Now()
@@ -286,10 +332,18 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 	hwProfile := HWCharResultToHardwareProfile(hwResult, backend)
 	slog.Info("hardware characterization complete", "duration", time.Since(hwStart).Round(time.Second))
 
+	caps := DiscoverBackend(backend)
+	slog.Info("backend capabilities", "name", caps.Name,
+		"gpu_timestamp", caps.HasGPUTimestamp, "fusion_rules", len(caps.FusionRules),
+		"mul_mat_vec", caps.HasMulMatVec)
+
 	profile := &Profile{
-		Version:   2,
+		Version:   3,
 		Timestamp: time.Now(),
 		Hardware:  hwProfile,
+		BackendCaps: map[string]BackendCapabilitiesJSON{
+			caps.Name: caps.ToJSON(),
+		},
 	}
 
 	// Count grids: MUL_MAT = 1 reference curve, others = normal counting
@@ -310,7 +364,7 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 					"M", 4096, "K", 4096, "weight_dtype", wdt, "elapsed", elapsed)
 
 				gridStart := time.Now()
-				refPoints := benchmarkMulMat(backend, wdt, map[string]int64{"M": 4096, "K": 4096}, cfg)
+				refPoints := benchmarkMulMat(backend, caps, wdt, map[string]int64{"M": 4096, "K": 4096}, cfg)
 
 				if len(refPoints) == 0 {
 					slog.Warn("MUL_MAT reference curve produced no points", "weight_dtype", wdt)
@@ -392,9 +446,9 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 
 				switch op {
 				case "FLASH_ATTN_EXT":
-					curve.Points = benchmarkFlashAttn(backend, dtype, grid.FixedDims, cfg)
+					curve.Points = benchmarkFlashAttn(backend, caps, dtype, grid.FixedDims, cfg)
 				default:
-					curve.Points = benchmarkElementwise(backend, op, dtype, cfg)
+					curve.Points = benchmarkElementwise(backend, caps, op, dtype, cfg)
 				}
 
 				gridDuration := time.Since(gridStart).Round(time.Second)
@@ -418,6 +472,71 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 					slog.Warn("no points collected", "op", op, "dtype", dtype, "fixed", grid.FixedDims)
 				}
 			}
+		}
+	}
+
+	// Step 3: Benchmark fused ops (if backend supports fusion)
+	if len(caps.FusionRules) > 0 {
+		fusedOps := []string{"RMS_NORM_MUL", "RMS_NORM_MUL_ROPE", "MUL_MAT_ADD"}
+		for _, fop := range fusedOps {
+			if _, ok := LookupRegistry(fop); !ok {
+				continue
+			}
+			slog.Info("benchmarking fused op", "op", fop)
+
+			switch fop {
+			case "MUL_MAT_ADD":
+				for _, wdt := range Phase1Dtypes() {
+					points := benchmarkMulMat(backend, caps, wdt,
+						map[string]int64{"M": 4096, "K": 4096}, cfg)
+					var vecPoints []LatencyPoint
+					for _, p := range points {
+						if len(p.Shape) > 0 && p.Shape[0] <= 8 {
+							vecPoints = append(vecPoints, p)
+						}
+					}
+					if len(vecPoints) > 0 {
+						profile.Operators = append(profile.Operators, OperatorCurve{
+							Op:           fop,
+							Backend:      caps.Name,
+							ComputeDtype: "f32",
+							WeightDtype:  wdt,
+							Dimensions:   []string{"N"},
+							FixedDims:    map[string]int64{"M": 4096, "K": 4096},
+							Points:       vecPoints,
+						})
+					}
+				}
+			default:
+				measure := func(shape []int64) LatencyPoint {
+					return measureOpForBackend(backend, caps, fop, shape, "f32", cfg)
+				}
+				points := AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
+				if len(points) > 0 {
+					profile.Operators = append(profile.Operators, OperatorCurve{
+						Op:           fop,
+						Backend:      caps.Name,
+						ComputeDtype: "f32",
+						Dimensions:   []string{"N"},
+						Points:       points,
+					})
+				}
+			}
+		}
+	}
+
+	// Step 4: Benchmark orchestration overhead (GPU backends only)
+	if caps.HasGPUTimestamp {
+		slog.Info("benchmarking orchestration overhead")
+		ohPoints := benchOrchestrationOverhead(backend, cfg)
+		if len(ohPoints) > 0 {
+			profile.Operators = append(profile.Operators, OperatorCurve{
+				Op:           "ORCHESTRATION_OVERHEAD",
+				Backend:      caps.Name,
+				ComputeDtype: "f32",
+				Dimensions:   []string{"num_nodes"},
+				Points:       ohPoints,
+			})
 		}
 	}
 
@@ -568,9 +687,9 @@ func sweepDimensions(op string) []string {
 }
 
 // benchmarkElementwise uses AdaptiveSample1D for 1D ops.
-func benchmarkElementwise(backend ml.Backend, op, dtype string, cfg BenchmarkConfig) []LatencyPoint {
+func benchmarkElementwise(backend ml.Backend, caps BackendCapabilities, op, dtype string, cfg BenchmarkConfig) []LatencyPoint {
 	measure := func(shape []int64) LatencyPoint {
-		return measureOp(backend, op, shape, dtype, cfg)
+		return measureOpForBackend(backend, caps, op, shape, dtype, cfg)
 	}
 	return AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
 }
@@ -578,12 +697,12 @@ func benchmarkElementwise(backend ml.Backend, op, dtype string, cfg BenchmarkCon
 // benchmarkMulMat uses AdaptiveSample1D over N with fixed (M, K).
 // IMPORTANT: AdaptiveSample1D works with 1D shapes (Shape[0] is the sweep dimension).
 // We keep shapes 1D during sampling, matching benchmarkFlashAttn's pattern.
-func benchmarkMulMat(backend ml.Backend, weightDtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
+func benchmarkMulMat(backend ml.Backend, caps BackendCapabilities, weightDtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
 	M := fixedDims["M"]
 	K := fixedDims["K"]
 	measure := func(shape []int64) LatencyPoint {
 		N := shape[0]
-		pt := measureOp(backend, "MUL_MAT", []int64{M, K, N}, weightDtype, cfg)
+		pt := measureOpForBackend(backend, caps, "MUL_MAT", []int64{M, K, N}, weightDtype, cfg)
 		pt.Shape = []int64{N} // 1D for AdaptiveSample1D
 		return pt
 	}
@@ -595,13 +714,13 @@ func benchmarkMulMat(backend ml.Backend, weightDtype string, fixedDims map[strin
 // The measure callbacks must NOT override pt.Shape to 2D during sampling, because
 // AdaptiveSample1D uses Shape[0] for sorting and interpolation error analysis.
 // We keep shapes 1D during sampling, then convert to 2D after sampling completes.
-func benchmarkFlashAttn(backend ml.Backend, dtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
+func benchmarkFlashAttn(backend ml.Backend, caps BackendCapabilities, dtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
 	var points []LatencyPoint
 
 	// Decode: seq_q=1, sweep seq_kv (1D: shape[0] = seq_kv)
 	decodeMeasure := func(shape []int64) LatencyPoint {
 		seqKV := shape[0]
-		pt := measureOp(backend, "FLASH_ATTN_EXT", []int64{1, seqKV}, dtype, cfg)
+		pt := measureOpForBackend(backend, caps, "FLASH_ATTN_EXT", []int64{1, seqKV}, dtype, cfg)
 		// Keep shape 1D for AdaptiveSample1D's internal sorting/interpolation
 		pt.Shape = []int64{seqKV}
 		return pt
@@ -617,7 +736,7 @@ func benchmarkFlashAttn(backend ml.Backend, dtype string, fixedDims map[string]i
 	// Prefill: seq_q=seq_kv, sweep both (1D: shape[0] = seq_len)
 	prefillMeasure := func(shape []int64) LatencyPoint {
 		seqLen := shape[0]
-		pt := measureOp(backend, "FLASH_ATTN_EXT", []int64{seqLen, seqLen}, dtype, cfg)
+		pt := measureOpForBackend(backend, caps, "FLASH_ATTN_EXT", []int64{seqLen, seqLen}, dtype, cfg)
 		// Keep shape 1D for AdaptiveSample1D
 		pt.Shape = []int64{seqLen}
 		return pt
