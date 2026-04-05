@@ -852,71 +852,96 @@ func InterpolateFlashAttn(curve *OperatorCurve, querySeqQ, querySeqKV int64) flo
 
 ### 8.1 Implementation
 
-Uses `AllocMemory: false` to extract graph structure without loading model weights (MB not GB). See [`docs/daop/design.md` Section 8](../../daop/design.md) for rationale and code evidence.
+Uses `AllocMemory: false` to extract graph structure without loading model weights (MB not GB). See [`docs/internals/graph-without-weights.md`](../../internals/graph-without-weights.md) for rationale and code evidence.
+
+#### Backend 分配问题
+
+`GraphNode.Backend` 字段需要正确反映每个算子在哪个 backend（vulkan/cuda/cpu）上执行，以便 estimate 时匹配 profile 中正确的 calibration curve。
+
+**问题**: 原来使用 `ctx.Forward(t).Reserve()` 捕获 graph nodes，但 `ggml_backend_sched_reserve` 内部的调用链是：
+```
+split_graph (分配 backend + graph_optimize) → gallocr_reserve → gallocr_alloc → reset()
+```
+`reset()` 会清空 `hash_set` 和 `hv_tensor_backend_ids`，导致 `captureGraphNodes()` 在 `reserve` 返回后调用时，`ggml_backend_sched_get_tensor_backend()` 对所有节点返回 nil → "unknown"。
+
+**不需要 `AllocMemory: true`**: 权重 buffer 在 `ggml_backend_alloc_ctx_tensors_from_buft` 中独立分配（`ml/backend/ggml/ggml.go:400`），不受 `AllocMemory` 参数控制。`split_graph` 通过 `src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS` 判断权重 tensor 属于哪个 backend（`ggml-backend.cpp:862`），只要权重 buffer 存在就能正确分配。
+
+**解决方案**: 在 `ml.Context` 接口上添加 `PlanGraph()` 方法，专为 estimate 路径设计。只调用 `split_graph`（包含 backend 分配 + graph_optimize）+ `captureGraphNodes` + `reset`，不做内存预分配。全部使用 ggml 公开 API，不修改 C 代码：
+- `ggml_backend_sched_split_graph` — 拆分图 + 分配 backend + graph_optimize
+- `ggml_backend_sched_get_tensor_backend` — 查询节点 backend（在 reset 前有效）
+- `ggml_backend_sched_reset` — 清空状态
 
 ```go
-func buildModelGraphNodes(modelPath string) (prefill, decode []ml.GraphNode, err error) {
-    m, err := model.New(modelPath, ml.BackendParams{AllocMemory: false})
-    if err != nil {
-        return nil, nil, fmt.Errorf("load model: %w", err)
+// ml.Context interface addition
+PlanGraph()  // split_graph + captureGraphNodes + reset (no memory allocation)
+
+// ml/backend/ggml implementation
+func (c *Context) PlanGraph() {
+    if c.batchSize > 0 {
+        C.ggml_backend_sched_set_batch_size(c.b.sched, C.int(c.batchSize))
     }
-    defer m.Backend().Close()
-
-    // Capture graph for a given batch size.
-    // Pattern follows runner/ollamarunner/runner.go:reserveWorstCaseGraph().
-    captureGraph := func(batchSize int) ([]ml.GraphNode, error) {
-        ctx := m.Backend().NewContext()
-        defer ctx.Close()
-
-        // Construct dummy input batch
-        batchInputs := make([]int32, batchSize)
-        positions := make([]int32, batchSize)
-        sequences := make([]int, batchSize)
-        for i := 0; i < batchSize; i++ {
-            positions[i] = int32(i)
-        }
-        batch := input.Batch{
-            Inputs:    ctx.Input().FromInts(batchInputs, batchSize),
-            Outputs:   ctx.Input().Empty(ml.DTypeI32, 1),
-            Positions: positions,
-            Sequences: sequences,
-        }
-
-        // Initialize cache for graph capture (reserve=true)
-        if cache := m.Config().Cache; cache != nil {
-            if err := cache.StartForward(ctx, batch, true); err != nil {
-                return nil, fmt.Errorf("cache start: %w", err)
-            }
-        }
-
-        // Build computation graph via Forward (no actual computation)
-        t, err := m.Forward(ctx, batch)
-        if err != nil {
-            return nil, fmt.Errorf("forward: %w", err)
-        }
-
-        // Capture graph structure
-        ctx.SetBatchSize(batchSize)
-        ctx.Forward(t).Reserve()
-
-        return ctx.GraphNodes(), nil
-    }
-
-    // Prefill graph: batch=512 (representative prompt length)
-    prefill, err = captureGraph(512)
-    if err != nil {
-        return nil, nil, fmt.Errorf("prefill graph: %w", err)
-    }
-
-    // Decode graph: batch=1 (single token generation)
-    decode, err = captureGraph(1)
-    if err != nil {
-        return nil, nil, fmt.Errorf("decode graph: %w", err)
-    }
-
-    return prefill, decode, nil
+    // split_graph: assigns backends + runs graph_optimize (fusion)
+    C.ggml_backend_sched_split_graph(c.b.sched, c.graph)
+    // Capture graph nodes while backend assignments are still valid
+    c.captureGraphNodes()
+    // Clean up scheduler state (no side effects on memory allocation)
+    C.ggml_backend_sched_reset(c.b.sched)
 }
 ```
+
+调用方 `buildModelGraphNodes` 改用 `PlanGraph()` 替代 `Reserve()`：
+```go
+ctx.SetBatchSize(batchSize)
+ctx.Forward(t)
+ctx.PlanGraph()      // backend-aware graph capture, no memory allocation
+return ctx.GraphNodes(), nil
+```
+
+`Reserve()` 保持不变，继续用于正常推理路径的内存预分配。
+
+#### 层分配 (Schedule) 与 Backend 分配
+
+`split_graph` 通过检查权重 tensor 的 `buffer` 来判断每个 op 属于哪个 backend。
+权重 buffer 的分配取决于 `BackendParams.GPULayers`——哪些层 offload 到 GPU（`ggml.go:203 assignLayer`）。
+不传 `GPULayers` → 全部在 CPU → `split_graph` 把所有 op 分到 CPU，这不符合实际推理行为。
+
+**层分配即 schedule**: `GPULayers` 本质上是一个"schedule"——决定哪些层在哪个 device 上执行。
+正常推理时，server 根据 GPU 空闲内存和每层权重大小计算 schedule（`llm/server.go:buildLayout`）。
+
+**DAOP 的 schedule 策略**: estimate 路径需要自己构造 `GPULayers` 来模拟不同的 schedule 方案。
+这也是 DAOP 的远期目标之一：评估不同 schedule 方案下的预估性能，选择最优方案。
+
+Phase 1C 实现最简单的策略——**全部 offload 到主 GPU**：
+```go
+// Schedule strategy: full offload to primary GPU
+func fullOffloadSchedule(backend ml.Backend, numLayers int) ml.GPULayersList {
+    devices := backend.BackendDevices()
+    if len(devices) == 0 {
+        return nil  // CPU-only, no GPU layers
+    }
+    layers := make([]int, numLayers+1) // +1 for output layer
+    for i := range layers {
+        layers[i] = i
+    }
+    return ml.GPULayersList{{
+        DeviceID: devices[0].DeviceID,
+        Layers:   layers,
+    }}
+}
+```
+
+这要求 `buildModelGraphNodes` 执行两次 `model.New`：
+1. 第一次不传 `GPULayers`（发现模型层数和 GPU 信息）
+2. 构造 schedule
+3. 第二次传 `GPULayers`（正确的 backend 分配 → `PlanGraph` 拿到正确的 graph nodes）
+
+两次都用 `AllocMemory: false`，不加载权重、不分配计算缓冲区。
+第一次只需要获取元信息（层数、设备列表），开销很小。
+
+**未来扩展方向**（记入 TODO）：
+- 提取 `llm/server.go:buildLayout` 到公共包，实现"模拟 Ollama 默认分配"策略
+- 多 GPU 分配策略（按内存容量分配层）
+- 自定义 schedule 评估（用户指定分配方案，比较预估性能）
 
 ### 8.2 Return Value Change
 
