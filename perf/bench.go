@@ -361,8 +361,9 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 				"progress", progress, "duration", time.Since(hwStart).Round(time.Second))
 
 		case StepMulMatRef:
-			slog.Info("benchmarking MUL_MAT reference curve",
-				"progress", progress, "weight_dtype", step.WeightDtype, "elapsed", elapsed)
+			slog.Info("benchmarking MUL_MAT", "progress", progress,
+				"weight_dtype", step.WeightDtype, "M", step.FixedDims["M"], "K", step.FixedDims["K"],
+				"elapsed", elapsed)
 			gridStart := time.Now()
 
 			refPoints := benchmarkMulMat(backend, caps, step.WeightDtype, step.FixedDims, cfg)
@@ -380,21 +381,8 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 			}
 			profile.Operators = append(profile.Operators, refCurve)
 
-			peakTOPS := profile.Hardware.PeakTOPS["f32"]
-			if tops, ok := profile.Hardware.PeakTOPS[step.WeightDtype]; ok {
-				peakTOPS = tops
-			}
-			eff := extractEfficiencyConstants(refPoints, 4096, 4096, peakTOPS,
-				profile.Hardware.PeakBandwidthBytesPerSec, step.WeightDtype)
-			if profile.Hardware.EfficiencyConstants == nil {
-				profile.Hardware.EfficiencyConstants = make(map[string]OpEfficiency)
-			}
-			profile.Hardware.EfficiencyConstants["MUL_MAT_"+step.WeightDtype] = eff
-
 			slog.Info("completed MUL_MAT reference", "progress", progress,
 				"weight_dtype", step.WeightDtype, "points", len(refPoints),
-				"eff_compute", fmt.Sprintf("%.2f", eff.ComputeEff),
-				"eff_bw", fmt.Sprintf("%.2f", eff.BWEff),
 				"duration", time.Since(gridStart).Round(time.Second))
 
 		case StepOperator:
@@ -544,6 +532,25 @@ func PredictMulMatVecLatency(hw *HardwareProfile, M, K, N int64, dtype string) f
 	return predictMulMatLatencyKeyed(hw, M, K, N, dtype, "MUL_MAT_VEC_"+dtype)
 }
 
+// PredictMulMatDirect predicts MUL_MAT latency by directly interpolating from
+// measured reference curves, bypassing the roofline model entirely.
+// Uses inverse distance weighting in (M,K) space between reference curves.
+// This is more accurate than roofline for VEC shaders (N≤8) where the roofline
+// model fundamentally cannot capture dequantization, memory latency, and warp
+// scheduling effects. Returns 0 if no reference curves exist for this dtype.
+func PredictMulMatDirect(profile *Profile, M, K, N int64, weightDtype string) float64 {
+	var curves []OperatorCurve
+	for _, c := range profile.Operators {
+		if c.Op == "MUL_MAT" && c.WeightDtype == weightDtype && c.FixedDims != nil {
+			curves = append(curves, c)
+		}
+	}
+	if len(curves) == 0 {
+		return 0
+	}
+	return InterpolateMulMat(curves, M, K, N)
+}
+
 // predictMulMatLatencyKeyed is the shared roofline computation with a caller-specified
 // efficiency constant key. The dtype parameter is used for TOPS and elem-bytes lookup.
 func predictMulMatLatencyKeyed(hw *HardwareProfile, M, K, N int64, dtype, effKey string) float64 {
@@ -613,19 +620,30 @@ func benchmarkElementwise(backend ml.Backend, caps BackendCapabilities, op, dtyp
 	return AdaptiveSample1D(measure, 1024, 8*1024*1024, 8, cfg)
 }
 
-// benchmarkMulMat uses AdaptiveSample1D over N with fixed (M, K).
-// IMPORTANT: AdaptiveSample1D works with 1D shapes (Shape[0] is the sweep dimension).
-// We keep shapes 1D during sampling, matching benchmarkFlashAttn's pattern.
+// strategicNcross is the fixed N value for the BW→compute transition zone.
+// Empirically chosen: large enough to be past kernel launch overhead,
+// small enough to still show BW effects. The roofline formula
+// (peak_tops * elemBytes / (2 * peak_bw)) gives values too small (~3)
+// because it ignores kernel overhead and partial overlap.
+const strategicNcross = 32
+
+// benchmarkMulMat measures MUL_MAT latency at 3 strategic N values per (M,K) grid point.
+// N=1 (decode/BW-bound), N=32 (transition zone), N=512 (prefill/compute-bound).
+// Each "curve" has exactly 3 points — sufficient for piecewise linear interpolation in log-N.
 func benchmarkMulMat(backend ml.Backend, caps BackendCapabilities, weightDtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
 	M := fixedDims["M"]
 	K := fixedDims["K"]
-	measure := func(shape []int64) LatencyPoint {
-		N := shape[0]
+
+	strategicNs := []int64{1, strategicNcross, 512}
+
+	var points []LatencyPoint
+	for _, N := range strategicNs {
 		pt := measureOpForBackend(backend, caps, "MUL_MAT", []int64{M, K, N}, weightDtype, cfg)
-		pt.Shape = []int64{N} // 1D for AdaptiveSample1D
-		return pt
+		pt.Shape = []int64{N} // 1D for InterpolateMulMat compatibility
+		points = append(points, pt)
 	}
-	return AdaptiveSample1D(measure, 1, 4096, 8, cfg)
+
+	return points
 }
 
 // benchmarkFlashAttn samples two regimes: decode and prefill.

@@ -129,39 +129,35 @@ func TestFlashAttnShapeConversion(t *testing.T) {
 }
 
 // TestBenchmarkMulMat_OutputShapeContract verifies that benchmarkMulMat produces
-// 1D shapes [N] compatible with InterpolateMulMat (dimIdx=0).
-// This is a contract test — the seam between benchmark and interpolation.
+// exactly 3 points with 1D shapes [N] compatible with InterpolateMulMat.
 func TestBenchmarkMulMat_OutputShapeContract(t *testing.T) {
-	// Simulate what benchmarkMulMat's measure closure does
-	M, K := int64(4096), int64(4096)
-	nValues := []int64{1, 32, 256, 4096}
+	// The new benchmarkMulMat measures at 3 strategic N values: 1, 32, 512
+	strategicNs := []int64{1, strategicNcross, 512}
 
-	for _, N := range nValues {
-		// This mirrors bench.go benchmarkMulMat's measure closure:
-		// pt := measureOp(backend, "MUL_MAT", []int64{M, K, N}, dtype, cfg)
-		// pt.Shape = []int64{N}
+	for _, N := range strategicNs {
+		// Simulate what benchmarkMulMat's measurement does:
 		pt := LatencyPoint{
-			Shape:     []int64{M, K, N}, // what measureOp returns
+			Shape:     []int64{4096, 4096, N}, // what measureOp returns
 			LatencyUs: float64(N) * 10,
 		}
-		pt.Shape = []int64{N} // what the measure closure overrides
+		pt.Shape = []int64{N} // what benchmarkMulMat overrides
 
-		// Verify shape is 1D
-		assert.Len(t, pt.Shape, 1, "MUL_MAT points must be 1D for AdaptiveSample1D")
+		assert.Len(t, pt.Shape, 1, "MUL_MAT points must be 1D for InterpolateMulMat")
 		assert.Equal(t, N, pt.Shape[0], "Shape[0] must be the sweep dimension N")
 	}
 
-	// Verify InterpolateMulMat can consume 1D points
+	// Verify InterpolateMulMat can consume 3-point curves
 	curves := []OperatorCurve{{
-		Op: "MUL_MAT", FixedDims: map[string]int64{"M": 4096, "K": 4096},
+		Op: "MUL_MAT", FixedDims: map[string]int64{"M": 2048, "K": 2048},
 		Points: []LatencyPoint{
-			{Shape: []int64{1}, LatencyUs: 10.0},
-			{Shape: []int64{4096}, LatencyUs: 3000.0},
+			{Shape: []int64{1}, LatencyUs: 100.0},
+			{Shape: []int64{32}, LatencyUs: 800.0},
+			{Shape: []int64{512}, LatencyUs: 5000.0},
 		},
 	}}
-	result := InterpolateMulMat(curves, 4096, 4096, 128)
-	assert.Greater(t, result, 10.0)
-	assert.Less(t, result, 3000.0)
+	result := InterpolateMulMat(curves, 2048, 2048, 128)
+	assert.Greater(t, result, 800.0, "N=128 should be > N=32 latency")
+	assert.Less(t, result, 5000.0, "N=128 should be < N=512 latency")
 	assert.False(t, math.IsNaN(result))
 }
 
