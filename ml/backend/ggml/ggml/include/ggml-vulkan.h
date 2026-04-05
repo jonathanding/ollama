@@ -24,6 +24,19 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_vk_host_buffer_type(voi
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_vk_reg(void);
 
+// --- GPU Timestamp API for structured per-op timing ---
+
+struct ggml_vk_op_timing {
+    const char * op_name;     // Actual kernel name: "MUL_MAT_VEC", "RMS_NORM_MUL", etc.
+    int          node_idx;    // Index in the computation graph
+    float        gpu_time_us; // GPU execution time in microseconds
+};
+
+GGML_API void ggml_vk_enable_timestamps(ggml_backend_t backend, bool enable);
+
+GGML_API struct ggml_vk_op_timing * ggml_vk_get_op_timings(
+    ggml_backend_t backend, int * n_timings);
+
 #ifdef  __cplusplus
 }
 #endif

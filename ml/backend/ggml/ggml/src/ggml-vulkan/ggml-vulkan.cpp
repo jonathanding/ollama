@@ -1734,6 +1734,11 @@ struct ggml_backend_vk_context {
     std::vector<ggml_tensor *> query_nodes;
     int32_t num_queries {};
     int32_t query_idx {};
+
+    // Structured timestamp API (separate from vk_perf_logger stderr output)
+    bool timestamps_enabled = false;
+    std::vector<ggml_vk_op_timing> op_timings;
+    std::vector<std::string> op_timing_names; // owns the name strings
 };
 
 static void * const vk_ptr_base = (void *)(uintptr_t) 0x1000;  // NOLINT
@@ -13153,7 +13158,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     int submit_node_idx = 0; // index to first node in a batch
 
     vk_context compute_ctx;
-    if (vk_perf_logger_enabled) {
+    if (vk_perf_logger_enabled || ctx->timestamps_enabled) {
         // allocate/resize the query pool
         if (ctx->num_queries < cgraph->n_nodes + 1) {
             if (ctx->query_pool) {
@@ -13291,7 +13296,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
         bool enqueued = ggml_vk_build_graph(ctx, cgraph, i, cgraph->nodes[submit_node_idx], submit_node_idx, i + ctx->num_additional_fused_ops >= last_node, almost_ready, submit);
 
-        if (vk_perf_logger_enabled && enqueued) {
+        if ((vk_perf_logger_enabled || ctx->timestamps_enabled) && enqueued) {
             if (ctx->compute_ctx.expired()) {
                 compute_ctx = ggml_vk_create_context(ctx, ctx->compute_cmd_pool);
                 ctx->compute_ctx = compute_ctx;
@@ -13330,7 +13335,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
     ctx->last_total_mul_mat_bytes = total_mul_mat_bytes;
 
-    if (vk_perf_logger_enabled) {
+    if (vk_perf_logger_enabled || ctx->timestamps_enabled) {
         // End the command buffer and submit/wait
         GGML_ASSERT(!ctx->compute_ctx.expired());
         compute_ctx = ctx->compute_ctx.lock();
@@ -13343,13 +13348,48 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         // Get the results and pass them to the logger
         std::vector<uint64_t> timestamps(cgraph->n_nodes + 1);
         VK_CHECK(ctx->device->device.getQueryPoolResults(ctx->query_pool, 0, ctx->query_idx, (cgraph->n_nodes + 1)*sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait), "get timestamp results");
-        for (int i = 1; i < ctx->query_idx; i++) {
-            auto node = ctx->query_nodes[i];
-            auto name = ctx->query_fusion_names[i];
-            ctx->perf_logger->log_timing(node, name, uint64_t((timestamps[i] - timestamps[i-1]) * ctx->device->properties.limits.timestampPeriod));
+
+        if (vk_perf_logger_enabled) {
+            for (int i = 1; i < ctx->query_idx; i++) {
+                auto node = ctx->query_nodes[i];
+                auto name = ctx->query_fusion_names[i];
+                ctx->perf_logger->log_timing(node, name, uint64_t((timestamps[i] - timestamps[i-1]) * ctx->device->properties.limits.timestampPeriod));
+            }
+            ctx->perf_logger->print_timings();
         }
 
-        ctx->perf_logger->print_timings();
+        if (ctx->timestamps_enabled) {
+            ctx->op_timings.clear();
+            ctx->op_timing_names.clear();
+            for (int i = 1; i < ctx->query_idx; i++) {
+                auto node = ctx->query_nodes[i];
+                auto fusion_name = ctx->query_fusion_names[i];
+                float gpu_time_us = float((timestamps[i] - timestamps[i-1]) * ctx->device->properties.limits.timestampPeriod) / 1000.0f;
+
+                // Build op name using same logic as vk_perf_logger::log_timing
+                std::string name;
+                if (fusion_name) {
+                    name = fusion_name;
+                } else if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) {
+                    name = ggml_op_name(node->op);
+                    if ((node->op == GGML_OP_MUL_MAT && node->ne[1] <= mul_mat_vec_max_cols) ||
+                        (node->op == GGML_OP_MUL_MAT_ID && node->src[2]->ne[1] == 1)) {
+                        name += "_VEC";
+                    }
+                } else if (node->op == GGML_OP_UNARY) {
+                    name = ggml_unary_op_name(ggml_get_unary_op(node));
+                } else {
+                    name = ggml_op_name(node->op);
+                }
+
+                ctx->op_timing_names.push_back(name);
+                ctx->op_timings.push_back({
+                    ctx->op_timing_names.back().c_str(),
+                    i - 1,  // 0-based node index
+                    gpu_time_us
+                });
+            }
+        }
     }
 
     if (!ctx->device->support_async) {
@@ -13641,6 +13681,32 @@ ggml_backend_t ggml_backend_vk_init(size_t dev_num) {
 
 bool ggml_backend_is_vk(ggml_backend_t backend) {
     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_vk_guid());
+}
+
+void ggml_vk_enable_timestamps(ggml_backend_t backend, bool enable) {
+    if (!ggml_backend_is_vk(backend)) {
+        return;
+    }
+    ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+    ctx->timestamps_enabled = enable;
+    if (!enable) {
+        ctx->op_timings.clear();
+        ctx->op_timing_names.clear();
+    }
+}
+
+struct ggml_vk_op_timing * ggml_vk_get_op_timings(
+        ggml_backend_t backend, int * n_timings) {
+    if (!ggml_backend_is_vk(backend) || n_timings == nullptr) {
+        if (n_timings) *n_timings = 0;
+        return nullptr;
+    }
+    ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+    *n_timings = (int)ctx->op_timings.size();
+    if (ctx->op_timings.empty()) {
+        return nullptr;
+    }
+    return ctx->op_timings.data();
 }
 
 int ggml_backend_vk_get_device_count() {
