@@ -54,8 +54,8 @@ func LoadProfile(path string) (*Profile, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parsing profile: %w", err)
 	}
-	if p.Version != 2 {
-		return nil, fmt.Errorf("unsupported profile version %d (expected 2)", p.Version)
+	if p.Version != 2 && p.Version != 3 {
+		return nil, fmt.Errorf("unsupported profile version %d (expected 2 or 3)", p.Version)
 	}
 	return &p, nil
 }

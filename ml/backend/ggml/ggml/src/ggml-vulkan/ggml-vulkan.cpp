@@ -14577,11 +14577,25 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
     return devices[device];
 }
 
+static void * ggml_backend_vk_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+    GGML_UNUSED(reg);
+    if (strcmp(name, "ggml_vk_enable_timestamps") == 0) {
+        return (void *)(uintptr_t)ggml_vk_enable_timestamps;
+    }
+    if (strcmp(name, "ggml_vk_get_op_timings") == 0) {
+        return (void *)(uintptr_t)ggml_vk_get_op_timings;
+    }
+    if (strcmp(name, "ggml_backend_is_vk") == 0) {
+        return (void *)(uintptr_t)ggml_backend_is_vk;
+    }
+    return NULL;
+}
+
 static const struct ggml_backend_reg_i ggml_backend_vk_reg_i = {
     /* .get_name         = */ ggml_backend_vk_reg_get_name,
     /* .get_device_count = */ ggml_backend_vk_reg_get_device_count,
     /* .get_device       = */ ggml_backend_vk_reg_get_device,
-    /* .get_proc_address = */ NULL,
+    /* .get_proc_address = */ ggml_backend_vk_reg_get_proc_address,
 };
 
 ggml_backend_reg_t ggml_backend_vk_reg() {

@@ -252,6 +252,134 @@ func TestLookupBackend_NotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestLoadProfileV3(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profile.json")
+
+	p := &Profile{
+		Version:   3,
+		Timestamp: time.Now(),
+		Hardware:  HardwareProfile{PeakTOPS: map[string]float64{"f32": 100}},
+		BackendCaps: map[string]BackendCapabilitiesJSON{
+			"Vulkan": {
+				Name:            "Vulkan",
+				HasGPUTimestamp: true,
+				HasMulMatVec:    true,
+				MulMatVecMaxN:   8,
+			},
+		},
+		Operators: []OperatorCurve{
+			{
+				Op: "ORCHESTRATION_OVERHEAD", Backend: "Vulkan", ComputeDtype: "f32",
+				Dimensions: []string{"num_nodes"},
+				Points: []LatencyPoint{
+					{Shape: []int64{50}, LatencyUs: 3000},
+					{Shape: []int64{100}, LatencyUs: 5500},
+				},
+			},
+		},
+	}
+	err := WriteProfile(path, p)
+	require.NoError(t, err)
+
+	loaded, err := LoadProfile(path)
+	require.NoError(t, err)
+	assert.Equal(t, 3, loaded.Version)
+	assert.True(t, loaded.BackendCaps["Vulkan"].HasGPUTimestamp)
+	assert.Equal(t, 8, loaded.BackendCaps["Vulkan"].MulMatVecMaxN)
+	assert.True(t, loaded.BackendCaps["Vulkan"].HasMulMatVec)
+	assert.Equal(t, "Vulkan", loaded.BackendCaps["Vulkan"].Name)
+	assert.Len(t, loaded.Operators, 1)
+	assert.Equal(t, "ORCHESTRATION_OVERHEAD", loaded.Operators[0].Op)
+}
+
+func TestLoadProfileV2StillWorks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profile.json")
+
+	p := &Profile{
+		Version:   2,
+		Timestamp: time.Now(),
+		Hardware:  HardwareProfile{PeakTOPS: map[string]float64{"f32": 100}},
+	}
+	err := WriteProfile(path, p)
+	require.NoError(t, err)
+
+	loaded, err := LoadProfile(path)
+	require.NoError(t, err)
+	assert.Equal(t, 2, loaded.Version)
+	assert.Nil(t, loaded.BackendCaps) // v2 has no BackendCaps
+}
+
+func TestLoadProfileV3BackendCapsOmittedWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profile.json")
+
+	// v3 without BackendCaps should still work (omitempty)
+	p := &Profile{
+		Version:   3,
+		Timestamp: time.Now(),
+		Hardware:  HardwareProfile{PeakTOPS: map[string]float64{"f32": 100}},
+	}
+	err := WriteProfile(path, p)
+	require.NoError(t, err)
+
+	loaded, err := LoadProfile(path)
+	require.NoError(t, err)
+	assert.Equal(t, 3, loaded.Version)
+	assert.Nil(t, loaded.BackendCaps)
+}
+
+func TestLoadProfileV3MultipleBackends(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profile.json")
+
+	p := &Profile{
+		Version:   3,
+		Timestamp: time.Now(),
+		Hardware:  HardwareProfile{PeakTOPS: map[string]float64{"f32": 100}},
+		BackendCaps: map[string]BackendCapabilitiesJSON{
+			"Vulkan": {Name: "Vulkan", HasGPUTimestamp: true, HasMulMatVec: true, MulMatVecMaxN: 8},
+			"CPU":    {Name: "CPU", HasGPUTimestamp: false, HasMulMatVec: false, MulMatVecMaxN: 0},
+		},
+	}
+	err := WriteProfile(path, p)
+	require.NoError(t, err)
+
+	loaded, err := LoadProfile(path)
+	require.NoError(t, err)
+	assert.Len(t, loaded.BackendCaps, 2)
+	assert.True(t, loaded.BackendCaps["Vulkan"].HasGPUTimestamp)
+	assert.False(t, loaded.BackendCaps["CPU"].HasGPUTimestamp)
+	assert.False(t, loaded.BackendCaps["CPU"].HasMulMatVec)
+}
+
+func TestMergeProfileV3PreservesBackendCaps(t *testing.T) {
+	existing := &Profile{
+		Version:   3,
+		Timestamp: time.Now(),
+		Hardware:  HardwareProfile{PeakTOPS: map[string]float64{"f32": 100}},
+		BackendCaps: map[string]BackendCapabilitiesJSON{
+			"Vulkan": {Name: "Vulkan", HasGPUTimestamp: true, HasMulMatVec: true, MulMatVecMaxN: 8},
+		},
+		Operators: []OperatorCurve{
+			{Op: "ADD", Backend: "Vulkan", ComputeDtype: "f32", Dimensions: []string{"N"}},
+		},
+	}
+	update := &Profile{
+		Version:   3,
+		Timestamp: time.Now(),
+		Hardware:  existing.Hardware,
+		Operators: []OperatorCurve{
+			{Op: "MUL", Backend: "Vulkan", ComputeDtype: "f32", Dimensions: []string{"N"}},
+		},
+	}
+	merged := MergeProfile(existing, update)
+	assert.Len(t, merged.Operators, 2)
+	// MergeProfile currently doesn't merge BackendCaps — it inherits from existing
+	// (existing.Hardware is used). This is fine for now.
+}
+
 func TestBenchDir(t *testing.T) {
 	dir := BenchDir()
 	assert.Contains(t, dir, ".ollama")

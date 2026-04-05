@@ -7,10 +7,11 @@ import "time"
 // Profile stores calibrated operator latency curves for a specific hardware configuration.
 // Version 2 replaces v1's Roofline-based eta coefficients with direct latency measurements.
 type Profile struct {
-	Version   int              `json:"version"`   // 2
-	Timestamp time.Time        `json:"timestamp"`
-	Hardware  HardwareProfile  `json:"hardware"`
-	Operators []OperatorCurve  `json:"operators"`
+	Version     int                                `json:"version"` // 2 or 3
+	Timestamp   time.Time                          `json:"timestamp"`
+	Hardware    HardwareProfile                    `json:"hardware"`
+	Operators   []OperatorCurve                    `json:"operators"`
+	BackendCaps map[string]BackendCapabilitiesJSON `json:"backend_caps,omitempty"`
 }
 
 // HardwareProfile captures hardware characteristics used for roofline prediction and sampling.

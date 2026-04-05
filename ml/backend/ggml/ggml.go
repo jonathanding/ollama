@@ -8,7 +8,41 @@ package ggml
 // #include "ggml.h"
 // #include "ggml-cpu.h"
 // #include "ggml-backend.h"
-// #include "ggml-vulkan.h"
+//
+// // GPU Timestamp API — resolved at runtime via ggml_backend_reg_get_proc_address.
+// // The Vulkan backend (ggml-vulkan.dll) registers these functions; they are not
+// // linked at compile time.
+// struct ggml_vk_op_timing {
+//     const char * op_name;
+//     int          node_idx;
+//     float        gpu_time_us;
+// };
+// typedef void (*vk_enable_timestamps_fn)(ggml_backend_t, bool);
+// typedef struct ggml_vk_op_timing * (*vk_get_op_timings_fn)(ggml_backend_t, int *);
+// typedef bool (*vk_is_vk_fn)(ggml_backend_t);
+//
+// static vk_enable_timestamps_fn  _vk_enable_timestamps  = NULL;
+// static vk_get_op_timings_fn     _vk_get_op_timings     = NULL;
+// static vk_is_vk_fn              _vk_is_vk              = NULL;
+//
+// static void resolve_vk_timestamps(ggml_backend_dev_t dev) {
+//     if (_vk_is_vk) return; // already resolved
+//     ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+//     if (!reg) return;
+//     _vk_is_vk = (vk_is_vk_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_backend_is_vk");
+//     _vk_enable_timestamps = (vk_enable_timestamps_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_vk_enable_timestamps");
+//     _vk_get_op_timings = (vk_get_op_timings_fn)(uintptr_t)ggml_backend_reg_get_proc_address(reg, "ggml_vk_get_op_timings");
+// }
+//
+// static bool call_vk_is_vk(ggml_backend_t b) {
+//     return _vk_is_vk ? _vk_is_vk(b) : false;
+// }
+// static void call_vk_enable_timestamps(ggml_backend_t b, bool enable) {
+//     if (_vk_enable_timestamps) _vk_enable_timestamps(b, enable);
+// }
+// static struct ggml_vk_op_timing * call_vk_get_op_timings(ggml_backend_t b, int * n) {
+//     return _vk_get_op_timings ? _vk_get_op_timings(b, n) : NULL;
+// }
 import "C"
 
 import (
@@ -66,6 +100,12 @@ var initDevices = sync.OnceFunc(func() {
 		}
 
 		backends[d] = C.ggml_backend_dev_init(d, nil)
+	}
+
+	// Resolve Vulkan timestamp functions via proc_address (if Vulkan backend is loaded)
+	for _, d := range gpus {
+		C.resolve_vk_timestamps(d)
+		break // only need to resolve once
 	}
 })
 
@@ -820,17 +860,17 @@ func (b *Backend) BackendDevices() []ml.DeviceInfo {
 
 func (b *Backend) EnableGPUTimestamps(enable bool) {
 	for _, be := range b.schedBackends {
-		if C.ggml_backend_is_vk(be) {
-			C.ggml_vk_enable_timestamps(be, C.bool(enable))
+		if C.call_vk_is_vk(be) {
+			C.call_vk_enable_timestamps(be, C.bool(enable))
 		}
 	}
 }
 
 func (b *Backend) GetOpTimings() []ml.OpTiming {
 	for _, be := range b.schedBackends {
-		if C.ggml_backend_is_vk(be) {
+		if C.call_vk_is_vk(be) {
 			var nTimings C.int
-			timings := C.ggml_vk_get_op_timings(be, &nTimings)
+			timings := C.call_vk_get_op_timings(be, &nTimings)
 			if timings == nil || nTimings == 0 {
 				return nil
 			}
