@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
@@ -76,6 +79,101 @@ func fullOffloadSchedule(backend ml.Backend, numLayers int) ml.GPULayersList {
 		DeviceID: devices[0].DeviceID,
 		Layers:   layers,
 	}}
+}
+
+var blkLayerRe = regexp.MustCompile(`\bblk\.(\d+)\.`)
+
+// parseLayerIndex extracts a layer index from a tensor name like "blk.5.attn_q.weight".
+// Returns -1 if no layer index is found.
+func parseLayerIndex(name string) int {
+	m := blkLayerRe.FindStringSubmatch(name)
+	if m == nil {
+		return -1
+	}
+	idx, _ := strconv.Atoi(m[1])
+	return idx
+}
+
+// assignBackends assigns a backend name to each graph node based on the schedule.
+// It parses layer indices from input tensor names (weight tensors) and maps them
+// to backends via the schedule. Nodes without identifiable layers use adjacency
+// expansion (same backend as neighboring compute ops).
+func assignBackends(nodes []ml.GraphNode, schedule ml.GPULayersList, blockCount int, cpuBackendName string) {
+	// Build layer → backend name map from schedule
+	layerBackend := make(map[int]string)
+	for _, gpu := range schedule {
+		for _, layer := range gpu.Layers {
+			layerBackend[layer] = gpu.DeviceID.Library
+		}
+	}
+
+	// Pass 1: assign from input tensor names
+	for i := range nodes {
+		layer := -1
+		// Check input tensor names for layer index (e.g., "blk.5.attn_q.weight")
+		for _, name := range nodes[i].InputNames {
+			if l := parseLayerIndex(name); l >= 0 {
+				layer = l
+				break
+			}
+		}
+		// Also check output tensor name
+		if layer < 0 {
+			layer = parseLayerIndex(nodes[i].Name)
+		}
+		// Handle output/embedding tensors
+		if layer < 0 {
+			for _, name := range nodes[i].InputNames {
+				if strings.HasPrefix(name, "output.") || strings.HasPrefix(name, "output_norm.") {
+					layer = blockCount // output layer
+					break
+				}
+				if strings.HasPrefix(name, "token_embd.") {
+					layer = -2 // input, stays on CPU for now
+					break
+				}
+			}
+		}
+
+		if layer >= 0 {
+			if backend, ok := layerBackend[layer]; ok {
+				nodes[i].Backend = backend
+			} else {
+				nodes[i].Backend = cpuBackendName
+			}
+		}
+		// layer == -2: explicit CPU
+		if layer == -2 {
+			nodes[i].Backend = cpuBackendName
+		}
+	}
+
+	// Pass 2: expand GPU backends down (same as split_graph pass 2)
+	curBackend := ""
+	for i := range nodes {
+		if nodes[i].Backend != "" && nodes[i].Backend != cpuBackendName {
+			curBackend = nodes[i].Backend
+		} else if nodes[i].Backend == "" && curBackend != "" {
+			nodes[i].Backend = curBackend
+		}
+	}
+
+	// Pass 3: expand GPU backends up
+	curBackend = ""
+	for i := len(nodes) - 1; i >= 0; i-- {
+		if nodes[i].Backend != "" && nodes[i].Backend != cpuBackendName {
+			curBackend = nodes[i].Backend
+		} else if nodes[i].Backend == "" && curBackend != "" {
+			nodes[i].Backend = curBackend
+		}
+	}
+
+	// Pass 4: remaining unassigned → CPU
+	for i := range nodes {
+		if nodes[i].Backend == "" {
+			nodes[i].Backend = cpuBackendName
+		}
+	}
 }
 
 // ensureLibraryPath sets OLLAMA_LIBRARY_PATH and PATH so that GGML can discover
@@ -422,15 +520,82 @@ func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) P
 
 // EstimateModel estimates inference performance for a model using a calibrated profile.
 func EstimateModel(profile *Profile, modelPath string) (*EstimateResult, error) {
-	schedule, err := discoverModelSchedule(modelPath)
+	ensureLibraryPath()
+
+	// Single model load: skip weight buffer allocation, capture raw graph
+	m, err := model.New(modelPath, ml.BackendParams{
+		AllocMemory:     false,
+		SkipWeightAlloc: true,
+		FlashAttention:  ml.FlashAttentionEnabled,
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load model: %w", err)
+	}
+	defer m.Backend().Close()
+
+	// Build schedule from metadata + available devices
+	blockCount := int(m.Backend().Config().Uint("block_count"))
+	schedule := fullOffloadSchedule(m.Backend(), blockCount)
+	if schedule != nil {
+		slog.Info("estimate schedule", "strategy", "full_offload",
+			"device", schedule[0].DeviceID.Library, "layers", len(schedule[0].Layers))
+	} else {
+		slog.Info("estimate schedule", "strategy", "cpu_only")
 	}
 
-	prefillNodes, decodeNodes, err := buildModelGraphNodes(modelPath, schedule)
-	if err != nil {
-		return nil, err
+	// Initialize KV cache for graph capture
+	if cache := m.Config().Cache; cache != nil {
+		cache.Init(m.Backend(), ml.DTypeF16, 1, 2048, 512)
 	}
+
+	// Capture raw graph nodes (no split_graph, backend="" initially)
+	captureGraph := func(batchSize int) ([]ml.GraphNode, error) {
+		ctx := m.Backend().NewContext()
+		defer ctx.Close()
+
+		batchInputs := make([]int32, batchSize)
+		positions := make([]int32, batchSize)
+		sequences := make([]int, batchSize)
+		for i := 0; i < batchSize; i++ {
+			positions[i] = int32(i)
+		}
+		batch := input.Batch{
+			Inputs:    ctx.Input().FromInts(batchInputs, batchSize),
+			Outputs:   ctx.Input().Empty(ml.DTypeI32, 1),
+			Positions: positions,
+			Sequences: sequences,
+		}
+
+		if cache := m.Config().Cache; cache != nil {
+			if err := cache.StartForward(ctx, batch, true); err != nil {
+				return nil, fmt.Errorf("cache start: %w", err)
+			}
+		}
+
+		t, err := m.Forward(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("forward: %w", err)
+		}
+
+		ctx.SetBatchSize(batchSize)
+		ctx.Forward(t)
+		ctx.CaptureGraphRaw() // no split_graph needed
+
+		return ctx.GraphNodes(), nil
+	}
+
+	prefillNodes, err := captureGraph(512)
+	if err != nil {
+		return nil, fmt.Errorf("prefill graph: %w", err)
+	}
+	decodeNodes, err := captureGraph(1)
+	if err != nil {
+		return nil, fmt.Errorf("decode graph: %w", err)
+	}
+
+	// Go-level backend assignment (replaces split_graph)
+	assignBackends(prefillNodes, schedule, blockCount, "CPU")
+	assignBackends(decodeNodes, schedule, blockCount, "CPU")
 
 	result := &EstimateResult{Model: modelPath}
 

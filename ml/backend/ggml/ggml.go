@@ -525,33 +525,35 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 		C._Bool(params.AllocMemory),
 	)
 
-	// allocate buffers for each context
+	// allocate buffers for each context (skip when only graph structure is needed)
 	bbs := make(map[*C.struct_ggml_context]C.ggml_backend_buffer_t, len(ctxs))
-	for bt, c := range ctxs {
-		if C.ggml_get_first_tensor(c) == nil {
-			continue
-		}
-
-		b := C.ggml_backend_alloc_ctx_tensors_from_buft(c, bt)
-		if b == nil {
-			for _, b := range bbs {
-				C.ggml_backend_buffer_free(b)
+	if !params.SkipWeightAlloc {
+		for bt, c := range ctxs {
+			if C.ggml_get_first_tensor(c) == nil {
+				continue
 			}
 
-			for _, ctx := range ctxs {
-				C.ggml_free(ctx)
+			b := C.ggml_backend_alloc_ctx_tensors_from_buft(c, bt)
+			if b == nil {
+				for _, b := range bbs {
+					C.ggml_backend_buffer_free(b)
+				}
+
+				for _, ctx := range ctxs {
+					C.ggml_free(ctx)
+				}
+
+				panic(ml.ErrNoMem{BackendMemory: requiredMemory})
 			}
 
-			panic(ml.ErrNoMem{BackendMemory: requiredMemory})
+			C.ggml_backend_buffer_set_usage(b, C.GGML_BACKEND_BUFFER_USAGE_WEIGHTS)
+			bbs[c] = b
 		}
 
-		C.ggml_backend_buffer_set_usage(b, C.GGML_BACKEND_BUFFER_USAGE_WEIGHTS)
-		bbs[c] = b
-	}
-
-	for bs := range maps.Values(bbs) {
-		logutil.Trace("model weights", "buffer", C.GoString(C.ggml_backend_buffer_name(bs)),
-			"size", format.HumanBytes2(uint64(C.ggml_backend_buffer_get_size(bs))))
+		for bs := range maps.Values(bbs) {
+			logutil.Trace("model weights", "buffer", C.GoString(C.ggml_backend_buffer_name(bs)),
+				"size", format.HumanBytes2(uint64(C.ggml_backend_buffer_get_size(bs))))
+		}
 	}
 
 	return &Backend{
@@ -1167,7 +1169,7 @@ func (c *Context) Reserve() {
 	reserved := C.ggml_backend_sched_reserve(c.b.sched, c.graph)
 
 	// Capture graph nodes for performance estimation (before reset clears backend assignments)
-	c.captureGraphNodes()
+	c.captureGraphNodes(true)
 
 	slog.Debug("compute graph", "nodes", C.ggml_graph_n_nodes(c.graph), "splits", C.ggml_backend_sched_get_n_splits(c.b.sched))
 
@@ -1198,17 +1200,21 @@ func (c *Context) PlanGraph() {
 	C.ggml_backend_sched_split_graph(c.b.sched, c.graph)
 
 	// Capture graph nodes while backend assignments are still valid
-	c.captureGraphNodes()
+	c.captureGraphNodes(true)
 
 	// Clean up scheduler state — no side effects on memory allocation
 	C.ggml_backend_sched_reset(c.b.sched)
+}
+
+func (c *Context) CaptureGraphRaw() {
+	c.captureGraphNodes(false)
 }
 
 func (c *Context) GraphNodes() []ml.GraphNode {
 	return c.graphNodes
 }
 
-func (c *Context) captureGraphNodes() {
+func (c *Context) captureGraphNodes(resolveBackend bool) {
 	nNodes := int(C.ggml_graph_n_nodes(c.graph))
 	c.graphNodes = make([]ml.GraphNode, 0, nNodes)
 
@@ -1224,24 +1230,26 @@ func (c *Context) captureGraphNodes() {
 			int64(node.ne[2]), int64(node.ne[3]),
 		}
 
-		// Determine backend library name via ggml_backend_sched_get_tensor_backend.
-		// Use device props.library (e.g., "Vulkan") to match profile backend names,
-		// not ggml_backend_name which returns instance names (e.g., "Vulkan0").
-		backendName := "unknown"
-		backendPtr := C.ggml_backend_sched_get_tensor_backend(c.b.sched, node)
-		if backendPtr != nil {
-			dev := C.ggml_backend_get_device(backendPtr)
-			if dev != nil {
-				var props C.struct_ggml_backend_dev_props
-				C.ggml_backend_dev_get_props(dev, &props)
-				backendName = C.GoString(props.library)
-			} else {
-				backendName = C.GoString(C.ggml_backend_name(backendPtr))
+		// Determine backend library name from split_graph results (when available)
+		backendName := ""
+		if resolveBackend {
+			backendName = "unknown"
+			backendPtr := C.ggml_backend_sched_get_tensor_backend(c.b.sched, node)
+			if backendPtr != nil {
+				dev := C.ggml_backend_get_device(backendPtr)
+				if dev != nil {
+					var props C.struct_ggml_backend_dev_props
+					C.ggml_backend_dev_get_props(dev, &props)
+					backendName = C.GoString(props.library)
+				} else {
+					backendName = C.GoString(C.ggml_backend_name(backendPtr))
+				}
 			}
 		}
 
-		// Collect input shapes
+		// Collect input shapes and names
 		var inputShapes [][]int64
+		var inputNames []string
 		for j := 0; j < C.GGML_MAX_SRC; j++ {
 			src := node.src[j]
 			if src == nil {
@@ -1251,6 +1259,7 @@ func (c *Context) captureGraphNodes() {
 				int64(src.ne[0]), int64(src.ne[1]),
 				int64(src.ne[2]), int64(src.ne[3]),
 			})
+			inputNames = append(inputNames, C.GoString(C.ggml_get_name(src)))
 		}
 
 		// Determine weight dtype (for MUL_MAT, src[0] is weight)
@@ -1269,6 +1278,7 @@ func (c *Context) captureGraphNodes() {
 			ComputeDtype: typeName,
 			WeightDtype:  weightDtype,
 			InputShapes:  inputShapes,
+			InputNames:   inputNames,
 		})
 	}
 }

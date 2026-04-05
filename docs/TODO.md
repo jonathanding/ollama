@@ -59,7 +59,15 @@
 - [ ] 小 N 直接测量: 对 N=1,2,4,8 直接 benchmark 延迟，不用 roofline 外推 (来源: 2026-04-05)
 
 **Phase 1G: Estimate 速度优化**
-- [ ] estimate 路径避免分配权重 buffer: 当前模型加载两次 (discoverModelSchedule + buildModelGraphNodes)，每次 ~15k 行 DXGI 日志，耗时数十秒。需要研究轻量替代方案 (来源: 2026-04-05)
+- [ ] [HIGH] SkipWeightAlloc: model.New() 跳过 ggml_backend_alloc_ctx_tensors_from_buft，不分配 GPU 权重 buffer。tensor metadata 仍正常创建（shape/dtype），只是 buffer=NULL (来源: 2026-04-05)
+- [ ] [HIGH] Go 层 backend assignment: 替代 split_graph，根据 schedule + tensor name (blk.{i}.*) 在 Go 层标记每个 graph node 的 backend。不需要 weight buffer 归属 (来源: 2026-04-05)
+- [ ] 合并两次 model.New() 为一次: discoverModelSchedule 不再需要单独加载模型，schedule 在 Go 层构建 (来源: 2026-04-05)
+- [ ] Server API 路径: daop-estimate 作为 server 内 API 时，直接复用已加载模型的 backend，零额外开销 (来源: 2026-04-05)
+
+**Phase 1H: Partial Offload Estimate**
+- [ ] partial offload 的 backend assignment: 支持部分层在 GPU、部分在 CPU 的 schedule (来源: 2026-04-05)
+- [ ] CPU↔GPU 数据搬运延迟建模: 跨 backend 的 tensor transfer overhead (来源: 2026-04-05)
+- [ ] 多 schedule 对比: 输入不同 offload 方案，对比预测性能，支持自动寻优 (来源: 2026-04-05)
 
 ### 未来工作
 

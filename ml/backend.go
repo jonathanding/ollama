@@ -74,6 +74,11 @@ type BackendParams struct {
 
 	// FlashAttention indicates that we should use a fused flash attention kernel
 	FlashAttention FlashAttentionType
+
+	// SkipWeightAlloc skips GPU/CPU buffer allocation for weight tensors.
+	// Tensor metadata (shape, dtype, name) is still created normally.
+	// Used by the estimate path which only needs graph structure, not data.
+	SkipWeightAlloc bool
 }
 
 var backends = make(map[string]func(string, BackendParams) (Backend, error))
@@ -119,6 +124,7 @@ type GraphNode struct {
 	ComputeDtype string    // Compute data type: "f32", "f16", etc.
 	WeightDtype  string    // Weight data type (for MUL_MAT): "q4_0", etc.
 	InputShapes  [][]int64 // Shapes of input tensors (src[0..])
+	InputNames   []string  // Names of input tensors (src[0..])
 }
 
 // OpTiming represents the GPU execution time for one operation in a computation graph.
@@ -165,6 +171,11 @@ type Context interface {
 	// then the scheduler state is reset. Use this instead of Reserve when
 	// you only need graph structure with backend info (e.g., performance estimation).
 	PlanGraph()
+
+	// CaptureGraphRaw captures graph nodes without running split_graph.
+	// Backend field is left empty — caller must assign backends separately.
+	// Use this when weight buffers are not allocated (SkipWeightAlloc).
+	CaptureGraphRaw()
 
 	MaxGraphNodes() int
 	Close()
