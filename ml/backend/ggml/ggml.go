@@ -2,7 +2,7 @@ package ggml
 
 // #cgo linux LDFLAGS: -lrt -lpthread -ldl -lstdc++ -lm
 // #cgo windows LDFLAGS: -lpthread
-// #cgo CPPFLAGS: -I${SRCDIR}/ggml/include
+// #cgo CPPFLAGS: -I${SRCDIR}/ggml/include -I${SRCDIR}/ggml/src
 // #include <stdlib.h>
 // #include <stdint.h>
 // #include "ggml.h"
@@ -45,21 +45,97 @@ package ggml
 //     return _vk_get_op_timings ? _vk_get_op_timings(b, n) : NULL;
 // }
 //
-// // Reset all tensor allocations in a ggml_context so they can be re-allocated.
-// // Frees old_buffers[0..n_old-1], then sets data=NULL and buffer=NULL on all tensors.
-// static void reset_ctx_tensor_allocs(
+// #include <string.h>
+// #include "ggml-backend-impl.h"
+//
+// // Check if a tensor's buffer supports set_tensor (safe to write data).
+// // Returns false if buffer is NULL or set_tensor callback is NULL.
+// // This guards against writing to tensors on GPU buffers that don't
+// // support host-to-device transfer (e.g., estimate path with AllocMemory=false).
+// static bool tensor_can_set(struct ggml_tensor * t) {
+//     return t->buffer != NULL && t->buffer->iface.set_tensor != NULL;
+// }
+//
+// // Transfer all tensor data from current buffers to a new backend buffer type.
+// // 1. Save each tensor's data via malloc+memcpy
+// // 2. Free old_buffers[0..n_old-1] and prev_direct (if non-NULL)
+// // 3. Reset tensor data/buffer pointers to NULL
+// // 4. Allocate all tensors on new_buft
+// // 5. Copy saved data to new tensors via ggml_backend_tensor_set
+// // Returns the new buffer, or NULL on allocation failure (saved data is freed).
+// static ggml_backend_buffer_t transfer_ctx_tensors(
 //     struct ggml_context * ctx,
 //     ggml_backend_buffer_t * old_buffers,
-//     int n_old) {
+//     int n_old,
+//     ggml_backend_buffer_t prev_direct,
+//     ggml_backend_buffer_type_t new_buft) {
+//
+//     // Count tensors
+//     int n_tensors = 0;
+//     for (struct ggml_tensor * t = ggml_get_first_tensor(ctx);
+//          t != NULL;
+//          t = ggml_get_next_tensor(ctx, t)) {
+//         n_tensors++;
+//     }
+//
+//     // Save tensor data
+//     void ** saved_data = (void **)malloc(n_tensors * sizeof(void *));
+//     size_t * saved_size = (size_t *)malloc(n_tensors * sizeof(size_t));
+//     int idx = 0;
+//     for (struct ggml_tensor * t = ggml_get_first_tensor(ctx);
+//          t != NULL;
+//          t = ggml_get_next_tensor(ctx, t)) {
+//         size_t sz = ggml_nbytes(t);
+//         saved_size[idx] = sz;
+//         if (t->data && sz > 0) {
+//             saved_data[idx] = malloc(sz);
+//             memcpy(saved_data[idx], t->data, sz);
+//         } else {
+//             saved_data[idx] = NULL;
+//         }
+//         idx++;
+//     }
+//
+//     // Free old buffers
 //     for (int i = 0; i < n_old; i++) {
 //         ggml_backend_buffer_free(old_buffers[i]);
 //     }
+//     if (prev_direct) {
+//         ggml_backend_buffer_free(prev_direct);
+//     }
+//
+//     // Reset tensor pointers
 //     for (struct ggml_tensor * t = ggml_get_first_tensor(ctx);
 //          t != NULL;
 //          t = ggml_get_next_tensor(ctx, t)) {
 //         t->data   = NULL;
 //         t->buffer = NULL;
 //     }
+//
+//     // Allocate on new backend
+//     ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx, new_buft);
+//     if (!buf) {
+//         for (int i = 0; i < n_tensors; i++) free(saved_data[i]);
+//         free(saved_data);
+//         free(saved_size);
+//         return NULL;
+//     }
+//
+//     // Copy saved data to new backend tensors
+//     idx = 0;
+//     for (struct ggml_tensor * t = ggml_get_first_tensor(ctx);
+//          t != NULL;
+//          t = ggml_get_next_tensor(ctx, t)) {
+//         if (saved_data[idx] && saved_size[idx] > 0) {
+//             ggml_backend_tensor_set(t, saved_data[idx], 0, saved_size[idx]);
+//             free(saved_data[idx]);
+//         }
+//         idx++;
+//     }
+//     free(saved_data);
+//     free(saved_size);
+//
+//     return buf;
 // }
 import "C"
 
@@ -1048,29 +1124,23 @@ func (c *Context) ComputeOnBackend(backendIdx int, tensors ...ml.Tensor) {
 	backend := c.b.schedBackends[backendIdx]
 	buft := c.b.schedBufts[backendIdx]
 
-	// First call: reallocate all context tensors on the target backend
+	// First call: transfer all context tensors from CPU to the target backend
 	if c.directBackendIdx != backendIdx {
-		// Free old CPU-allocated buffers and reset tensor pointers
+		var oldBufs *C.ggml_backend_buffer_t
+		var nOld C.int
 		if c.allocatedBuffers != nil && len(*c.allocatedBuffers) > 0 {
-			C.reset_ctx_tensor_allocs(
-				c.ctx,
-				&(*c.allocatedBuffers)[0],
-				C.int(len(*c.allocatedBuffers)),
-			)
-			*c.allocatedBuffers = nil
+			oldBufs = &(*c.allocatedBuffers)[0]
+			nOld = C.int(len(*c.allocatedBuffers))
 		}
 
-		// Free any previous direct buffer
-		if c.directBuffer != nil {
-			C.ggml_backend_buffer_free(c.directBuffer)
-		}
-
-		// Allocate all tensors on the target backend's buffer type
-		c.directBuffer = C.ggml_backend_alloc_ctx_tensors_from_buft(c.ctx, buft)
+		c.directBuffer = C.transfer_ctx_tensors(c.ctx, oldBufs, nOld, c.directBuffer, buft)
 		if c.directBuffer == nil {
 			panic("ComputeOnBackend: failed to allocate tensors on target backend")
 		}
 
+		if c.allocatedBuffers != nil {
+			*c.allocatedBuffers = nil
+		}
 		c.directBackendIdx = backendIdx
 	}
 
@@ -1263,7 +1333,7 @@ func (c *Context) Empty(dtype ml.DType, shape ...int) ml.Tensor {
 
 func (c *Context) Zeros(dtype ml.DType, shape ...int) ml.Tensor {
 	t := c.newTensor(dtype, shape)
-	if c.b.allocMemory {
+	if C.tensor_can_set(t.t) {
 		C.ggml_set_zero(t.t)
 	}
 	return t
@@ -1299,8 +1369,7 @@ func (c *Context) FromFloats(s []float32, shape ...int) ml.Tensor {
 	checkShape(s, shape...)
 
 	t := c.newTensor(ml.DTypeF32, shape)
-
-	if c.b.allocMemory {
+	if C.tensor_can_set(t.t) {
 		t.FromFloats(s)
 	}
 
@@ -1311,7 +1380,7 @@ func (c *Context) FromInts(s []int32, shape ...int) ml.Tensor {
 	checkShape(s, shape...)
 
 	t := c.newTensor(ml.DTypeI32, shape)
-	if c.b.allocMemory {
+	if C.tensor_can_set(t.t) {
 		t.FromInts(s)
 	}
 

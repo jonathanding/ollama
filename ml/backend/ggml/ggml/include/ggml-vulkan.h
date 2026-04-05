@@ -32,9 +32,9 @@ struct ggml_vk_op_timing {
     float        gpu_time_us; // GPU execution time in microseconds
 };
 
-GGML_API void ggml_vk_enable_timestamps(ggml_backend_t backend, bool enable);
+void ggml_vk_enable_timestamps(ggml_backend_t backend, bool enable);
 
-GGML_API struct ggml_vk_op_timing * ggml_vk_get_op_timings(
+struct ggml_vk_op_timing * ggml_vk_get_op_timings(
     ggml_backend_t backend, int * n_timings);
 
 #ifdef  __cplusplus
