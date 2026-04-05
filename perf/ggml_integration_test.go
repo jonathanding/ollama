@@ -30,7 +30,7 @@ func TestGGML_MeasureOp_SILU(t *testing.T) {
 	defer backend.Close()
 
 	cfg := BenchmarkConfig{WarmupReps: 2, MeasureReps: 10, TrimPercent: 0.1}
-	pt := measureOp(backend, "SILU", []int64{65536}, "f32", cfg)
+	pt := measureOp(backend, "SILU", []int64{65536}, "f32", cfg, -1)
 
 	assert.Greater(t, pt.LatencyUs, 0.0, "SILU should have measurable latency")
 	assert.Greater(t, pt.Reps, 0)
@@ -45,7 +45,7 @@ func TestGGML_MeasureOp_SILU_Monotonic(t *testing.T) {
 	sizes := []int64{1024, 16384, 262144, 4194304}
 	var prev float64
 	for _, N := range sizes {
-		pt := measureOp(backend, "SILU", []int64{N}, "f32", cfg)
+		pt := measureOp(backend, "SILU", []int64{N}, "f32", cfg, -1)
 		t.Logf("SILU N=%d: %.2f us", N, pt.LatencyUs)
 		// Sanity check: ensure we got a valid measurement
 		if pt.LatencyUs <= 0 {
@@ -65,7 +65,7 @@ func TestGGML_MeasureOp_MulMat(t *testing.T) {
 	defer backend.Close()
 
 	cfg := BenchmarkConfig{WarmupReps: 2, MeasureReps: 10, TrimPercent: 0.1}
-	pt := measureOp(backend, "MUL_MAT", []int64{4096, 4096, 1}, "f16", cfg)
+	pt := measureOp(backend, "MUL_MAT", []int64{4096, 4096, 1}, "f16", cfg, -1)
 
 	assert.Greater(t, pt.LatencyUs, 0.0)
 	t.Logf("MUL_MAT [4096,4096,1] f16: %.2f us", pt.LatencyUs)
@@ -81,7 +81,7 @@ func TestGGML_AdaptiveSample_SILU(t *testing.T) {
 	}
 
 	measure := func(shape []int64) LatencyPoint {
-		return measureOp(backend, "SILU", shape, "f32", cfg)
+		return measureOp(backend, "SILU", shape, "f32", cfg, -1)
 	}
 
 	points := AdaptiveSample1D(measure, 1024, 16*1024*1024, 6, cfg)

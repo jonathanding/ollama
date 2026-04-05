@@ -321,12 +321,12 @@ func TestCountGrids_AllOps(t *testing.T) {
 	dtypes := []string{"f32", "f16", "q4_0", "q8_0"}
 	count := countGrids(ops, dtypes)
 	// MUL_MAT: 4 (one per weight dtype)
-	// MUL_MAT_ADD: 4 (one per weight dtype, same as MUL_MAT)
+	// Fused ops (RMS_NORM_MUL, RMS_NORM_MUL_ROPE, MUL_MAT_ADD): skipped (handled in Step 3)
 	// FLASH_ATTN_EXT: 1 (f16 only)
-	// All other ops: 1 each (f32 only, 1D)
-	numMatMulOps := 2 // MUL_MAT and MUL_MAT_ADD
-	numOtherOps := len(ops) - numMatMulOps - 1 // minus MUL_MAT, MUL_MAT_ADD, FLASH_ATTN_EXT
-	expected := numOtherOps + numMatMulOps*len(Phase1Dtypes()) + 1
+	// All other 1D ops: 1 each (f32 only)
+	numFusedOps := 3 // RMS_NORM_MUL, RMS_NORM_MUL_ROPE, MUL_MAT_ADD
+	numOtherOps := len(ops) - numFusedOps - 1 - 1 // minus fused, MUL_MAT, FLASH_ATTN_EXT
+	expected := numOtherOps + len(Phase1Dtypes()) + 1 // 1D ops + MUL_MAT + FLASH_ATTN
 	assert.Equal(t, expected, count)
 }
 
@@ -340,4 +340,90 @@ func TestCountGrids_SubsetOps(t *testing.T) {
 
 	count = countGrids([]string{"SILU", "ADD", "MUL_MAT"}, dtypes)
 	assert.Equal(t, 6, count, "2 × 1D + 4 MUL_MAT = 6")
+}
+
+// --- Direct backend measurement tests ---
+
+func TestMeasureOpGPU_ReturnsGPUTimings(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 5
+	cfg.MinReps = 3
+	pt := measureOpGPU(backend, "ADD", []int64{65536}, "f32", cfg)
+	assert.Greater(t, pt.LatencyUs, 0.0, "GPU-measured latency should be positive")
+	assert.Greater(t, pt.Reps, 0, "should have measured at least 1 rep")
+}
+
+func TestMeasureOpForBackend_GPUDispatch(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 5
+	cfg.MinReps = 3
+	// Use large shape to ensure measurable wall-clock time even on CPU
+	pt := measureOpForBackend(backend, caps, "ADD", []int64{4 * 1024 * 1024}, "f32", cfg)
+	assert.Greater(t, pt.LatencyUs, 0.0, "latency should be positive")
+	assert.Greater(t, pt.Reps, 0, "should have measured at least 1 rep")
+}
+
+func TestMeasureOpGPU_FallbackToWallClock(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if caps.HasGPUTimestamp {
+		t.Skip("this test is for backends WITHOUT GPU timestamps (CPU-only)")
+	}
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 5
+	cfg.MinReps = 3
+	// Use large shape to ensure measurable wall-clock time on CPU
+	pt := measureOpForBackend(backend, caps, "ADD", []int64{4 * 1024 * 1024}, "f32", cfg)
+	assert.Greater(t, pt.LatencyUs, 0.0, "wall-clock fallback should still produce positive latency")
+	assert.Greater(t, pt.Reps, 0, "should have measured at least 1 rep")
+}
+
+func TestMeasureOp_SchedulerPath(t *testing.T) {
+	backend := setupBenchBackend(t)
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 5
+	cfg.MinReps = 3
+	// Use large shape to ensure measurable wall-clock time even on CPU
+	pt := measureOp(backend, "ADD", []int64{4 * 1024 * 1024}, "f32", cfg, -1)
+	assert.Greater(t, pt.LatencyUs, 0.0, "scheduler path should produce positive latency")
+	ptDirect := measureOp(backend, "ADD", []int64{4 * 1024 * 1024}, "f32", cfg, 0)
+	assert.Greater(t, ptDirect.LatencyUs, 0.0, "direct path should produce positive latency")
+	t.Logf("scheduler latency: %.1f us, direct latency: %.1f us", pt.LatencyUs, ptDirect.LatencyUs)
+}
+
+func TestMeasureOpGPU_MulMatVec(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 5
+	cfg.MinReps = 3
+	pt := measureOpGPU(backend, "MUL_MAT", []int64{256, 256, 1}, "f32", cfg)
+	assert.Greater(t, pt.LatencyUs, 0.0, "MUL_MAT_VEC should produce positive GPU latency")
+	t.Logf("MUL_MAT_VEC (256x256, N=1) GPU latency: %.1f us", pt.LatencyUs)
+}
+
+func TestMeasureOpGPU_ConvergenceEarlyExit(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+	cfg := DefaultBenchmarkConfig()
+	cfg.MeasureReps = 50
+	cfg.MinReps = 3
+	cfg.ConvergenceCV = 0.5
+	pt := measureOpGPU(backend, "ADD", []int64{65536}, "f32", cfg)
+	assert.Greater(t, pt.LatencyUs, 0.0, "should produce positive latency")
+	assert.Less(t, pt.Reps, 50, "should converge before max reps with lenient CV")
+	t.Logf("converged in %d reps, latency: %.1f ± %.1f us", pt.Reps, pt.LatencyUs, pt.StddevUs)
 }

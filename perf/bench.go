@@ -48,9 +48,9 @@ func buildSamplingGrids(op, computeDtype, weightDtype string) []SamplingGridWith
 	}
 }
 
-// measureOp benchmarks an operator at one shape point using the GGML backend.
-// It creates tensors, runs warmup+measurement, trims outliers, and returns the median latency.
-func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype string, cfg BenchmarkConfig) LatencyPoint {
+// measureOp benchmarks an operator at one shape point using wall-clock timing.
+// backendIdx specifies which backend to execute on (-1 = use scheduler).
+func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype string, cfg BenchmarkConfig, backendIdx int) LatencyPoint {
 	runner, ok := LookupRegistry(op)
 	if !ok {
 		slog.Warn("unknown op in registry", "op", op)
@@ -90,10 +90,16 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 	}
 	ctx.Forward(out)
 
+	// Choose compute function based on backendIdx
+	compute := func() { ctx.Compute(out) }
+	if backendIdx >= 0 {
+		compute = func() { ctx.ComputeOnBackend(backendIdx, out) }
+	}
+
 	// Adaptive warmup: reduce for slow ops to avoid wasting minutes
 	warmupStart := time.Now()
 	for i := 0; i < cfg.WarmupReps; i++ {
-		ctx.Compute(out)
+		compute()
 		// After first warmup, if it took >1s, reduce remaining warmups
 		if i == 0 {
 			elapsed := float64(time.Since(warmupStart).Microseconds())
@@ -102,7 +108,7 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 				break
 			} else if elapsed > 1e6 {
 				// >1s per op: 2 warmups total
-				ctx.Compute(out)
+				compute()
 				break
 			}
 		}
@@ -111,7 +117,7 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 	// Measure with convergence-based early stopping
 	med, sd, actualReps := convergentMeasure(func() float64 {
 		start := time.Now()
-		ctx.Compute(out)
+		compute()
 		return float64(time.Since(start).Microseconds())
 	}, cfg)
 
@@ -211,20 +217,20 @@ func measureOpGPU(backend ml.Backend, op string, gridPoint []int64, computeDtype
 	}
 	ctx.Forward(out)
 
-	// Warmup (2 iterations — GPU timestamps make warmup fast)
+	// Warmup — use direct backend execution
 	for range 2 {
-		ctx.Compute(out)
+		ctx.ComputeOnBackend(0, out)
 	}
 
 	// Measure using GPU timestamps
 	samples := make([]float64, 0, cfg.MeasureReps)
 	for i := 0; i < cfg.MeasureReps; i++ {
-		ctx.Compute(out)
+		ctx.ComputeOnBackend(0, out)
 		timings := backend.GetOpTimings()
 		if len(timings) == 0 {
-			slog.Warn("no GPU timings returned, falling back to wall-clock", "op", op)
-			// Fall back to wall-clock measurement for remaining iterations
-			return measureOp(backend, op, gridPoint, computeDtype, cfg)
+			slog.Warn("no GPU timings returned, falling back to wall-clock",
+				"op", op, "shape", gridPoint)
+			return measureOp(backend, op, gridPoint, computeDtype, cfg, 0)
 		}
 		// Sum all op timings in the graph
 		var gpuUs float64
@@ -266,12 +272,14 @@ func measureOpForBackend(backend ml.Backend, caps BackendCapabilities, op string
 	if caps.HasGPUTimestamp {
 		return measureOpGPU(backend, op, gridPoint, computeDtype, cfg)
 	}
-	return measureOp(backend, op, gridPoint, computeDtype, cfg)
+	return measureOp(backend, op, gridPoint, computeDtype, cfg, 0)
 }
 
 // benchOrchestrationOverhead measures CPU orchestration overhead for different graph sizes.
 // Builds N chained trivial ops (16-element ADD), GPU compute ≈ 0, wall-clock ≈ CPU overhead.
 // Used by estimate to add CPU-side cost to GPU op time sum.
+// IMPORTANT: This intentionally uses ctx.Compute (scheduler path) because we're measuring
+// the scheduler's dispatch overhead itself, not GPU kernel time.
 func benchOrchestrationOverhead(backend ml.Backend, cfg BenchmarkConfig) []LatencyPoint {
 	graphSizes := []int{50, 100, 200, 300, 500}
 	var points []LatencyPoint
@@ -324,13 +332,22 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 	benchStart := time.Now()
 
 	// Step 1: Hardware characterization
-	hwStart := time.Now()
-	hwResult, err := CharacterizeHardware(backend, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("hardware characterization: %w", err)
+	var hwProfile HardwareProfile
+	if cfg.SkipHWChar {
+		slog.Info("skipping hardware characterization (debug mode)")
+		hwProfile = HardwareProfile{
+			PeakTOPS:                 map[string]float64{"f16": 44e9, "f32": 44e9},
+			PeakBandwidthBytesPerSec: 38e9,
+		}
+	} else {
+		hwStart := time.Now()
+		hwResult, err := CharacterizeHardware(backend, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("hardware characterization: %w", err)
+		}
+		hwProfile = HWCharResultToHardwareProfile(hwResult, backend)
+		slog.Info("hardware characterization complete", "duration", time.Since(hwStart).Round(time.Second))
 	}
-	hwProfile := HWCharResultToHardwareProfile(hwResult, backend)
-	slog.Info("hardware characterization complete", "duration", time.Since(hwStart).Round(time.Second))
 
 	caps := DiscoverBackend(backend)
 	slog.Info("backend capabilities", "name", caps.Name,
@@ -352,8 +369,14 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 	calibrationStart := time.Now()
 	gridIdx := 0
 
+	// Fused ops are benchmarked separately in Step 3 — skip them in the main loop
+	fusedOps := map[string]bool{"RMS_NORM_MUL": true, "RMS_NORM_MUL_ROPE": true, "MUL_MAT_ADD": true}
+
 	// Step 2: Benchmark each op
 	for _, op := range ops {
+		if fusedOps[op] {
+			continue
+		}
 		if op == "MUL_MAT" {
 			// MUL_MAT: one reference curve per weight dtype
 			for _, wdt := range Phase1Dtypes() {
@@ -386,11 +409,11 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 				profile.Operators = append(profile.Operators, refCurve)
 
 				// Extract per-dtype efficiency constants
-				peakTOPS := hwResult.PeakTOPS["f32"]
-				if tops, ok := hwResult.PeakTOPS[wdt]; ok {
+				peakTOPS := hwProfile.PeakTOPS["f32"]
+				if tops, ok := hwProfile.PeakTOPS[wdt]; ok {
 					peakTOPS = tops
 				}
-				eff := extractEfficiencyConstants(refPoints, 4096, 4096, peakTOPS, hwResult.PeakBW, wdt)
+				eff := extractEfficiencyConstants(refPoints, 4096, 4096, peakTOPS, hwProfile.PeakBandwidthBytesPerSec, wdt)
 				if profile.Hardware.EfficiencyConstants == nil {
 					profile.Hardware.EfficiencyConstants = make(map[string]OpEfficiency)
 				}
@@ -476,7 +499,7 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 	}
 
 	// Step 3: Benchmark fused ops (if backend supports fusion)
-	if len(caps.FusionRules) > 0 {
+	if len(caps.FusionRules) > 0 && !cfg.SkipHWChar {
 		fusedOps := []string{"RMS_NORM_MUL", "RMS_NORM_MUL_ROPE", "MUL_MAT_ADD"}
 		for _, fop := range fusedOps {
 			if _, ok := LookupRegistry(fop); !ok {
@@ -526,7 +549,7 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 	}
 
 	// Step 4: Benchmark orchestration overhead (GPU backends only)
-	if caps.HasGPUTimestamp {
+	if caps.HasGPUTimestamp && !cfg.SkipHWChar {
 		slog.Info("benchmarking orchestration overhead")
 		ohPoints := benchOrchestrationOverhead(backend, cfg)
 		if len(ohPoints) > 0 {
@@ -550,8 +573,13 @@ func RunBenchmark(backend ml.Backend, ops []string, dtypes []string, cfg Benchma
 // MUL_MAT counts as 1 (reference curve only), not 6×4=24.
 func countGrids(ops []string, dtypes []string) int {
 	total := 0
+	// Fused ops are benchmarked in Step 3, not counted here
+	fusedOps := map[string]bool{"RMS_NORM_MUL": true, "RMS_NORM_MUL_ROPE": true, "MUL_MAT_ADD": true}
 	for _, op := range ops {
-		if op == "MUL_MAT" || op == "MUL_MAT_ADD" {
+		if fusedOps[op] {
+			continue
+		}
+		if op == "MUL_MAT" {
 			total += len(Phase1Dtypes()) // one reference curve per weight dtype
 			continue
 		}
