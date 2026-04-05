@@ -29,6 +29,9 @@ type Backend interface {
 
 	// Enumerate the devices available for inference via this backend
 	BackendDevices() []DeviceInfo
+
+	EnableGPUTimestamps(enable bool)
+	GetOpTimings() []OpTiming
 }
 
 // BackendCacheConfig should be implemented by backends that need special output
@@ -118,6 +121,13 @@ type GraphNode struct {
 	InputShapes  [][]int64 // Shapes of input tensors (src[0..])
 }
 
+// OpTiming represents the GPU execution time for one operation in a computation graph.
+type OpTiming struct {
+	OpName    string
+	NodeIdx   int
+	GPUTimeUs float64
+}
+
 type Context interface {
 	Empty(dtype DType, shape ...int) Tensor
 	Zeros(dtype DType, shape ...int) Tensor
@@ -142,7 +152,14 @@ type Context interface {
 	// worst case graph to ensure all resources are available for
 	// for future inference.
 	Reserve()
-	GraphNodes() []GraphNode // Returns graph nodes captured during Reserve
+	GraphNodes() []GraphNode // Returns graph nodes captured during Reserve or PlanGraph
+
+	// PlanGraph runs the scheduler's graph splitting and backend assignment
+	// (including backend-specific graph_optimize/fusion) without allocating
+	// memory. Graph nodes are captured while backend assignments are valid,
+	// then the scheduler state is reset. Use this instead of Reserve when
+	// you only need graph structure with backend info (e.g., performance estimation).
+	PlanGraph()
 
 	MaxGraphNodes() int
 	Close()

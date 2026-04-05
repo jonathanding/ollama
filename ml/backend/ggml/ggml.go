@@ -8,6 +8,7 @@ package ggml
 // #include "ggml.h"
 // #include "ggml-cpu.h"
 // #include "ggml-backend.h"
+// #include "ggml-vulkan.h"
 import "C"
 
 import (
@@ -817,6 +818,39 @@ func (b *Backend) BackendDevices() []ml.DeviceInfo {
 	return deviceInfos
 }
 
+func (b *Backend) EnableGPUTimestamps(enable bool) {
+	for _, be := range b.schedBackends {
+		if C.ggml_backend_is_vk(be) {
+			C.ggml_vk_enable_timestamps(be, C.bool(enable))
+		}
+	}
+}
+
+func (b *Backend) GetOpTimings() []ml.OpTiming {
+	for _, be := range b.schedBackends {
+		if C.ggml_backend_is_vk(be) {
+			var nTimings C.int
+			timings := C.ggml_vk_get_op_timings(be, &nTimings)
+			if timings == nil || nTimings == 0 {
+				return nil
+			}
+			result := make([]ml.OpTiming, int(nTimings))
+			for i := 0; i < int(nTimings); i++ {
+				t := (*C.struct_ggml_vk_op_timing)(
+					unsafe.Pointer(uintptr(unsafe.Pointer(timings)) +
+						uintptr(i)*unsafe.Sizeof(*timings)))
+				result[i] = ml.OpTiming{
+					OpName:    C.GoString(t.op_name),
+					NodeIdx:   int(t.node_idx),
+					GPUTimeUs: float64(t.gpu_time_us),
+				}
+			}
+			return result
+		}
+	}
+	return nil
+}
+
 type Context struct {
 	b *Backend
 
@@ -954,6 +988,21 @@ func (c *Context) Reserve() {
 	}
 }
 
+func (c *Context) PlanGraph() {
+	if c.batchSize > 0 {
+		C.ggml_backend_sched_set_batch_size(c.b.sched, C.int(c.batchSize))
+	}
+
+	// split_graph: assigns backends to nodes + runs graph_optimize (fusion)
+	C.ggml_backend_sched_split_graph(c.b.sched, c.graph)
+
+	// Capture graph nodes while backend assignments are still valid
+	c.captureGraphNodes()
+
+	// Clean up scheduler state — no side effects on memory allocation
+	C.ggml_backend_sched_reset(c.b.sched)
+}
+
 func (c *Context) GraphNodes() []ml.GraphNode {
 	return c.graphNodes
 }
@@ -974,11 +1023,20 @@ func (c *Context) captureGraphNodes() {
 			int64(node.ne[2]), int64(node.ne[3]),
 		}
 
-		// Determine backend via ggml_backend_sched_get_tensor_backend (ggml-backend.h:337)
+		// Determine backend library name via ggml_backend_sched_get_tensor_backend.
+		// Use device props.library (e.g., "Vulkan") to match profile backend names,
+		// not ggml_backend_name which returns instance names (e.g., "Vulkan0").
 		backendName := "unknown"
 		backendPtr := C.ggml_backend_sched_get_tensor_backend(c.b.sched, node)
 		if backendPtr != nil {
-			backendName = C.GoString(C.ggml_backend_name(backendPtr))
+			dev := C.ggml_backend_get_device(backendPtr)
+			if dev != nil {
+				var props C.struct_ggml_backend_dev_props
+				C.ggml_backend_dev_get_props(dev, &props)
+				backendName = C.GoString(props.library)
+			} else {
+				backendName = C.GoString(C.ggml_backend_name(backendPtr))
+			}
 		}
 
 		// Collect input shapes
