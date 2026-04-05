@@ -123,6 +123,152 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 	}
 }
 
+// trimmedStats computes the trimmed median and standard deviation of a sample.
+// It sorts the values, removes the outermost trimPercent fraction from each tail,
+// then computes median and population stddev of the remaining values.
+func trimmedStats(values []float64, trimPercent float64) (median, stddev float64) {
+	if len(values) == 0 {
+		return 0, 0
+	}
+	sorted := make([]float64, len(values))
+	copy(sorted, values)
+	sort.Float64s(sorted)
+
+	trimCount := int(math.Round(float64(len(sorted)) * trimPercent))
+	if trimCount*2 >= len(sorted) {
+		trimCount = 0
+	}
+	trimmed := sorted[trimCount : len(sorted)-trimCount]
+	if len(trimmed) == 0 {
+		// Fallback: no trimming possible
+		trimmed = sorted
+	}
+
+	// Median
+	median = trimmed[len(trimmed)/2]
+
+	// Stddev (population)
+	if len(trimmed) <= 1 {
+		return median, 0
+	}
+	mean := 0.0
+	for _, v := range trimmed {
+		mean += v
+	}
+	mean /= float64(len(trimmed))
+	variance := 0.0
+	for _, v := range trimmed {
+		d := v - mean
+		variance += d * d
+	}
+	stddev = math.Sqrt(variance / float64(len(trimmed)))
+	return median, stddev
+}
+
+// measureOpGPU benchmarks an operator using GPU timestamps instead of wall-clock.
+// This eliminates Vulkan dispatch overhead from measurements.
+// Requires backend that implements EnableGPUTimestamps/GetOpTimings.
+func measureOpGPU(backend ml.Backend, op string, gridPoint []int64, computeDtype string, cfg BenchmarkConfig) LatencyPoint {
+	runner, ok := LookupRegistry(op)
+	if !ok {
+		slog.Warn("unknown op in registry", "op", op)
+		return LatencyPoint{Shape: gridPoint}
+	}
+
+	dt, ok := parseDType(computeDtype)
+	if !ok {
+		slog.Warn("unsupported dtype", "dtype", computeDtype)
+		return LatencyPoint{Shape: gridPoint}
+	}
+
+	backend.EnableGPUTimestamps(true)
+	defer backend.EnableGPUTimestamps(false)
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	// Create input tensors — use custom CreateInputs if provided, else default
+	var inputs []ml.Tensor
+	if runner.CreateInputs != nil {
+		inputs = runner.CreateInputs(ctx, computeDtype, gridPoint)
+	} else {
+		tensorShapes := expandShapes(op, gridPoint)
+		inputs = make([]ml.Tensor, len(tensorShapes))
+		for i, shape := range tensorShapes {
+			intShape := make([]int, len(shape))
+			for j, s := range shape {
+				intShape[j] = int(s)
+			}
+			inputs[i] = randomTensor(ctx, dt, intShape...)
+		}
+	}
+
+	// Build computation graph
+	out := runner.Run(ctx, inputs)
+	if out == nil {
+		slog.Warn("op runner returned nil", "op", op)
+		return LatencyPoint{Shape: gridPoint}
+	}
+	ctx.Forward(out)
+
+	// Warmup (2 iterations — GPU timestamps make warmup fast)
+	for range 2 {
+		ctx.Compute(out)
+	}
+
+	// Measure using GPU timestamps
+	samples := make([]float64, 0, cfg.MeasureReps)
+	for i := 0; i < cfg.MeasureReps; i++ {
+		ctx.Compute(out)
+		timings := backend.GetOpTimings()
+		if len(timings) == 0 {
+			slog.Warn("no GPU timings returned, falling back to wall-clock", "op", op)
+			// Fall back to wall-clock measurement for remaining iterations
+			return measureOp(backend, op, gridPoint, computeDtype, cfg)
+		}
+		// Sum all op timings in the graph
+		var gpuUs float64
+		for _, t := range timings {
+			gpuUs += t.GPUTimeUs
+		}
+		samples = append(samples, gpuUs)
+
+		// Early stopping with convergence check
+		if len(samples) >= cfg.MinReps {
+			med, sd := trimmedStats(samples, cfg.TrimPercent)
+			if med > 0 && sd/med < cfg.ConvergenceCV {
+				return LatencyPoint{
+					Shape:     gridPoint,
+					LatencyUs: med,
+					StddevUs:  sd,
+					Reps:      len(samples),
+				}
+			}
+		}
+	}
+
+	if len(samples) == 0 {
+		return LatencyPoint{Shape: gridPoint}
+	}
+
+	med, sd := trimmedStats(samples, cfg.TrimPercent)
+	return LatencyPoint{
+		Shape:     gridPoint,
+		LatencyUs: med,
+		StddevUs:  sd,
+		Reps:      len(samples),
+	}
+}
+
+// measureOpForBackend dispatches to GPU timestamp or wall-clock measurement
+// based on backend capabilities.
+func measureOpForBackend(backend ml.Backend, caps BackendCapabilities, op string, gridPoint []int64, computeDtype string, cfg BenchmarkConfig) LatencyPoint {
+	if caps.HasGPUTimestamp {
+		return measureOpGPU(backend, op, gridPoint, computeDtype, cfg)
+	}
+	return measureOp(backend, op, gridPoint, computeDtype, cfg)
+}
+
 // RunBenchmark executes the full v2 calibration pipeline:
 // 1. Hardware characterization (peak TOPS, BW)
 // 2. MUL_MAT: one reference curve + extract efficiency constants (roofline extrapolation)
