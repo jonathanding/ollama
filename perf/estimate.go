@@ -37,13 +37,14 @@ func nodeToQueryShape(node ml.GraphNode) (op string, shape []int64, computeDtype
 		return
 
 	case "FLASH_ATTN_EXT":
-		if len(node.InputShapes) >= 2 && len(node.InputShapes[0]) >= 3 && len(node.InputShapes[1]) >= 2 {
-			// GGML layout: Q ne=[head_dim, seqQ, num_heads, batch]
+		if len(node.InputShapes) >= 2 && len(node.InputShapes[0]) >= 3 && len(node.InputShapes[1]) >= 3 {
+			// GGML layout: Q ne=[head_dim, seqQ, num_q_heads, batch]
 			//              K ne=[head_dim, seqKV, num_kv_heads, batch]
 			seqQ := node.InputShapes[0][1]
 			seqKV := node.InputShapes[1][1]
-			numHeads := node.InputShapes[0][2]
-			shape = []int64{seqQ, seqKV, numHeads}
+			numQHeads := node.InputShapes[0][2]
+			numKVHeads := node.InputShapes[1][2]
+			shape = []int64{seqQ, seqKV, numQHeads, numKVHeads}
 			return
 		}
 		shape = []int64{totalElements(node.Shape)}

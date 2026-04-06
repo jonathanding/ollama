@@ -83,10 +83,11 @@ func TestNodeToQueryShape_FlashAttn(t *testing.T) {
 	}
 	op, shape, _, _ := nodeToQueryShape(node)
 	assert.Equal(t, "FLASH_ATTN_EXT", op)
-	require.Len(t, shape, 3)
+	require.Len(t, shape, 4)
 	assert.Equal(t, int64(1), shape[0])    // seq_q
 	assert.Equal(t, int64(2048), shape[1]) // seq_kv
-	assert.Equal(t, int64(32), shape[2])   // num_heads
+	assert.Equal(t, int64(32), shape[2])   // numQHeads
+	assert.Equal(t, int64(32), shape[3])   // numKVHeads
 }
 
 func TestNodeToQueryShape_FlashAttn_Prefill(t *testing.T) {
@@ -100,9 +101,11 @@ func TestNodeToQueryShape_FlashAttn_Prefill(t *testing.T) {
 		},
 	}
 	_, shape, _, _ := nodeToQueryShape(node)
+	require.Len(t, shape, 4)
 	assert.Equal(t, int64(512), shape[0])
 	assert.Equal(t, int64(512), shape[1])
-	assert.Equal(t, int64(32), shape[2]) // num_heads
+	assert.Equal(t, int64(32), shape[2]) // numQHeads
+	assert.Equal(t, int64(32), shape[3]) // numKVHeads
 }
 
 func TestNodeToQueryShape_UnknownOp(t *testing.T) {
@@ -303,14 +306,14 @@ func TestLookupLatency_MulMat_NoEfficiencyConstants(t *testing.T) {
 
 func TestLookupLatency_FlashAttn_Decode(t *testing.T) {
 	p := makeTestProfileForEstimation()
-	lat, err := lookupLatency(p, "FLASH_ATTN_EXT", []int64{1, 512, 32}, "f16", "", "cuda")
+	lat, err := lookupLatency(p, "FLASH_ATTN_EXT", []int64{1, 512, 32, 32}, "f16", "", "cuda")
 	require.NoError(t, err)
 	assert.InDelta(t, 15.0, lat, 0.5)
 }
 
 func TestLookupLatency_FlashAttn_Prefill(t *testing.T) {
 	p := makeTestProfileForEstimation()
-	lat, err := lookupLatency(p, "FLASH_ATTN_EXT", []int64{512, 512, 32}, "f16", "", "cuda")
+	lat, err := lookupLatency(p, "FLASH_ATTN_EXT", []int64{512, 512, 32, 32}, "f16", "", "cuda")
 	require.NoError(t, err)
 	assert.InDelta(t, 100.0, lat, 1.0)
 }
@@ -1104,10 +1107,11 @@ func TestNodeToQueryShape_FlashAttn_GQA(t *testing.T) {
 	}
 	op, shape, _, _ := nodeToQueryShape(node)
 	assert.Equal(t, "FLASH_ATTN_EXT", op)
-	require.Len(t, shape, 3)
+	require.Len(t, shape, 4)
 	assert.Equal(t, int64(130), shape[0], "seqQ should come from Q ne[1], not ne[2]")
 	assert.Equal(t, int64(256), shape[1], "seqKV should come from K ne[1], not ne[2]")
-	assert.Equal(t, int64(32), shape[2], "numHeads from Q tensor ne[2]")
+	assert.Equal(t, int64(32), shape[2], "numQHeads from Q tensor ne[2]")
+	assert.Equal(t, int64(8), shape[3], "numKVHeads from K tensor ne[2]")
 }
 
 func TestEstimatePhaseV3_FlashAttnScalesWithSeqLen(t *testing.T) {
@@ -1174,10 +1178,11 @@ func TestNodeToQueryShape_FlashAttn_NumHeads(t *testing.T) {
 	}
 	op, shape, _, _ := nodeToQueryShape(node)
 	assert.Equal(t, "FLASH_ATTN_EXT", op)
-	require.Len(t, shape, 3)
+	require.Len(t, shape, 4)
 	assert.Equal(t, int64(256), shape[0], "seqQ")
 	assert.Equal(t, int64(512), shape[1], "seqKV")
-	assert.Equal(t, int64(16), shape[2], "numHeads from Q tensor")
+	assert.Equal(t, int64(16), shape[2], "numQHeads from Q tensor")
+	assert.Equal(t, int64(4), shape[3], "numKVHeads from K tensor")
 }
 
 func TestLookupLatency_FlashAttn_MultiHead(t *testing.T) {
@@ -1206,11 +1211,52 @@ func TestLookupLatency_FlashAttn_MultiHead(t *testing.T) {
 		},
 	}
 	// Query with 16 heads — should interpolate between 8 and 32 head curves
-	lat, err := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 16}, "f16", "", "Vulkan")
+	lat, err := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 16, 16}, "f16", "", "Vulkan")
 	assert.NoError(t, err)
 
-	lat8, _ := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 8}, "f16", "", "Vulkan")
-	lat32, _ := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 32}, "f16", "", "Vulkan")
+	lat8, _ := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 8, 8}, "f16", "", "Vulkan")
+	lat32, _ := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 32, 32}, "f16", "", "Vulkan")
 	assert.Greater(t, lat, lat8)
 	assert.Less(t, lat, lat32)
+}
+
+func TestLookupLatency_FlashAttn_GQA(t *testing.T) {
+	makePoints := func(scale float64) []LatencyPoint {
+		return []LatencyPoint{
+			{Shape: []int64{1, 64}, LatencyUs: 1.0 * scale},
+			{Shape: []int64{1, 256}, LatencyUs: 2.0 * scale},
+			{Shape: []int64{1, 1024}, LatencyUs: 4.0 * scale},
+			{Shape: []int64{64, 64}, LatencyUs: 3.0 * scale},
+			{Shape: []int64{256, 256}, LatencyUs: 20.0 * scale},
+			{Shape: []int64{1024, 1024}, LatencyUs: 200.0 * scale},
+		}
+	}
+	profile := &Profile{
+		Operators: []OperatorCurve{
+			{
+				Op: "FLASH_ATTN_EXT", Backend: "Vulkan",
+				FixedDims: map[string]int64{"num_heads": 16, "num_kv_heads": 16},
+				Points:    makePoints(200.0),
+			},
+			{
+				Op: "FLASH_ATTN_EXT", Backend: "Vulkan",
+				FixedDims: map[string]int64{"num_heads": 16, "num_kv_heads": 4},
+				Points:    makePoints(80.0),
+			},
+		},
+	}
+	// GQA query (Q=16, KV=4) should match the second curve exactly
+	lat, err := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 16, 4}, "f16", "", "Vulkan")
+	require.NoError(t, err)
+	expected := InterpolateFlashAttn(&profile.Operators[1], 256, 256)
+	assert.InDelta(t, expected, lat, 1e-9)
+
+	// MHA query (Q=16, KV=16) should match the first curve
+	lat2, err := lookupLatency(profile, "FLASH_ATTN_EXT", []int64{256, 256, 16, 16}, "f16", "", "Vulkan")
+	require.NoError(t, err)
+	expected2 := InterpolateFlashAttn(&profile.Operators[0], 256, 256)
+	assert.InDelta(t, expected2, lat2, 1e-9)
+
+	// GQA < MHA for same Q heads
+	assert.Less(t, lat, lat2, "GQA (KV=4) should be less than MHA (KV=16)")
 }
