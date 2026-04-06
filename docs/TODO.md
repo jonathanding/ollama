@@ -66,6 +66,12 @@
 - [x] 合并两次 model.New() 为一次: EstimateModel 单次加载 (来源: 2026-04-05, 完成: 2026-04-06)
 - [ ] Server API 路径: daop-estimate 作为 server 内 API 时，直接复用已加载模型的 backend，零额外开销 (来源: 2026-04-05)
 
+**Phase 1I: FLASH_ATTN Accuracy**
+- [x] FLASH_ATTN benchmark: num_heads 网格化 — 从固定 32 头改为 {4, 8, 16, 32} 多头测量 + 插值 (来源: 2026-04-06, 完成: 2026-04-06)
+- [x] Estimate graph capture 参数化: inputLength 替代硬编码 512/2048 (来源: 2026-04-06, 完成: 2026-04-06)
+- [ ] FLASH_ATTN benchmark: GQA-specific 测量 — Q/K/V 不同头数对性能的影响 (来源: 2026-04-06)
+- [ ] Sliding window seqKV 修正: `capacity = max(inputLength, sliding_window)` 防止 KV cache 超估 (来源: 2026-04-06)
+
 **Phase 1H: Partial Offload Estimate**
 - [ ] partial offload 的 backend assignment: 支持部分层在 GPU、部分在 CPU 的 schedule (来源: 2026-04-05)
 - [ ] CPU↔GPU 数据搬运延迟建模: 跨 backend 的 tensor transfer overhead (来源: 2026-04-05)
