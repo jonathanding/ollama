@@ -279,10 +279,11 @@ func TestLookupLatency_MulMat_ScalesWithN(t *testing.T) {
 
 func TestLookupLatency_MulMat_DtypeMapping(t *testing.T) {
 	p := makeTestProfileForEstimation()
-	// q4_K should map to q4_0
-	lat, err := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_K", "cuda")
-	require.NoError(t, err)
-	assert.Greater(t, lat, 0.0, "q4_K should map to q4_0 and succeed")
+	// q4_K now passes through as identity (not mapped to q4_0).
+	// Without calibration data for q4_K, it should fail until fallback chain is added (Task 5).
+	_, err := lookupLatency(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_K", "cuda")
+	assert.Error(t, err, "q4_K should fail without calibration data (before Task 5 fallback)")
+	assert.Contains(t, err.Error(), "no efficiency constants")
 }
 
 func TestLookupLatency_MulMat_NoEfficiencyConstants(t *testing.T) {
