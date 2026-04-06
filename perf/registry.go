@@ -58,8 +58,12 @@ func randomTensor(ctx ml.Context, dt ml.DType, shape ...int) ml.Tensor {
 //
 // This implements the "two-phase data preparation" pattern:
 //
-//	Phase 1 (here): f32 random data → Cast to target dtype → ComputeOnBackend → Bytes()
+//	Phase 1 (here): f32 random data → Cast to target dtype → Compute → Bytes()
 //	Phase 2 (caller): FromBytes() creates a leaf tensor in the benchmark context
+//
+// Uses Compute (scheduler) instead of ComputeOnBackend so the scheduler can
+// route Cast to CPU when the GPU backend lacks a quantization kernel (e.g.
+// Vulkan does not support f32→q4_K Cast).
 func materializeTensor(backend ml.Backend, dt ml.DType, shape ...int) []byte {
 	prepCtx := backend.NewContext()
 	defer prepCtx.Close()
@@ -67,7 +71,7 @@ func materializeTensor(backend ml.Backend, dt ml.DType, shape ...int) []byte {
 	f32Tensor := randomTensor(prepCtx, ml.DTypeF32, shape...)
 	castTensor := f32Tensor.Cast(prepCtx, dt)
 	prepCtx.Forward(castTensor)
-	prepCtx.ComputeOnBackend(0, castTensor)
+	prepCtx.Compute(castTensor)
 	return castTensor.Bytes()
 }
 
