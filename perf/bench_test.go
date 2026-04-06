@@ -79,9 +79,17 @@ func TestBuildSamplingGrids_MulMat(t *testing.T) {
 
 func TestBuildSamplingGrids_FlashAttn(t *testing.T) {
 	grids := buildSamplingGrids("FLASH_ATTN_EXT", "f16", "")
-	require.Len(t, grids, 1, "FLASH_ATTN_EXT has one grid with fixed head_dim/num_heads")
-	assert.Equal(t, int64(32), grids[0].FixedDims["num_heads"])
-	assert.Equal(t, int64(128), grids[0].FixedDims["head_dim"])
+	expectedHeads := Phase1FlashAttnHeads()
+	require.Len(t, grids, len(expectedHeads), "FLASH_ATTN_EXT should have one grid per num_heads value")
+
+	for i, g := range grids {
+		assert.Equal(t, "FLASH_ATTN_EXT", g.Op)
+		assert.Equal(t, "f16", g.Dtype)
+		assert.Equal(t, expectedHeads[i], g.FixedDims["num_heads"],
+			"grid %d should have num_heads=%d", i, expectedHeads[i])
+		assert.Equal(t, int64(128), g.FixedDims["head_dim"],
+			"grid %d should have head_dim=128", i)
+	}
 }
 
 func TestSweepDimensions(t *testing.T) {

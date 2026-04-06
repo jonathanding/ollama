@@ -119,6 +119,29 @@ func TestExpandShapes_FlashAttn_Prefill(t *testing.T) {
 	assert.Equal(t, int64(512), shapes[2][2]) // V seq_kv
 }
 
+func TestExpandShapes_FlashAttn_NumHeads(t *testing.T) {
+	// 3-element gridPoint should use custom num_heads
+	shapes := expandShapes("FLASH_ATTN_EXT", []int64{1, 2048, 8})
+	require.Len(t, shapes, 3)
+	assert.Equal(t, []int64{128, 8, 1, 1}, shapes[0], "Q with num_heads=8")
+	assert.Equal(t, []int64{128, 8, 2048, 1}, shapes[1], "K with num_heads=8")
+	assert.Equal(t, []int64{128, 8, 2048, 1}, shapes[2], "V with num_heads=8")
+}
+
+func TestExpandShapes_FlashAttn_DefaultHeads(t *testing.T) {
+	// 2-element gridPoint should default to num_heads=32
+	shapes := expandShapes("FLASH_ATTN_EXT", []int64{1, 2048})
+	require.Len(t, shapes, 3)
+	assert.Equal(t, int64(32), shapes[0][1], "Q should default to 32 heads")
+	assert.Equal(t, int64(32), shapes[1][1], "K should default to 32 heads")
+	assert.Equal(t, int64(32), shapes[2][1], "V should default to 32 heads")
+}
+
+func TestPhase1FlashAttnHeads(t *testing.T) {
+	heads := Phase1FlashAttnHeads()
+	assert.Equal(t, []int64{4, 8, 16, 32}, heads)
+}
+
 func TestParseDType(t *testing.T) {
 	tests := []struct {
 		input string
