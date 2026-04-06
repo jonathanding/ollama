@@ -50,6 +50,26 @@ func randomTensor(ctx ml.Context, dt ml.DType, shape ...int) ml.Tensor {
 	return t
 }
 
+// materializeTensor creates quantized tensor data by executing a Cast op in a
+// separate prep context, then reading back the bytes to CPU. The returned bytes
+// can be passed to ctx.Input().FromBytes() to create a clean leaf tensor that
+// does not inject any Cast/CPY ops into the benchmark graph.
+//
+// This implements the "two-phase data preparation" pattern:
+//
+//	Phase 1 (here): f32 random data → Cast to target dtype → ComputeOnBackend → Bytes()
+//	Phase 2 (caller): FromBytes() creates a leaf tensor in the benchmark context
+func materializeTensor(backend ml.Backend, dt ml.DType, shape ...int) []byte {
+	prepCtx := backend.NewContext()
+	defer prepCtx.Close()
+
+	f32Tensor := randomTensor(prepCtx, ml.DTypeF32, shape...)
+	castTensor := f32Tensor.Cast(prepCtx, dt)
+	prepCtx.Forward(castTensor)
+	prepCtx.ComputeOnBackend(0, castTensor)
+	return castTensor.Bytes()
+}
+
 // opRegistry maps GGML op names to their benchmark definitions.
 // To add a new operator:
 //  1. Add an entry with Dimensions and Run (and optionally CreateInputs)

@@ -238,6 +238,104 @@ func TestComputeOnBackend_NumericalMulMat(t *testing.T) {
 
 // TestComputeOnBackend_RepeatedCallsPreserveData verifies that data is preserved
 // across multiple ComputeOnBackend calls (only first call triggers reallocation).
+func TestMaterializeTensor_Basic(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	// q4_0 block size is 32 elements — dimensions must be multiples of 32
+	bytes := materializeTensor(backend, ml.DTypeQ40, 64, 32)
+
+	require.NotNil(t, bytes, "should return non-nil bytes")
+	assert.Greater(t, len(bytes), 0, "should return non-empty bytes")
+	// q4_0: 32 elements per block, block = 2 bytes (f16 scale) + 16 bytes (data) = 18 bytes
+	// 64*32 = 2048 elements, 2048/32 = 64 blocks, 64 * 18 = 1152 bytes
+	assert.Equal(t, 1152, len(bytes), "byte count should match q4_0 format: 64*32 elements = 64 blocks * 18 bytes/block")
+}
+
+func TestMaterializeTensor_RoundTrip(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	// Materialize, then create leaf tensor from bytes and use it in a graph
+	weightBytes := materializeTensor(backend, ml.DTypeQ40, 64, 32)
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	// Create leaf tensor from materialized bytes — no Cast in graph
+	weight := ctx.Input().FromBytes(ml.DTypeQ40, weightBytes, 64, 32)
+	activation := randomTensor(ctx, ml.DTypeF32, 64, 1)
+	out := weight.Mulmat(ctx, activation)
+	ctx.Forward(out)
+
+	// Should compute without panic
+	require.NotPanics(t, func() {
+		ctx.ComputeOnBackend(0, out)
+	})
+
+	// Output shape should be [M=32, N=1] = 32 elements
+	result := out.Floats()
+	require.Len(t, result, 32, "MUL_MAT output should have M=32 elements")
+}
+
+func TestMaterializeTensor_MultipleDtypes(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	dtypes := []struct {
+		dt   ml.DType
+		name string
+	}{
+		{ml.DTypeF16, "f16"},
+		{ml.DTypeQ40, "q4_0"},
+		{ml.DTypeQ80, "q8_0"},
+	}
+
+	for _, tc := range dtypes {
+		t.Run(tc.name, func(t *testing.T) {
+			bytes := materializeTensor(backend, tc.dt, 64, 32)
+			require.NotNil(t, bytes, "%s should return non-nil bytes", tc.name)
+			assert.Greater(t, len(bytes), 0, "%s should return non-empty bytes", tc.name)
+		})
+	}
+}
+
+func TestMaterializeTensor_PrepContextDoesNotLeakIntoGraph(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+
+	// Materialize weight outside graph
+	weightBytes := materializeTensor(backend, ml.DTypeQ40, 256, 256)
+
+	// Build a benchmark graph using materialized bytes
+	backend.EnableGPUTimestamps(true)
+	defer backend.EnableGPUTimestamps(false)
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	weight := ctx.Input().FromBytes(ml.DTypeQ40, weightBytes, 256, 256)
+	activation := randomTensor(ctx, ml.DTypeF32, 256, 1)
+	out := weight.Mulmat(ctx, activation)
+	ctx.Forward(out)
+
+	// Warmup
+	ctx.ComputeOnBackend(0, out)
+	// Measure
+	ctx.ComputeOnBackend(0, out)
+	timings := backend.GetOpTimings()
+
+	require.NotEmpty(t, timings, "should have timing entries")
+	for _, timing := range timings {
+		assert.NotEqual(t, "CPY", timing.OpName,
+			"graph should not contain CPY ops from prep context — found CPY at node %d", timing.NodeIdx)
+	}
+	// Should only have MUL_MAT or MUL_MAT_VEC
+	assert.Len(t, timings, 1,
+		"graph should have exactly 1 op (MUL_MAT/MUL_MAT_VEC), got %d", len(timings))
+}
+
 func TestComputeOnBackend_RepeatedCallsPreserveData(t *testing.T) {
 	backend := setupBenchBackend(t)
 	ctx := backend.NewContext()
