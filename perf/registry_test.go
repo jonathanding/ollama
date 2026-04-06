@@ -3,6 +3,7 @@ package perf
 import (
 	"testing"
 
+	"github.com/ollama/ollama/ml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -127,8 +128,9 @@ func TestParseDType(t *testing.T) {
 		{"f16", true},
 		{"q4_0", true},
 		{"q8_0", true},
+		{"q4_K", true},
+		{"q6_K", true},
 		{"bf16", false},  // not supported in Phase 1
-		{"q4_K", false},  // no ml.DType constant
 		{"", false},
 	}
 	for _, tt := range tests {
@@ -147,12 +149,32 @@ func TestDtypeToString(t *testing.T) {
 	}
 }
 
+func TestParseDType_KQuants(t *testing.T) {
+	dt, ok := parseDType("q4_K")
+	assert.True(t, ok)
+	assert.Equal(t, ml.DTypeQ4K, dt)
+	assert.Equal(t, "q4_K", dtypeToString(dt))
+
+	dt, ok = parseDType("q6_K")
+	assert.True(t, ok)
+	assert.Equal(t, ml.DTypeQ6K, dt)
+	assert.Equal(t, "q6_K", dtypeToString(dt))
+}
+
+func TestPhase1Dtypes_IncludesKQuants(t *testing.T) {
+	dtypes := Phase1Dtypes()
+	assert.Contains(t, dtypes, "q4_K")
+	assert.Contains(t, dtypes, "q6_K")
+}
+
 func TestPhase1Dtypes(t *testing.T) {
 	dtypes := Phase1Dtypes()
 	assert.Contains(t, dtypes, "f32")
 	assert.Contains(t, dtypes, "f16")
 	assert.Contains(t, dtypes, "q4_0")
 	assert.Contains(t, dtypes, "q8_0")
+	assert.Contains(t, dtypes, "q4_K")
+	assert.Contains(t, dtypes, "q6_K")
 }
 
 func TestRandomFloat32Slice_Range(t *testing.T) {

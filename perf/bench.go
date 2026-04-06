@@ -595,10 +595,12 @@ func elemBytesFromDtype(dtype string) float64 {
 		return 4.0
 	case "f16":
 		return 2.0
-	case "q4_0":
-		return 18.0 / 32.0 // 18 bytes per 32-element block = 0.5625
+	case "q4_0", "q4_K":
+		return 18.0 / 32.0 // q4_0: 18B/32elem; q4_K: 144B/256elem; both = 0.5625 B/elem
 	case "q8_0":
 		return 34.0 / 32.0 // 34 bytes per 32-element block = 1.0625
+	case "q6_K":
+		return 210.0 / 256.0 // 210 bytes per 256-element super-block = 0.8203
 	default:
 		return 4.0
 	}

@@ -363,6 +363,10 @@ func parseDType(s string) (ml.DType, bool) {
 		return ml.DTypeQ40, true
 	case "q8_0":
 		return ml.DTypeQ80, true
+	case "q4_K":
+		return ml.DTypeQ4K, true
+	case "q6_K":
+		return ml.DTypeQ6K, true
 	default:
 		return 0, false
 	}
@@ -379,6 +383,10 @@ func dtypeToString(dt ml.DType) string {
 		return "q4_0"
 	case ml.DTypeQ80:
 		return "q8_0"
+	case ml.DTypeQ4K:
+		return "q4_K"
+	case ml.DTypeQ6K:
+		return "q6_K"
 	default:
 		return "unknown"
 	}
@@ -386,13 +394,13 @@ func dtypeToString(dt ml.DType) string {
 
 // Phase1Dtypes returns the dtypes supported in Phase 1 benchmarks.
 func Phase1Dtypes() []string {
-	return []string{"f32", "f16", "q4_0", "q8_0"}
+	return []string{"f32", "f16", "q4_0", "q8_0", "q4_K", "q6_K"}
 }
 
 // Phase1MulMatFixedDims returns the 3×3 log-spaced (M, K) grid for MUL_MAT benchmarks.
 // Grid values: {512, 2048, 8192} — factor of 4 between steps.
 // Covers any transformer architecture with dimensions in [512, 8192].
-// Total: 9 (M,K) pairs × 4 dtypes × 3 N values = 108 measurements.
+// Total: 9 (M,K) pairs × 6 dtypes × 3 N values = 162 measurements.
 func Phase1MulMatFixedDims() [][2]int64 {
 	gridValues := []int64{512, 2048, 8192}
 	var pairs [][2]int64

@@ -472,7 +472,7 @@ func TestPlanStepCount_SubsetOps(t *testing.T) {
 			refCount++
 		}
 	}
-	assert.Equal(t, 36, refCount, "MUL_MAT -> 4 dtypes × 9 (M,K) pairs = 36 ref curves")
+	assert.Equal(t, 54, refCount, "MUL_MAT -> 6 dtypes × 9 (M,K) pairs = 54 ref curves")
 }
 
 // --- Direct backend measurement tests ---
