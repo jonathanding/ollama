@@ -34,6 +34,12 @@ func AdaptiveSample1D(measure MeasureFunc, shapeMin, shapeMax int64, nInitial in
 		pt := measure([]int64{N})
 		points = append(points, pt)
 		slog.Info("sample", "point", i+1, "of", nInitial, "N", N, "latency_us", pt.LatencyUs)
+
+		if cfg.MaxLatencyUs > 0 && pt.LatencyUs > cfg.MaxLatencyUs {
+			slog.Warn("latency exceeds safety threshold, skipping larger sizes",
+				"N", N, "latency_us", pt.LatencyUs, "max_latency_us", cfg.MaxLatencyUs)
+			break
+		}
 	}
 
 	// Step 2: Adaptive refinement — one measurement per round
@@ -52,6 +58,13 @@ func AdaptiveSample1D(measure MeasureFunc, shapeMin, shapeMax int64, nInitial in
 			break
 		}
 		midPt := measure([]int64{midN})
+
+		if cfg.MaxLatencyUs > 0 && midPt.LatencyUs > cfg.MaxLatencyUs {
+			slog.Warn("refinement point exceeds safety threshold, stopping",
+				"N", midN, "latency_us", midPt.LatencyUs, "max_latency_us", cfg.MaxLatencyUs)
+			points = insertSorted(points, midPt)
+			break
+		}
 
 		// Compute actual interpolation error at the measured midpoint
 		err := interpolationError(points[splitIdx], points[splitIdx+1], midPt)

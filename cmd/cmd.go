@@ -2084,7 +2084,12 @@ func daopBenchHandler(cmd *cobra.Command, args []string) error {
 		return perf.RunViewerCLI(perf.ViewerCLIOptions{})
 	}
 
-	backend, err := ml.NewBackendForBench(ml.BackendParams{AllocMemory: true})
+	// Flash attention setting follows OLLAMA_FLASH_ATTENTION env var (matching serve).
+	// Default: enabled, to measure the same kernel paths as actual inference.
+	fa := perf.FlashAttentionFromEnv(ml.FlashAttentionEnabled)
+	slog.Info("bench flash attention", "setting", fa)
+
+	backend, err := ml.NewBackendForBench(ml.BackendParams{AllocMemory: true, FlashAttention: fa})
 	if err != nil {
 		return fmt.Errorf("no compute backend available: %w", err)
 	}
@@ -2380,6 +2385,28 @@ func NewCLI() *cobra.Command {
 	daopBenchCmd.Flags().Bool("skip-hwchar", false, "Skip hardware characterization (peak TOPS, bandwidth)")
 
 
+	daopFlashInvestigateCmd := &cobra.Command{
+		Use:   "daop-flash-investigate",
+		Short: "Investigate FLASH_ATTN benchmark vs actual inference gap",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			flash, _ := cmd.Flags().GetBool("flash")
+			params := ml.BackendParams{AllocMemory: true}
+			if flash {
+				params.FlashAttention = ml.FlashAttentionEnabled
+			}
+			backend, err := ml.NewBackendForBench(params)
+			if err != nil {
+				return fmt.Errorf("no compute backend available: %w", err)
+			}
+			defer backend.Close()
+			if flash {
+				return perf.RunFlashAttnInvestigateFlash(backend)
+			}
+			return perf.RunFlashAttnInvestigate(backend)
+		},
+	}
+	daopFlashInvestigateCmd.Flags().Bool("flash", false, "Enable flash attention (fused kernel path)")
+
 	daopEstimateCmd := &cobra.Command{
 		Use:   "daop-estimate MODEL [flags]",
 		Short: "Estimate LLM inference performance before loading",
@@ -2411,6 +2438,7 @@ func NewCLI() *cobra.Command {
 		deleteCmd,
 		runnerCmd,
 		daopBenchCmd,
+		daopFlashInvestigateCmd,
 		daopEstimateCmd,
 		launch.LaunchCmd(checkServerHeartbeat, runInteractiveTUI),
 	)

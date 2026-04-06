@@ -13,11 +13,12 @@
   .controls { margin: 15px 0; display: flex; gap: 15px; align-items: center; }
   .controls button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #fff; }
   .controls button.active { background: #007bff; color: #fff; border-color: #007bff; }
-  .chart-card { background: #fff; border-radius: 8px; padding: 15px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-  .hw-info { background: #fff; border-radius: 8px; padding: 15px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-  .hw-info table { border-collapse: collapse; }
-  .hw-info td { padding: 4px 12px 4px 0; }
-  .hw-info td:first-child { font-weight: 600; color: #555; }
+  #charts-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 12px; }
+  .chart-card { background: #fff; border-radius: 8px; padding: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .hw-info { background: #fff; border-radius: 8px; padding: 8px 15px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13px; }
+  .hw-info .hw-item { white-space: nowrap; }
+  .hw-info .hw-label { font-weight: 600; color: #555; }
+  .hw-info .hw-val { color: #333; }
 </style>
 </head>
 <body>
@@ -52,22 +53,21 @@ function init() {
 function renderHWInfo() {
   const hw = PROFILE_DATA.hardware;
   if (!hw) return;
-  let html = '<table>';
+  const items = [];
   if (hw.backends) {
     hw.backends.forEach(b => {
-      html += `<tr><td>Backend</td><td>${escapeHtml(b.name)} (${escapeHtml(b.device)})</td></tr>`;
+      items.push(`<span class="hw-item"><span class="hw-label">Backend:</span> <span class="hw-val">${escapeHtml(b.name)} (${escapeHtml(b.device)})</span></span>`);
     });
   }
   if (hw.peak_tops) {
     Object.entries(hw.peak_tops).forEach(([dt, v]) => {
-      html += `<tr><td>Peak TOPS (${dt})</td><td>${formatSI(v, 'OPS')}</td></tr>`;
+      items.push(`<span class="hw-item"><span class="hw-label">${dt}:</span> <span class="hw-val">${formatSI(v, 'OPS')}</span></span>`);
     });
   }
   if (hw.peak_bandwidth_bytes_sec) {
-    html += `<tr><td>Peak BW</td><td>${formatSI(hw.peak_bandwidth_bytes_sec, 'B/s')}</td></tr>`;
+    items.push(`<span class="hw-item"><span class="hw-label">BW:</span> <span class="hw-val">${formatSI(hw.peak_bandwidth_bytes_sec, 'B/s')}</span></span>`);
   }
-  html += '</table>';
-  document.getElementById('hw-info').innerHTML = html;
+  document.getElementById('hw-info').innerHTML = items.join('');
 }
 
 function renderAllCharts() {
@@ -135,8 +135,9 @@ function renderOpChart(divId, op, curves) {
     xaxis: { title: xLabel, type: currentScale },
     yaxis: { title: 'Latency (us)', type: currentScale },
     hovermode: 'closest',
-    height: 450,
-    margin: { t: 40, b: 50 },
+    height: 280,
+    margin: { t: 30, b: 40, l: 50, r: 10 },
+    legend: { font: { size: 10 }, orientation: 'h', y: -0.25 },
   };
 
   Plotly.newPlot(divId, traces, layout, {responsive: true});

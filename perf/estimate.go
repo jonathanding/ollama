@@ -322,7 +322,6 @@ func lookupLatencyV3(profile *Profile, op string, shape []int64,
 		}
 		M, K, N := shape[0], shape[1], shape[2]
 		mappedWdt := mapWeightDtype(weightDtype)
-
 		// Primary: direct interpolation from reference curves
 		lat := PredictMulMatDirect(profile, M, K, N, mappedWdt)
 		if lat > 0 {

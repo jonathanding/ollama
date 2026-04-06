@@ -92,3 +92,4 @@ Do not use conventional commit prefixes (feat:, fix:, chore:).
   - 代码引用需标注来源（Ollama Go 还是 llama.cpp C++）
   - Mermaid 图中用颜色区分代码归属：🟢 绿色粗边框 (`stroke:#22c55e,stroke-width:3px`) = Ollama Go，🟠 橙色粗边框 (`stroke:#f97316,stroke-width:3px`) = llama.cpp C/C++，subgraph 用同色虚线边框。每张图顶部加图例
 - **`docs/TODO.md`** - 存放未来要做的工作。格式：`- [ ] 描述 (来源: YYYY-MM-DD)`
+- **`docs/daop/how-to-run-actual-inference.md`** - 如何运行实际推理并采集 per-op GPU 计时的完整流程。包含环境变量 (`OLLAMA_VULKAN=1`, `GGML_VK_PERF_LOGGER=1`, `OLLAMA_FLASH_ATTENTION=1`)、API 调用方式、输出格式解析。**重要**：每次运行需修改 prompt 首字符以避免 prefix cache 命中

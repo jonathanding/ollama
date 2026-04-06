@@ -661,6 +661,7 @@ func NewForBench(params ml.BackendParams) (ml.Backend, error) {
 		schedBufts:     schedBufts,
 		input:          inputBuft,
 		maxGraphNodes:  maxGraphNodes,
+		flashAttention: params.FlashAttention,
 		requiredMemory: &requiredMemory,
 		btDeviceMemory: btDeviceMemory,
 		tensors:        make(map[string]*C.struct_ggml_tensor),

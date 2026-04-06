@@ -69,8 +69,13 @@
 **Phase 1I: FLASH_ATTN Accuracy**
 - [x] FLASH_ATTN benchmark: num_heads 网格化 — 从固定 32 头改为 {4, 8, 16, 32} 多头测量 + 插值 (来源: 2026-04-06, 完成: 2026-04-06)
 - [x] Estimate graph capture 参数化: inputLength 替代硬编码 512/2048 (来源: 2026-04-06, 完成: 2026-04-06)
-- [ ] FLASH_ATTN benchmark: GQA-specific 测量 — Q/K/V 不同头数对性能的影响 (来源: 2026-04-06)
+- [x] [HIGH] NewForBench 未传递 FlashAttention 参数: benchmark 走分解路径(3K us)而非 fused kernel(80K us)，导致 FLASH_ATTN 估计偏差 12-23x。修复: `flashAttention: params.FlashAttention` (来源: 2026-04-06, 完成: 2026-04-06)
+- [ ] [HIGH] Bench/Estimate 环境与 serve 对齐: bench 和 estimate 都应匹配 serve 时的 FlashAttention 设置，确保测量行为与实际推理一致 (来源: 2026-04-06)
+- [x] FLASH_ATTN benchmark: GQA-specific 测量 — Q/K/V 不同头数对性能的影响。10 条 GQA 曲线 (Q,KV)∈{4,8,16,32}×{4,8,16,32}。Decode 从 0.16x → 1.20x (来源: 2026-04-06, 完成: 2026-04-06)
+- [ ] [HIGH] FLASH_ATTN prefill blend 逻辑: InterpolateFlashAttn 对 seqQ≠seqKV 的非方阵查询高估 2.08x。prefill 曲线只有 [n,n] 方阵数据点，但用 seqKV 插值得到 [512,512] 延迟而非 [300,512]。GPU 对 masked padding 做了优化，实际计算量接近 seqQ (来源: 2026-04-06)
+- [ ] MUL_MAT benchmark vs inference 3x gap: 单 op benchmark 达 108% peak TOPS (1514 GFLOPS)，inference 只有 29% (406 GFLOPS)。Roofline 分析确认即使无 L2 cache 也是 compute-bound，gap 不能用 memory bandwidth 解释。可能原因: Vulkan dispatch 调度、GPU occupancy 退化、peak 校准偏差 (来源: 2026-04-06)
 - [ ] Sliding window seqKV 修正: `capacity = max(inputLength, sliding_window)` 防止 KV cache 超估 (来源: 2026-04-06)
+- [ ] Intel Arc Vulkan fused flash attention 性能异常: `ggml_flash_attn_ext` fused kernel 比分解路径(MulmatFullPrec+softmax+Mulmat)慢 23x (80K vs 3.4K us)。Vulkan shader 未针对 Intel Arc 优化，用户开启 OLLAMA_FLASH_ATTENTION 反而降低性能。需调查是否为 Vulkan 通病或 Intel 特有 (来源: 2026-04-06)
 
 **Phase 1H: Partial Offload Estimate**
 - [ ] partial offload 的 backend assignment: 支持部分层在 GPU、部分在 CPU 的 schedule (来源: 2026-04-05)

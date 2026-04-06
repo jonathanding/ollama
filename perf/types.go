@@ -113,6 +113,7 @@ type BenchmarkConfig struct {
 	ConvergenceCV  float64 // CV threshold for early stopping (0.05 = 5%)
 	MinReps        int     // minimum reps before checking convergence
 	SkipHWChar     bool    // skip hardware characterization (peak TOPS, bandwidth)
+	MaxLatencyUs   float64 // stop sampling larger sizes if latency exceeds this (0 = no limit)
 }
 
 // DefaultBenchmarkConfig returns sensible defaults for production benchmarking.
@@ -125,6 +126,7 @@ func DefaultBenchmarkConfig() BenchmarkConfig {
 		MaxPointsPerOp: 20,
 		ConvergenceCV:  0.05,
 		MinReps:        5,
+		MaxLatencyUs:   500_000, // 500ms — next point ~2-3x larger stays under GPU TDR timeout (~2s)
 	}
 }
 
