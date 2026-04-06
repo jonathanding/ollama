@@ -540,6 +540,108 @@ func TestInterpolateMulMat_Extrapolation(t *testing.T) {
 	assert.Less(t, latInside, 1000.0, "inside grid should be < largest curve")
 }
 
+// --- Helper for multi-head flash_attn tests ---
+
+func makeDecodePrefillPoints(scale float64) []LatencyPoint {
+	return []LatencyPoint{
+		{Shape: []int64{1, 64}, LatencyUs: 1.0 * scale},
+		{Shape: []int64{1, 256}, LatencyUs: 2.0 * scale},
+		{Shape: []int64{1, 1024}, LatencyUs: 4.0 * scale},
+		{Shape: []int64{64, 64}, LatencyUs: 3.0 * scale},
+		{Shape: []int64{256, 256}, LatencyUs: 20.0 * scale},
+		{Shape: []int64{1024, 1024}, LatencyUs: 200.0 * scale},
+	}
+}
+
+// --- Part 4e: InterpolateFlashAttnMultiHead tests ---
+
+func TestInterpolateFlashAttnMultiHead_ExactMatch(t *testing.T) {
+	curves := []OperatorCurve{
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 8},
+			Points:    makeDecodePrefillPoints(1.0),
+		},
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 16},
+			Points:    makeDecodePrefillPoints(2.0),
+		},
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 32},
+			Points:    makeDecodePrefillPoints(4.0),
+		},
+	}
+
+	// Query at num_heads=16 should exactly match the 16-head curve
+	result := InterpolateFlashAttnMultiHead(curves, 1, 256, 16)
+	expected := InterpolateFlashAttn(&curves[1], 1, 256)
+	assert.InDelta(t, expected, result, 1e-9)
+}
+
+func TestInterpolateFlashAttnMultiHead_Interpolation(t *testing.T) {
+	curves := []OperatorCurve{
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 8},
+			Points:    makeDecodePrefillPoints(1.0),
+		},
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 32},
+			Points:    makeDecodePrefillPoints(4.0),
+		},
+	}
+
+	// Query at num_heads=16 (between 8 and 32) should blend
+	result := InterpolateFlashAttnMultiHead(curves, 1, 256, 16)
+	lat8 := InterpolateFlashAttn(&curves[0], 1, 256)
+	lat32 := InterpolateFlashAttn(&curves[1], 1, 256)
+	assert.Greater(t, result, lat8, "should be > 8-head result")
+	assert.Less(t, result, lat32, "should be < 32-head result")
+}
+
+func TestInterpolateFlashAttnMultiHead_SingleCurve(t *testing.T) {
+	curves := []OperatorCurve{
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 32},
+			Points:    makeDecodePrefillPoints(4.0),
+		},
+	}
+
+	// Single curve: should return that curve's result regardless of query num_heads
+	result := InterpolateFlashAttnMultiHead(curves, 1, 256, 16)
+	expected := InterpolateFlashAttn(&curves[0], 1, 256)
+	assert.InDelta(t, expected, result, 1e-9)
+}
+
+func TestInterpolateFlashAttnMultiHead_Extrapolation(t *testing.T) {
+	curves := []OperatorCurve{
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 8},
+			Points:    makeDecodePrefillPoints(1.0),
+		},
+		{
+			Op: "flash_attn", Dimensions: []string{"SeqQ", "SeqKV"},
+			FixedDims: map[string]int64{"num_heads": 16},
+			Points:    makeDecodePrefillPoints(2.0),
+		},
+	}
+
+	// Query at num_heads=32 (outside grid), latency scales up with num_heads
+	result := InterpolateFlashAttnMultiHead(curves, 1, 256, 32)
+	lat16 := InterpolateFlashAttn(&curves[1], 1, 256)
+	assert.Greater(t, result, lat16, "extrapolation beyond grid should exceed nearest curve")
+}
+
+func TestInterpolateFlashAttnMultiHead_Empty(t *testing.T) {
+	result := InterpolateFlashAttnMultiHead(nil, 1, 256, 16)
+	assert.Equal(t, 0.0, result)
+}
+
 func TestInterpolateFlashAttn_BlendMonotonicity(t *testing.T) {
 	curve := makeFlashAttnCurve(
 		[]int64{128, 256, 512},

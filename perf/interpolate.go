@@ -222,6 +222,85 @@ func scaleMulMatLatency(nearestLat float64, nearest *OperatorCurve, queryM, quer
 	return nearestLat * scaleFactor
 }
 
+// InterpolateFlashAttnMultiHead interpolates flash_attn latency across multiple
+// num_heads curves using inverse distance weighting in log-num_heads space.
+// Each curve has a FixedDims["num_heads"] value and contains decode/prefill points.
+// Falls back to single-curve InterpolateFlashAttn when only one curve is available.
+func InterpolateFlashAttnMultiHead(curves []OperatorCurve, querySeqQ, querySeqKV, queryNumHeads int64) float64 {
+	if len(curves) == 0 {
+		return 0
+	}
+	if len(curves) == 1 {
+		return InterpolateFlashAttn(&curves[0], querySeqQ, querySeqKV)
+	}
+
+	type candidate struct {
+		curve   *OperatorCurve
+		logDist float64
+	}
+
+	logQ := math.Log(float64(queryNumHeads))
+	var candidates []candidate
+	for i := range curves {
+		nh := curves[i].FixedDims["num_heads"]
+		if nh <= 0 {
+			continue
+		}
+		dist := math.Abs(logQ - math.Log(float64(nh)))
+		candidates = append(candidates, candidate{&curves[i], dist})
+	}
+
+	if len(candidates) == 0 {
+		return 0
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].logDist < candidates[j].logDist
+	})
+
+	// Exact match
+	if candidates[0].logDist == 0 {
+		return InterpolateFlashAttn(candidates[0].curve, querySeqQ, querySeqKV)
+	}
+
+	// Single candidate after filtering
+	if len(candidates) == 1 {
+		return InterpolateFlashAttn(candidates[0].curve, querySeqQ, querySeqKV)
+	}
+
+	lat1 := InterpolateFlashAttn(candidates[0].curve, querySeqQ, querySeqKV)
+	lat2 := InterpolateFlashAttn(candidates[1].curve, querySeqQ, querySeqKV)
+
+	if lat1 <= 0 || lat2 <= 0 {
+		if lat1 > 0 {
+			return lat1
+		}
+		return lat2
+	}
+
+	// Check if query is outside the grid — extrapolate using power-law
+	nh1 := float64(candidates[0].curve.FixedDims["num_heads"])
+	nh2 := float64(candidates[1].curve.FixedDims["num_heads"])
+	qnh := float64(queryNumHeads)
+
+	minNH := math.Min(nh1, nh2)
+	maxNH := math.Max(nh1, nh2)
+	if qnh < minNH || qnh > maxNH {
+		// Power-law extrapolation from nearest two points
+		logNH1 := math.Log(nh1)
+		logNH2 := math.Log(nh2)
+		logLat1 := math.Log(lat1)
+		logLat2 := math.Log(lat2)
+		slope := (logLat2 - logLat1) / (logNH2 - logNH1)
+		return math.Exp(logLat1 + slope*(logQ-logNH1))
+	}
+
+	// IDW blend between two nearest curves
+	w1 := 1.0 / candidates[0].logDist
+	w2 := 1.0 / candidates[1].logDist
+	return (lat1*w1 + lat2*w2) / (w1 + w2)
+}
+
 // InterpolateFlashAttn interpolates flash_attn latency between decode and prefill regimes.
 // Decode regime: seqQ=1, varying seqKV
 // Prefill regime: seqQ=seqKV
