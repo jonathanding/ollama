@@ -356,3 +356,114 @@ func TestComputeOnBackend_RepeatedCallsPreserveData(t *testing.T) {
 		assert.InDelta(t, 303.0, result[2], 0.01, "call %d, elem 2", i)
 	}
 }
+
+func TestMulMatCleanGraph_Q40(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+	runner, ok := LookupRegistry("MUL_MAT")
+	require.True(t, ok)
+	backend.EnableGPUTimestamps(true)
+	defer backend.EnableGPUTimestamps(false)
+	ctx := backend.NewContext()
+	defer ctx.Close()
+	inputs := runner.CreateInputs(ctx, backend, "q4_0", []int64{512, 512, 1})
+	require.Len(t, inputs, 2, "MUL_MAT needs weight + activation")
+	out := runner.Run(ctx, inputs)
+	require.NotNil(t, out)
+	ctx.Forward(out)
+	ctx.ComputeOnBackend(0, out)
+	ctx.ComputeOnBackend(0, out)
+	timings := backend.GetOpTimings()
+	require.NotEmpty(t, timings)
+	for _, timing := range timings {
+		assert.NotEqual(t, "CPY", timing.OpName,
+			"MUL_MAT(q4_0) graph should not contain CPY ops — found at node %d", timing.NodeIdx)
+	}
+}
+
+func TestMulMatCleanGraph_F32_NoCast(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+	runner, ok := LookupRegistry("MUL_MAT")
+	require.True(t, ok)
+	backend.EnableGPUTimestamps(true)
+	defer backend.EnableGPUTimestamps(false)
+	ctx := backend.NewContext()
+	defer ctx.Close()
+	inputs := runner.CreateInputs(ctx, backend, "f32", []int64{256, 256, 1})
+	out := runner.Run(ctx, inputs)
+	ctx.Forward(out)
+	ctx.ComputeOnBackend(0, out)
+	ctx.ComputeOnBackend(0, out)
+	timings := backend.GetOpTimings()
+	for _, timing := range timings {
+		assert.NotEqual(t, "CPY", timing.OpName, "f32 path should never have CPY")
+	}
+}
+
+func TestMulMatAddCleanGraph_Q80(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+	runner, ok := LookupRegistry("MUL_MAT_ADD")
+	require.True(t, ok)
+	backend.EnableGPUTimestamps(true)
+	defer backend.EnableGPUTimestamps(false)
+	ctx := backend.NewContext()
+	defer ctx.Close()
+	inputs := runner.CreateInputs(ctx, backend, "q8_0", []int64{512, 512, 1})
+	require.Len(t, inputs, 3, "MUL_MAT_ADD needs weight + activation + bias")
+	out := runner.Run(ctx, inputs)
+	require.NotNil(t, out)
+	ctx.Forward(out)
+	ctx.ComputeOnBackend(0, out)
+	ctx.ComputeOnBackend(0, out)
+	timings := backend.GetOpTimings()
+	require.NotEmpty(t, timings)
+	for _, timing := range timings {
+		assert.NotEqual(t, "CPY", timing.OpName,
+			"MUL_MAT_ADD(q8_0) graph should not contain CPY ops")
+	}
+}
+
+func TestMulMatCleanGraph_TimingAccuracy(t *testing.T) {
+	backend := setupBenchBackend(t)
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+	measureSingleOp := func(dtype string, M, K, N int64) float64 {
+		runner, _ := LookupRegistry("MUL_MAT")
+		backend.EnableGPUTimestamps(true)
+		defer backend.EnableGPUTimestamps(false)
+		ctx := backend.NewContext()
+		defer ctx.Close()
+		inputs := runner.CreateInputs(ctx, backend, dtype, []int64{M, K, N})
+		out := runner.Run(ctx, inputs)
+		ctx.Forward(out)
+		for range 3 {
+			ctx.ComputeOnBackend(0, out)
+		}
+		ctx.ComputeOnBackend(0, out)
+		timings := backend.GetOpTimings()
+		var total float64
+		for _, timing := range timings {
+			total += timing.GPUTimeUs
+		}
+		return total
+	}
+	f32Time := measureSingleOp("f32", 2048, 2048, 1)
+	q40Time := measureSingleOp("q4_0", 2048, 2048, 1)
+	t.Logf("f32 MUL_MAT 2048x2048 N=1: %.1f us", f32Time)
+	t.Logf("q4_0 MUL_MAT 2048x2048 N=1: %.1f us", q40Time)
+	assert.Less(t, q40Time, f32Time*2,
+		"q4_0 should not be much slower than f32 — if it is, Cast timing may still be included")
+}

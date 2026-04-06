@@ -20,7 +20,7 @@ type OpRunnerML struct {
 	// If nil, measureOp uses the default: randomTensor with shapes from expandShapes.
 	// Set this for ops that need non-standard tensor creation (mixed dtypes, special shapes).
 	// dtypeStr is the raw dtype string (e.g. "f32", "q4_0") — call parseDType() internally if needed.
-	CreateInputs func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor
+	CreateInputs func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor
 
 	// Run invokes the operator and returns the output tensor.
 	Run func(ctx ml.Context, inputs []ml.Tensor) ml.Tensor
@@ -96,10 +96,17 @@ var opRegistry = map[string]OpRunnerML{
 	},
 	"MUL_MAT": {
 		Dimensions: []string{"M", "K", "N"},
-		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			dt, _ := parseDType(dtypeStr)
 			wShape, aShape := mulMatInputShapes(gridPoint)
-			weight := randomTensor(ctx, dt, wShape...)
+
+			var weight ml.Tensor
+			if dt != ml.DTypeF32 {
+				weightBytes := materializeTensor(backend, dt, wShape...)
+				weight = ctx.Input().FromBytes(dt, weightBytes, wShape...)
+			} else {
+				weight = randomTensor(ctx, dt, wShape...)
+			}
 			activation := randomTensor(ctx, ml.DTypeF32, aShape...)
 			return []ml.Tensor{weight, activation}
 		},
@@ -109,7 +116,7 @@ var opRegistry = map[string]OpRunnerML{
 	},
 	"FLASH_ATTN_EXT": {
 		Dimensions: []string{"seq_q", "seq_kv"},
-		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			// Q is f32 (matmul output in real inference), K/V are f16 (KV cache)
 			seqQ, seqKV := gridPoint[0], gridPoint[1]
 			q := randomTensor(ctx, ml.DTypeF32, 128, 32, int(seqQ), 1)
@@ -160,7 +167,7 @@ var opRegistry = map[string]OpRunnerML{
 	},
 	"ROPE": {
 		Dimensions: []string{"N"},
-		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			dt, _ := parseDType(dtypeStr)
 			shape, seqLen := ropeInputParams(gridPoint[0])
 			input := randomTensor(ctx, dt, shape...)
@@ -185,7 +192,7 @@ var opRegistry = map[string]OpRunnerML{
 
 	"RMS_NORM_MUL": {
 		Dimensions: []string{"N"},
-		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			N := int(gridPoint[0])
 			input := randomTensor(ctx, ml.DTypeF32, N)
 			scale := randomTensor(ctx, ml.DTypeF32, N)
@@ -198,7 +205,7 @@ var opRegistry = map[string]OpRunnerML{
 	},
 	"RMS_NORM_MUL_ROPE": {
 		Dimensions: []string{"N"},
-		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			shape, seqLen := ropeInputParams(gridPoint[0])
 			input := randomTensor(ctx, ml.DTypeF32, shape...)
 			scale := randomTensor(ctx, ml.DTypeF32, shape...)
@@ -220,10 +227,17 @@ var opRegistry = map[string]OpRunnerML{
 	},
 	"MUL_MAT_ADD": {
 		Dimensions: []string{"M", "K", "N"},
-		CreateInputs: func(ctx ml.Context, dtypeStr string, gridPoint []int64) []ml.Tensor {
+		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			dt, _ := parseDType(dtypeStr)
 			wShape, aShape := mulMatInputShapes(gridPoint)
-			weight := randomTensor(ctx, dt, wShape...)
+
+			var weight ml.Tensor
+			if dt != ml.DTypeF32 {
+				weightBytes := materializeTensor(backend, dt, wShape...)
+				weight = ctx.Input().FromBytes(dt, weightBytes, wShape...)
+			} else {
+				weight = randomTensor(ctx, dt, wShape...)
+			}
 			activation := randomTensor(ctx, ml.DTypeF32, aShape...)
 			M := int(gridPoint[0])
 			bias := randomTensor(ctx, ml.DTypeF32, M)

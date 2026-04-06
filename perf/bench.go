@@ -69,7 +69,7 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 	// Create input tensors — use custom CreateInputs if provided, else default
 	var inputs []ml.Tensor
 	if runner.CreateInputs != nil {
-		inputs = runner.CreateInputs(ctx, computeDtype, gridPoint)
+		inputs = runner.CreateInputs(ctx, backend, computeDtype, gridPoint)
 	} else {
 		tensorShapes := expandShapes(op, gridPoint)
 		inputs = make([]ml.Tensor, len(tensorShapes))
@@ -196,7 +196,7 @@ func measureOpGPU(backend ml.Backend, op string, gridPoint []int64, computeDtype
 	// Create input tensors — use custom CreateInputs if provided, else default
 	var inputs []ml.Tensor
 	if runner.CreateInputs != nil {
-		inputs = runner.CreateInputs(ctx, computeDtype, gridPoint)
+		inputs = runner.CreateInputs(ctx, backend, computeDtype, gridPoint)
 	} else {
 		tensorShapes := expandShapes(op, gridPoint)
 		inputs = make([]ml.Tensor, len(tensorShapes))
