@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/model/input"
@@ -179,6 +180,22 @@ func assignBackends(nodes []ml.GraphNode, schedule ml.GPULayersList, blockCount 
 	}
 }
 
+// FlashAttentionFromEnv reads OLLAMA_FLASH_ATTENTION to match the serve environment.
+// If the env var is set, returns Enabled/Disabled accordingly.
+// If not set, defaults to the provided fallback.
+func FlashAttentionFromEnv(fallback ml.FlashAttentionType) ml.FlashAttentionType {
+	// envconfig.FlashAttention returns the same value for both true/false defaults
+	// when the user has explicitly set the env var
+	if envconfig.FlashAttention(true) == envconfig.FlashAttention(false) {
+		// User explicitly set OLLAMA_FLASH_ATTENTION
+		if envconfig.FlashAttention(false) {
+			return ml.FlashAttentionEnabled
+		}
+		return ml.FlashAttentionDisabled
+	}
+	return fallback
+}
+
 // ensureLibraryPath sets OLLAMA_LIBRARY_PATH and PATH so that GGML can discover
 // backend DLLs (e.g., ggml-vulkan.dll) in the development build directory.
 // Same logic as NewForBench — needed here because model.New also calls initDevices.
@@ -232,7 +249,12 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 
 	case "FLASH_ATTN_EXT":
 		if len(shape) < 3 {
-			return 0, fmt.Errorf("FLASH_ATTN_EXT requires 3 shape dims (seqQ, seqKV, numHeads), got %d", len(shape))
+			return 0, fmt.Errorf("FLASH_ATTN_EXT requires at least 3 shape dims (seqQ, seqKV, numQHeads[, numKVHeads]), got %d", len(shape))
+		}
+		numQHeads := shape[2]
+		numKVHeads := numQHeads
+		if len(shape) >= 4 {
+			numKVHeads = shape[3]
 		}
 		// FLASH_ATTN_EXT output tensor is f32 but the op runs on f16 Q/K/V inputs.
 		// Match by op + backend only (benchmark only produces one dtype config).
@@ -246,7 +268,7 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 		if len(curves) == 0 {
 			return 0, fmt.Errorf("uncalibrated: %s(%s on %s)", op, computeDtype, backend)
 		}
-		return InterpolateFlashAttnMultiHead(curves, shape[0], shape[1], shape[2]), nil
+		return InterpolateFlashAttnMultiHead(curves, shape[0], shape[1], numQHeads, numKVHeads), nil
 
 	case "GET_ROWS":
 		// GET_ROWS is a pure memory copy (embedding lookup), called once per forward pass.
@@ -471,11 +493,16 @@ func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) P
 func EstimateModel(profile *Profile, modelPath string, inputLength int) (*EstimateResult, error) {
 	ensureLibraryPath()
 
-	// Single model load: skip weight buffer allocation, capture raw graph
+	// Single model load: skip weight buffer allocation, capture raw graph.
+	// Flash attention setting follows OLLAMA_FLASH_ATTENTION env var (matching serve).
+	// Default: enabled, since most users run with OLLAMA_FLASH_ATTENTION=1.
+	fa := FlashAttentionFromEnv(ml.FlashAttentionEnabled)
+	slog.Info("estimate flash attention", "setting", fa)
+
 	m, err := model.New(modelPath, ml.BackendParams{
 		AllocMemory:     false,
 		SkipWeightAlloc: true,
-		FlashAttention:  ml.FlashAttentionEnabled,
+		FlashAttention:  fa,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("load model: %w", err)

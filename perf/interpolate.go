@@ -223,10 +223,10 @@ func scaleMulMatLatency(nearestLat float64, nearest *OperatorCurve, queryM, quer
 }
 
 // InterpolateFlashAttnMultiHead interpolates flash_attn latency across multiple
-// num_heads curves using inverse distance weighting in log-num_heads space.
-// Each curve has a FixedDims["num_heads"] value and contains decode/prefill points.
-// Falls back to single-curve InterpolateFlashAttn when only one curve is available.
-func InterpolateFlashAttnMultiHead(curves []OperatorCurve, querySeqQ, querySeqKV, queryNumHeads int64) float64 {
+// (numQHeads, numKVHeads) curves using inverse distance weighting in 2D log space.
+// Each curve has FixedDims["num_heads"] (Q heads) and optionally FixedDims["num_kv_heads"].
+// If num_kv_heads is absent, the curve is treated as MHA (KV = Q).
+func InterpolateFlashAttnMultiHead(curves []OperatorCurve, querySeqQ, querySeqKV, queryNumQHeads, queryNumKVHeads int64) float64 {
 	if len(curves) == 0 {
 		return 0
 	}
@@ -235,18 +235,25 @@ func InterpolateFlashAttnMultiHead(curves []OperatorCurve, querySeqQ, querySeqKV
 	}
 
 	type candidate struct {
-		curve   *OperatorCurve
-		logDist float64
+		curve *OperatorCurve
+		dist  float64
 	}
 
-	logQ := math.Log(float64(queryNumHeads))
+	logQ := math.Log(float64(queryNumQHeads))
+	logKV := math.Log(float64(queryNumKVHeads))
 	var candidates []candidate
 	for i := range curves {
 		nh := curves[i].FixedDims["num_heads"]
 		if nh <= 0 {
 			continue
 		}
-		dist := math.Abs(logQ - math.Log(float64(nh)))
+		nkv := curves[i].FixedDims["num_kv_heads"]
+		if nkv <= 0 {
+			nkv = nh // backward compat: MHA
+		}
+		dq := logQ - math.Log(float64(nh))
+		dkv := logKV - math.Log(float64(nkv))
+		dist := math.Sqrt(dq*dq + dkv*dkv)
 		candidates = append(candidates, candidate{&curves[i], dist})
 	}
 
@@ -255,11 +262,11 @@ func InterpolateFlashAttnMultiHead(curves []OperatorCurve, querySeqQ, querySeqKV
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].logDist < candidates[j].logDist
+		return candidates[i].dist < candidates[j].dist
 	})
 
 	// Exact match
-	if candidates[0].logDist == 0 {
+	if candidates[0].dist == 0 {
 		return InterpolateFlashAttn(candidates[0].curve, querySeqQ, querySeqKV)
 	}
 
@@ -278,26 +285,33 @@ func InterpolateFlashAttnMultiHead(curves []OperatorCurve, querySeqQ, querySeqKV
 		return lat2
 	}
 
-	// Check if query is outside the grid — extrapolate using power-law
+	// Check if query is outside the grid — extrapolate using power-law from nearest two
 	nh1 := float64(candidates[0].curve.FixedDims["num_heads"])
+	nkv1 := float64(candidates[0].curve.FixedDims["num_kv_heads"])
+	if nkv1 <= 0 {
+		nkv1 = nh1
+	}
 	nh2 := float64(candidates[1].curve.FixedDims["num_heads"])
-	qnh := float64(queryNumHeads)
-
-	minNH := math.Min(nh1, nh2)
-	maxNH := math.Max(nh1, nh2)
-	if qnh < minNH || qnh > maxNH {
-		// Power-law extrapolation from nearest two points
-		logNH1 := math.Log(nh1)
-		logNH2 := math.Log(nh2)
+	nkv2 := float64(candidates[1].curve.FixedDims["num_kv_heads"])
+	if nkv2 <= 0 {
+		nkv2 = nh2
+	}
+	// Use 1D distance along the line connecting the two nearest curves for extrapolation check
+	totalDist := candidates[0].dist + candidates[1].dist
+	gridSpan := math.Sqrt(math.Pow(math.Log(nh2)-math.Log(nh1), 2) + math.Pow(math.Log(nkv2)-math.Log(nkv1), 2))
+	if gridSpan > 0 && totalDist > gridSpan*1.1 {
+		// Query is likely outside the grid — power-law extrapolation.
+		// Direction: curve2 → curve1 → query (candidates sorted nearest-first).
+		// slope = rate of log-latency increase per unit distance toward query.
 		logLat1 := math.Log(lat1)
 		logLat2 := math.Log(lat2)
-		slope := (logLat2 - logLat1) / (logNH2 - logNH1)
-		return math.Exp(logLat1 + slope*(logQ-logNH1))
+		slope := (logLat1 - logLat2) / gridSpan
+		return math.Exp(logLat1 + slope*candidates[0].dist)
 	}
 
 	// IDW blend between two nearest curves
-	w1 := 1.0 / candidates[0].logDist
-	w2 := 1.0 / candidates[1].logDist
+	w1 := 1.0 / candidates[0].dist
+	w2 := 1.0 / candidates[1].dist
 	return (lat1*w1 + lat2*w2) / (w1 + w2)
 }
 

@@ -449,7 +449,7 @@ func TestLookupLatency_FlashAttn_InsufficientShape(t *testing.T) {
 	p := makeTestProfileForEstimation()
 	_, err := lookupLatency(p, "FLASH_ATTN_EXT", []int64{1}, "f16", "", "cuda")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "requires 3 shape dims")
+	assert.Contains(t, err.Error(), "requires at least 3 shape dims")
 }
 
 func TestEstimatePhase_AllNodesUncalibrated(t *testing.T) {
