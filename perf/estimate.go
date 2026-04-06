@@ -36,12 +36,13 @@ func nodeToQueryShape(node ml.GraphNode) (op string, shape []int64, computeDtype
 		return
 
 	case "FLASH_ATTN_EXT":
-		if len(node.InputShapes) >= 2 && len(node.InputShapes[0]) >= 2 && len(node.InputShapes[1]) >= 2 {
+		if len(node.InputShapes) >= 2 && len(node.InputShapes[0]) >= 3 && len(node.InputShapes[1]) >= 2 {
 			// GGML layout: Q ne=[head_dim, seqQ, num_heads, batch]
 			//              K ne=[head_dim, seqKV, num_kv_heads, batch]
 			seqQ := node.InputShapes[0][1]
 			seqKV := node.InputShapes[1][1]
-			shape = []int64{seqQ, seqKV}
+			numHeads := node.InputShapes[0][2]
+			shape = []int64{seqQ, seqKV, numHeads}
 			return
 		}
 		shape = []int64{totalElements(node.Shape)}
@@ -230,18 +231,22 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 		return lat, nil
 
 	case "FLASH_ATTN_EXT":
-		if len(shape) < 2 {
-			return 0, fmt.Errorf("FLASH_ATTN_EXT requires 2 shape dims, got %d", len(shape))
+		if len(shape) < 3 {
+			return 0, fmt.Errorf("FLASH_ATTN_EXT requires 3 shape dims (seqQ, seqKV, numHeads), got %d", len(shape))
 		}
 		// FLASH_ATTN_EXT output tensor is f32 but the op runs on f16 Q/K/V inputs.
 		// Match by op + backend only (benchmark only produces one dtype config).
-		for i := range profile.Operators {
-			c := &profile.Operators[i]
+		// Collect all matching curves and use multi-head interpolation.
+		var curves []OperatorCurve
+		for _, c := range profile.Operators {
 			if c.Op == op && c.Backend == backend {
-				return InterpolateFlashAttn(c, shape[0], shape[1]), nil
+				curves = append(curves, c)
 			}
 		}
-		return 0, fmt.Errorf("uncalibrated: %s(%s on %s)", op, computeDtype, backend)
+		if len(curves) == 0 {
+			return 0, fmt.Errorf("uncalibrated: %s(%s on %s)", op, computeDtype, backend)
+		}
+		return InterpolateFlashAttnMultiHead(curves, shape[0], shape[1], shape[2]), nil
 
 	case "GET_ROWS":
 		// GET_ROWS is a pure memory copy (embedding lookup), called once per forward pass.
