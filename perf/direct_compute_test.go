@@ -236,8 +236,6 @@ func TestComputeOnBackend_NumericalMulMat(t *testing.T) {
 	assert.InDelta(t, 34.0, result[1], 0.1, "second element")
 }
 
-// TestComputeOnBackend_RepeatedCallsPreserveData verifies that data is preserved
-// across multiple ComputeOnBackend calls (only first call triggers reallocation).
 func TestMaterializeTensor_Basic(t *testing.T) {
 	backend := setupBenchBackend(t)
 
