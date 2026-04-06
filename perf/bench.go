@@ -63,6 +63,8 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 		return LatencyPoint{Shape: gridPoint}
 	}
 
+	cache := make(BytesCache)
+
 	ctx := backend.NewContext()
 	defer ctx.Close()
 
@@ -78,7 +80,7 @@ func measureOp(backend ml.Backend, op string, gridPoint []int64, computeDtype st
 			for j, s := range shape {
 				intShape[j] = int(s)
 			}
-			inputs[i] = randomTensor(ctx, dt, intShape...)
+			inputs[i] = randomLeafTensor(ctx, backend, cache, dt, intShape...)
 		}
 	}
 
@@ -187,6 +189,8 @@ func measureOpGPU(backend ml.Backend, op string, gridPoint []int64, computeDtype
 		return LatencyPoint{Shape: gridPoint}
 	}
 
+	cache := make(BytesCache)
+
 	backend.EnableGPUTimestamps(true)
 	defer backend.EnableGPUTimestamps(false)
 
@@ -205,7 +209,7 @@ func measureOpGPU(backend ml.Backend, op string, gridPoint []int64, computeDtype
 			for j, s := range shape {
 				intShape[j] = int(s)
 			}
-			inputs[i] = randomTensor(ctx, dt, intShape...)
+			inputs[i] = randomLeafTensor(ctx, backend, cache, dt, intShape...)
 		}
 	}
 

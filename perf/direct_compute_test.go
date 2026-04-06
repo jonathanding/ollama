@@ -1,6 +1,7 @@
 package perf
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/ollama/ollama/ml"
@@ -551,5 +552,75 @@ func TestRandomLeafTensor_CleanGraph(t *testing.T) {
 	for _, timing := range timings {
 		assert.NotEqual(t, "CPY", timing.OpName,
 			"randomLeafTensor graph should not contain CPY ops")
+	}
+}
+
+func TestAllOps_CleanGraph_NonF32(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+
+	testCases := []struct {
+		op    string
+		dtype string
+		shape []int64
+	}{
+		{"MUL_MAT", "q4_0", []int64{512, 512, 1}},
+		{"MUL_MAT", "f16", []int64{512, 512, 1}},
+		{"MUL_MAT", "q8_0", []int64{512, 512, 1}},
+		{"MUL_MAT_ADD", "q4_0", []int64{512, 512, 1}},
+		{"FLASH_ATTN_EXT", "f16", []int64{1, 512}},
+		{"ROPE", "f16", []int64{1024}},
+		// 1D ops via default path
+		{"ADD", "f16", []int64{256}},
+		{"SILU", "f16", []int64{256}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("%s_%s", tc.op, tc.dtype), func(t *testing.T) {
+			runner, ok := LookupRegistry(tc.op)
+			require.True(t, ok)
+
+			backend.EnableGPUTimestamps(true)
+			defer backend.EnableGPUTimestamps(false)
+
+			ctx := backend.NewContext()
+			defer ctx.Close()
+
+			var inputs []ml.Tensor
+			if runner.CreateInputs != nil {
+				inputs = runner.CreateInputs(ctx, backend, tc.dtype, tc.shape)
+			} else {
+				// Simulate default path with randomLeafTensor
+				dt, ok := parseDType(tc.dtype)
+				require.True(t, ok)
+				cache := make(BytesCache)
+				tensorShapes := expandShapes(tc.op, tc.shape)
+				inputs = make([]ml.Tensor, len(tensorShapes))
+				for i, shape := range tensorShapes {
+					intShape := make([]int, len(shape))
+					for j, s := range shape {
+						intShape[j] = int(s)
+					}
+					inputs[i] = randomLeafTensor(ctx, backend, cache, dt, intShape...)
+				}
+			}
+
+			out := runner.Run(ctx, inputs)
+			require.NotNil(t, out)
+			ctx.Forward(out)
+
+			ctx.ComputeOnBackend(0, out)
+			ctx.ComputeOnBackend(0, out)
+			timings := backend.GetOpTimings()
+
+			for _, timing := range timings {
+				assert.NotEqual(t, "CPY", timing.OpName,
+					"%s(%s): graph should not contain CPY ops", tc.op, tc.dtype)
+			}
+		})
 	}
 }

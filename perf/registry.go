@@ -153,8 +153,11 @@ var opRegistry = map[string]OpRunnerML{
 			// Q is f32 (matmul output in real inference), K/V are f16 (KV cache)
 			seqQ, seqKV := gridPoint[0], gridPoint[1]
 			q := randomTensor(ctx, ml.DTypeF32, 128, 32, int(seqQ), 1)
-			k := randomTensor(ctx, ml.DTypeF16, 128, 32, int(seqKV), 1)
-			v := randomTensor(ctx, ml.DTypeF16, 128, 32, int(seqKV), 1)
+			// K/V are f16 — use materializeTensor to avoid Cast/CPY in graph
+			kBytes := materializeTensor(backend, ml.DTypeF16, 128, 32, int(seqKV), 1)
+			vBytes := materializeTensor(backend, ml.DTypeF16, 128, 32, int(seqKV), 1)
+			k := ctx.Input().FromBytes(ml.DTypeF16, kBytes, 128, 32, int(seqKV), 1)
+			v := ctx.Input().FromBytes(ml.DTypeF16, vBytes, 128, 32, int(seqKV), 1)
 			return []ml.Tensor{q, k, v}
 		},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
@@ -203,7 +206,14 @@ var opRegistry = map[string]OpRunnerML{
 		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			dt, _ := parseDType(dtypeStr)
 			shape, seqLen := ropeInputParams(gridPoint[0])
-			input := randomTensor(ctx, dt, shape...)
+
+			var input ml.Tensor
+			if dt != ml.DTypeF32 {
+				inputBytes := materializeTensor(backend, dt, shape...)
+				input = ctx.Input().FromBytes(dt, inputBytes, shape...)
+			} else {
+				input = randomTensor(ctx, dt, shape...)
+			}
 			pos := ropePositions(seqLen)
 			posTensor := ctx.Input().FromInts(pos, int(seqLen))
 			return []ml.Tensor{input, posTensor}
