@@ -323,10 +323,31 @@ func lookupLatency(profile *Profile, op string, shape []int64,
 		if len(shape) < 1 {
 			return 0, fmt.Errorf("op %s requires at least 1 shape dim", op)
 		}
+		// Primary: exact dtype match
 		for _, c := range profile.Operators {
 			if c.Op == op && c.ComputeDtype == computeDtype && c.Backend == backend {
 				return Interpolate1D(c.Points, shape[0]), nil
 			}
+		}
+		// Fallback: try approximate dtype
+		if fb := dtypeFallback(computeDtype); fb != "" {
+			for _, c := range profile.Operators {
+				if c.Op == op && c.ComputeDtype == fb && c.Backend == backend {
+					slog.Warn("op using fallback dtype curves",
+						"op", op, "requested", computeDtype, "fallback", fb,
+						"backend", backend)
+					return Interpolate1D(c.Points, shape[0]), nil
+				}
+			}
+		}
+		// Fallback: bandwidth roofline for elementwise ops
+		if profile.Hardware.PeakBandwidthBytesPerSec > 0 {
+			elemBytes := elemBytesFromDtype(computeDtype)
+			dataBytes := float64(shape[0]) * elemBytes * 2 // read + write
+			lat := dataBytes / profile.Hardware.PeakBandwidthBytesPerSec * 1e6
+			slog.Warn("op using bandwidth roofline (no calibration curves)",
+				"op", op, "dtype", computeDtype, "N", shape[0], "backend", backend)
+			return lat, nil
 		}
 		return 0, fmt.Errorf("uncalibrated: %s(%s on %s)", op, computeDtype, backend)
 	}
@@ -344,15 +365,28 @@ func lookupLatencyV3(profile *Profile, op string, shape []int64,
 		M, K, N := shape[0], shape[1], shape[2]
 		mappedWdt := mapWeightDtype(weightDtype)
 
-		// Primary: direct interpolation from reference curves (Phase 2 design)
+		// Primary: direct interpolation from reference curves
 		lat := PredictMulMatDirect(profile, M, K, N, mappedWdt)
 		if lat > 0 {
 			return lat, nil
 		}
-		// Fallback: roofline (for backward compatibility with v2 profiles
-		// that lack multi-(M,K) reference curves)
+
+		// Fallback 1: try approximate dtype (e.g. q4_K -> q4_0)
+		if fb := dtypeFallback(mappedWdt); fb != "" {
+			lat = PredictMulMatDirect(profile, M, K, N, fb)
+			if lat > 0 {
+				slog.Warn("MUL_MAT using fallback dtype curves",
+					"requested", mappedWdt, "fallback", fb,
+					"M", M, "K", K, "N", N)
+				return lat, nil
+			}
+		}
+
+		// Fallback 2: roofline model
 		lat = PredictMulMatLatency(&profile.Hardware, M, K, N, mappedWdt)
 		if lat > 0 {
+			slog.Warn("MUL_MAT using roofline model (no calibration curves)",
+				"dtype", mappedWdt, "M", M, "K", K, "N", N)
 			return lat, nil
 		}
 		return 0, fmt.Errorf("no MUL_MAT calibration data for dtype %s — run daop-bench first", mappedWdt)

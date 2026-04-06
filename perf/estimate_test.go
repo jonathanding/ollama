@@ -314,16 +314,27 @@ func TestLookupLatency_FlashAttn_Prefill(t *testing.T) {
 }
 
 func TestLookupLatency_Uncalibrated(t *testing.T) {
+	// With the new fallback chain, uncalibrated ops fall back to bandwidth roofline
+	// rather than erroring (as long as PeakBandwidthBytesPerSec is set).
 	p := makeTestProfileForEstimation()
-	_, err := lookupLatency(p, "TANH", []int64{4096}, "f32", "", "cuda")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "uncalibrated")
+	lat, err := lookupLatency(p, "TANH", []int64{4096}, "f32", "", "cuda")
+	require.NoError(t, err)
+	assert.Greater(t, lat, 0.0)
+	// Should use bandwidth roofline: 4096 * 4 * 2 / bandwidth * 1e6
+	expectedUs := float64(4096) * 4 * 2 / p.Hardware.PeakBandwidthBytesPerSec * 1e6
+	assert.InDelta(t, expectedUs, lat, 0.001)
 }
 
 func TestLookupLatency_WrongBackend(t *testing.T) {
+	// With the new fallback chain, even wrong backend queries fall back to bandwidth roofline
+	// rather than erroring (as long as PeakBandwidthBytesPerSec is set).
 	p := makeTestProfileForEstimation()
-	_, err := lookupLatency(p, "SILU", []int64{4096}, "f32", "", "cpu")
-	assert.Error(t, err)
+	lat, err := lookupLatency(p, "SILU", []int64{4096}, "f32", "", "cpu")
+	require.NoError(t, err)
+	assert.Greater(t, lat, 0.0)
+	// Should use bandwidth roofline
+	expectedUs := float64(4096) * 4 * 2 / p.Hardware.PeakBandwidthBytesPerSec * 1e6
+	assert.InDelta(t, expectedUs, lat, 0.001)
 }
 
 // --- estimatePhase tests ---
@@ -374,15 +385,17 @@ func TestEstimatePhase_SkipsZeroCostOps(t *testing.T) {
 }
 
 func TestEstimatePhase_UncalibratedWarning(t *testing.T) {
+	// With the new fallback chain, uncalibrated ops fall back to bandwidth roofline
+	// and succeed. The warnings are logged via slog.Warn but not captured in the warnings slice.
+	// The estimate should now succeed with non-zero latency from the roofline model.
 	p := makeTestProfileForEstimation()
 	nodes := []ml.GraphNode{
 		{Op: "TANH", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
 	}
 	var warnings []string
 	result := estimatePhase(p, nodes, &warnings)
-	assert.NotEmpty(t, warnings)
-	assert.Contains(t, warnings[0], "uncalibrated")
-	assert.InDelta(t, 0.0, result.TotalLatencyMs, 0.001)
+	assert.Empty(t, warnings, "no errors should be returned - falls back to roofline")
+	assert.Greater(t, result.TotalLatencyMs, 0.0, "should have non-zero estimate from roofline")
 }
 
 func TestEstimatePhase_EmptyGraph(t *testing.T) {
@@ -438,6 +451,8 @@ func TestLookupLatency_FlashAttn_InsufficientShape(t *testing.T) {
 }
 
 func TestEstimatePhase_AllNodesUncalibrated(t *testing.T) {
+	// With the new fallback chain, uncalibrated ops fall back to bandwidth roofline
+	// and succeed. The warnings are logged via slog.Warn but not captured in the warnings slice.
 	p := makeTestProfileForEstimation()
 	nodes := []ml.GraphNode{
 		{Op: "TANH", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
@@ -446,12 +461,14 @@ func TestEstimatePhase_AllNodesUncalibrated(t *testing.T) {
 	}
 	var warnings []string
 	result := estimatePhase(p, nodes, &warnings)
-	assert.Len(t, warnings, 3, "should warn for each uncalibrated op")
-	assert.InDelta(t, 0.0, result.TotalLatencyMs, 0.001)
-	assert.Empty(t, result.TopOps)
+	assert.Empty(t, warnings, "no errors should be returned - falls back to roofline")
+	assert.Greater(t, result.TotalLatencyMs, 0.0, "should have non-zero estimate from roofline")
+	assert.Len(t, result.TopOps, 3, "all ops should be estimated via roofline")
 }
 
 func TestEstimatePhase_PartialUncalibrated(t *testing.T) {
+	// With the new fallback chain, TANH falls back to bandwidth roofline and succeeds.
+	// Both ops should be estimated successfully.
 	p := makeTestProfileForEstimation()
 	nodes := []ml.GraphNode{
 		{Op: "SILU", Backend: "cuda", Shape: [4]int64{65536, 1, 1, 1}, ComputeDtype: "f32"},
@@ -459,11 +476,10 @@ func TestEstimatePhase_PartialUncalibrated(t *testing.T) {
 	}
 	var warnings []string
 	result := estimatePhase(p, nodes, &warnings)
-	assert.Len(t, warnings, 1, "only TANH should warn")
-	assert.Contains(t, warnings[0], "TANH")
+	assert.Empty(t, warnings, "no errors should be returned")
 	assert.Greater(t, result.TotalLatencyMs, 0.0)
-	require.Len(t, result.TopOps, 1)
-	assert.Equal(t, "SILU", result.TopOps[0].Op)
+	require.Len(t, result.TopOps, 2, "both ops should be estimated")
+	assert.Equal(t, "SILU", result.TopOps[0].Op, "SILU should be first (larger latency)")
 }
 
 func TestLookupLatency_NewOps(t *testing.T) {
@@ -847,4 +863,79 @@ func TestEstimatePhaseV3_BackwardCompatV2(t *testing.T) {
 	assert.Greater(t, result.TotalLatencyMs, 0.0)
 	// No overhead (HasGPUTimestamp=false)
 	assert.Empty(t, warnings)
+}
+
+func TestLookupLatencyV3_MulMat_DirectQ4K(t *testing.T) {
+	// Profile has q4_K curves — should use them directly, no fallback
+	p := makeTestProfileForEstimation()
+	p.Operators = append(p.Operators, OperatorCurve{
+		Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "q4_K", WeightDtype: "q4_K",
+		Dimensions: []string{"N"},
+		FixedDims:  map[string]int64{"M": 4096, "K": 4096},
+		Points:     []LatencyPoint{{Shape: []int64{1}, LatencyUs: 200.0}, {Shape: []int64{512}, LatencyUs: 5000.0}},
+	})
+	caps := &BackendCapabilities{Name: "cuda"}
+	lat, err := lookupLatencyV3(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_K", "cuda", caps)
+	require.NoError(t, err)
+	assert.InDelta(t, 200.0, lat, 10.0)
+}
+
+func TestLookupLatencyV3_MulMat_FallbackQ4KtoQ40(t *testing.T) {
+	// Profile has q4_0 reference curves but NOT q4_K.
+	// Should fall back from q4_K -> q4_0 via dtypeFallback with warning.
+	p := makeTestProfileForEstimation()
+	// Add q4_0 reference curves with FixedDims (needed for PredictMulMatDirect)
+	p.Operators = append(p.Operators, OperatorCurve{
+		Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+		Dimensions: []string{"N"},
+		FixedDims:  map[string]int64{"M": 4096, "K": 4096},
+		Points:     []LatencyPoint{{Shape: []int64{1}, LatencyUs: 100.0}, {Shape: []int64{512}, LatencyUs: 2500.0}},
+	})
+	caps := &BackendCapabilities{Name: "cuda"}
+	lat, err := lookupLatencyV3(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q4_K", "cuda", caps)
+	require.NoError(t, err)
+	assert.InDelta(t, 100.0, lat, 10.0, "should use q4_0 fallback curves")
+}
+
+func TestLookupLatencyV3_MulMat_FallbackQ6KtoQ80(t *testing.T) {
+	// Profile has q8_0 reference curves but NOT q6_K.
+	// Should fall back from q6_K -> q8_0 via dtypeFallback with warning.
+	p := makeTestProfileForEstimation()
+	p.Operators = append(p.Operators, OperatorCurve{
+		Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q8_0",
+		Dimensions: []string{"N"},
+		FixedDims:  map[string]int64{"M": 4096, "K": 4096},
+		Points:     []LatencyPoint{{Shape: []int64{1}, LatencyUs: 150.0}, {Shape: []int64{512}, LatencyUs: 3500.0}},
+	})
+	caps := &BackendCapabilities{Name: "cuda"}
+	lat, err := lookupLatencyV3(p, "MUL_MAT", []int64{4096, 4096, 1}, "f16", "q6_K", "cuda", caps)
+	require.NoError(t, err)
+	assert.InDelta(t, 150.0, lat, 10.0, "should use q8_0 fallback curves")
+}
+
+func TestLookupLatency_1DOp_FallbackQ4KDtype(t *testing.T) {
+	// Profile has SILU calibrated for f32 but not q4_K.
+	// dtypeFallback(q4_K) = q4_0, but q4_0 is also not calibrated for SILU.
+	// Should fall through to bandwidth roofline.
+	p := makeTestProfileForEstimation()
+	lat, err := lookupLatency(p, "SILU", []int64{4096}, "q4_K", "", "cuda")
+	require.NoError(t, err)
+	assert.Greater(t, lat, 0.0)
+	// Bandwidth roofline: 4096 * 0.5625 * 2 / bandwidth * 1e6
+	expectedUs := float64(4096) * (18.0 / 32.0) * 2 / p.Hardware.PeakBandwidthBytesPerSec * 1e6
+	assert.InDelta(t, expectedUs, lat, 0.001)
+}
+
+func TestLookupLatency_1DOp_DtypeFallback(t *testing.T) {
+	// Profile has SILU calibrated for q4_0.
+	// When asked for SILU q4_K, dtypeFallback returns q4_0 — should use it with warning.
+	p := makeTestProfileForEstimation()
+	p.Operators = append(p.Operators, OperatorCurve{
+		Op: "SILU", Backend: "cuda", ComputeDtype: "q4_0",
+		Dimensions: []string{"N"},
+		Points:     []LatencyPoint{{Shape: []int64{4096}, LatencyUs: 5.0}},
+	})
+	lat, err := lookupLatency(p, "SILU", []int64{4096}, "q4_K", "", "cuda")
+	require.NoError(t, err)
+	assert.InDelta(t, 5.0, lat, 0.1)
 }
