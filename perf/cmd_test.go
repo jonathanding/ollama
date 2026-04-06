@@ -21,6 +21,7 @@ func TestEstimateCLIOptions_Defaults(t *testing.T) {
 	assert.Empty(t, opts.Profile)
 	assert.False(t, opts.JSON)
 	assert.False(t, opts.Verbose)
+	assert.Equal(t, 0, opts.InputLength, "zero means RunEstimateCLI applies default 512")
 }
 
 func TestViewerCLIOptions_Defaults(t *testing.T) {

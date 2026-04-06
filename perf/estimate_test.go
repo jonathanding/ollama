@@ -939,3 +939,224 @@ func TestLookupLatency_1DOp_DtypeFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.InDelta(t, 5.0, lat, 0.1)
 }
+
+func TestEstimatePhase_FlashAttnScalesWithSeqLen(t *testing.T) {
+	// Core test: FLASH_ATTN_EXT latency should scale with seqQ×seqKV.
+	p := makeTestProfileForEstimation()
+
+	makeFlashAttnNode := func(seqQ, seqKV int64) ml.GraphNode {
+		return ml.GraphNode{
+			Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+			InputShapes: [][]int64{
+				{128, seqQ, 32, 1},
+				{128, seqKV, 32, 1},
+			},
+		}
+	}
+
+	nodes130 := []ml.GraphNode{makeFlashAttnNode(130, 130)}
+	nodes512 := []ml.GraphNode{makeFlashAttnNode(512, 512)}
+
+	var w1, w2 []string
+	result130 := estimatePhase(p, nodes130, &w1)
+	result512 := estimatePhase(p, nodes512, &w2)
+
+	require.NotEmpty(t, result130.TopOps)
+	require.NotEmpty(t, result512.TopOps)
+	assert.Equal(t, "FLASH_ATTN_EXT", result130.TopOps[0].Op)
+	assert.Equal(t, "FLASH_ATTN_EXT", result512.TopOps[0].Op)
+
+	lat130 := result130.TopOps[0].TotalUs
+	lat512 := result512.TopOps[0].TotalUs
+
+	assert.Greater(t, lat512, lat130,
+		"FLASH_ATTN at seqlen=512 (%.1fus) should be greater than seqlen=130 (%.1fus)",
+		lat512, lat130)
+	// Log-space interpolation gives: seqlen=130 → ~20.37us, seqlen=512 → 100.0us, ratio ≈ 4.91x
+	ratio := lat512 / lat130
+	assert.Greater(t, ratio, 4.0,
+		"latency ratio should reflect quadratic scaling, got %.1fx", ratio)
+}
+
+func TestEstimatePhase_FlashAttnDecodeScalesWithKVLen(t *testing.T) {
+	p := makeTestProfileForEstimation()
+
+	makeDecodeFlashAttn := func(seqKV int64) ml.GraphNode {
+		return ml.GraphNode{
+			Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+			InputShapes: [][]int64{
+				{128, 1, 32, 1},
+				{128, seqKV, 32, 1},
+			},
+		}
+	}
+
+	var w1, w2 []string
+	result130 := estimatePhase(p, []ml.GraphNode{makeDecodeFlashAttn(130)}, &w1)
+	result2048 := estimatePhase(p, []ml.GraphNode{makeDecodeFlashAttn(2048)}, &w2)
+
+	require.NotEmpty(t, result130.TopOps)
+	require.NotEmpty(t, result2048.TopOps)
+	assert.Equal(t, "FLASH_ATTN_EXT", result130.TopOps[0].Op)
+	assert.Equal(t, "FLASH_ATTN_EXT", result2048.TopOps[0].Op)
+
+	lat130 := result130.TopOps[0].TotalUs
+	lat2048 := result2048.TopOps[0].TotalUs
+
+	assert.Greater(t, lat2048, lat130,
+		"decode FLASH_ATTN at seqKV=2048 (%.1fus) should be greater than seqKV=130 (%.1fus)",
+		lat2048, lat130)
+	ratio := lat2048 / lat130
+	assert.Greater(t, ratio, 3.0,
+		"decode latency ratio should reflect linear KV scaling, got %.1fx", ratio)
+}
+
+func TestEstimatePhase_LlamaDecodeFlashAttnPercentageIncreasesWithKVLen(t *testing.T) {
+	// MUL_MAT always dominates by absolute value (4 MUL_MATs vs 1 FLASH_ATTN 5~55us).
+	// But FLASH_ATTN's percentage should increase with longer KV.
+	p := makeTestProfileForEstimation()
+
+	makeLlamaDecodeLayer := func(seqKV int64) []ml.GraphNode {
+		return []ml.GraphNode{
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
+			{Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+				InputShapes: [][]int64{{128, 1, 32, 1}, {128, seqKV, 32, 1}}},
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{14336, 4096}, {4096, 1}}},
+			{Op: "SILU", Backend: "cuda", Shape: [4]int64{14336, 1, 1, 1}, ComputeDtype: "f32"},
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{4096, 14336}, {14336, 1}}},
+		}
+	}
+
+	var w1, w2 []string
+	resultShort := estimatePhase(p, makeLlamaDecodeLayer(128), &w1)
+	resultLong := estimatePhase(p, makeLlamaDecodeLayer(2048), &w2)
+
+	// Find FLASH_ATTN percentage in each result
+	flashPctShort := 0.0
+	flashPctLong := 0.0
+	totalShortUs := resultShort.TotalLatencyMs * 1000
+	totalLongUs := resultLong.TotalLatencyMs * 1000
+	for _, op := range resultShort.TopOps {
+		if op.Op == "FLASH_ATTN_EXT" {
+			flashPctShort = op.TotalUs / totalShortUs * 100
+		}
+	}
+	for _, op := range resultLong.TopOps {
+		if op.Op == "FLASH_ATTN_EXT" {
+			flashPctLong = op.TotalUs / totalLongUs * 100
+		}
+	}
+
+	assert.Greater(t, flashPctLong, flashPctShort,
+		"FLASH_ATTN percentage should increase with longer KV: short=%.1f%%, long=%.1f%%",
+		flashPctShort, flashPctLong)
+	assert.Greater(t, flashPctLong, 15.0,
+		"with seqKV=2048, FLASH_ATTN should be >15%% of total, got %.1f%%", flashPctLong)
+	assert.Greater(t, resultLong.TotalLatencyMs, resultShort.TotalLatencyMs,
+		"longer KV cache should increase total decode latency")
+}
+
+func TestEstimatePhase_PrefillMulMatScalesWithInputLength(t *testing.T) {
+	// captureGraph(inputLength) changes MUL_MAT activation's N dimension.
+	p := makeTestProfileForEstimation()
+
+	makePrefillMulMatNodes := func(seqLen int64) []ml.GraphNode {
+		return []ml.GraphNode{
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{4096, 4096}, {4096, seqLen}}},
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{4096, 4096}, {4096, seqLen}}},
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{14336, 4096}, {4096, seqLen}}},
+			{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+				InputShapes: [][]int64{{4096, 14336}, {14336, seqLen}}},
+		}
+	}
+
+	var w1, w2 []string
+	result130 := estimatePhase(p, makePrefillMulMatNodes(130), &w1)
+	result512 := estimatePhase(p, makePrefillMulMatNodes(512), &w2)
+
+	assert.Greater(t, result512.TotalLatencyMs, result130.TotalLatencyMs,
+		"prefill MUL_MAT at N=512 (%.3fms) should be greater than N=130 (%.3fms)",
+		result512.TotalLatencyMs, result130.TotalLatencyMs)
+	ratio := result512.TotalLatencyMs / result130.TotalLatencyMs
+	assert.Greater(t, ratio, 2.0,
+		"prefill MUL_MAT latency ratio should reflect N scaling, got %.1fx", ratio)
+}
+
+func TestNodeToQueryShape_FlashAttn_GQA(t *testing.T) {
+	node := ml.GraphNode{
+		Op:           "FLASH_ATTN_EXT",
+		Backend:      "cuda",
+		ComputeDtype: "f16",
+		InputShapes: [][]int64{
+			{128, 130, 32, 1},
+			{128, 256, 8, 1},
+		},
+	}
+	op, shape, _, _ := nodeToQueryShape(node)
+	assert.Equal(t, "FLASH_ATTN_EXT", op)
+	require.Len(t, shape, 2)
+	assert.Equal(t, int64(130), shape[0], "seqQ should come from Q ne[1], not ne[2]")
+	assert.Equal(t, int64(256), shape[1], "seqKV should come from K ne[1], not ne[2]")
+}
+
+func TestEstimatePhaseV3_FlashAttnScalesWithSeqLen(t *testing.T) {
+	p := makeTestProfileForEstimation()
+	p.Version = 3
+
+	makeFlashAttnNode := func(seqQ, seqKV int64) ml.GraphNode {
+		return ml.GraphNode{
+			Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+			InputShapes: [][]int64{
+				{128, seqQ, 32, 1},
+				{128, seqKV, 32, 1},
+			},
+		}
+	}
+
+	caps := &BackendCapabilities{Name: "cuda", HasGPUTimestamp: false}
+	var w1, w2 []string
+	result130 := estimatePhaseV3(p, []ml.GraphNode{makeFlashAttnNode(130, 130)}, caps, &w1)
+	result512 := estimatePhaseV3(p, []ml.GraphNode{makeFlashAttnNode(512, 512)}, caps, &w2)
+
+	require.NotEmpty(t, result130.TopOps)
+	require.NotEmpty(t, result512.TopOps)
+	assert.Equal(t, "FLASH_ATTN_EXT", result130.TopOps[0].Op)
+	assert.Equal(t, "FLASH_ATTN_EXT", result512.TopOps[0].Op)
+
+	lat130 := result130.TopOps[0].TotalUs
+	lat512 := result512.TopOps[0].TotalUs
+
+	assert.Greater(t, lat512, lat130,
+		"v3: FLASH_ATTN at seqlen=512 (%.1fus) should be greater than seqlen=130 (%.1fus)",
+		lat512, lat130)
+	ratio := lat512 / lat130
+	assert.Greater(t, ratio, 4.0,
+		"v3: latency ratio should reflect quadratic scaling, got %.1fx", ratio)
+}
+
+func TestEstimatePhase_EdgeCase_InputLengthOne(t *testing.T) {
+	// inputLength=1: both FLASH_ATTN seqQ=seqKV=1 and MUL_MAT N=1.
+	// Must not panic and should produce valid estimates.
+	p := makeTestProfileForEstimation()
+
+	nodes := []ml.GraphNode{
+		{Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
+			InputShapes: [][]int64{{128, 1, 32, 1}, {128, 1, 32, 1}}},
+		{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
+			InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
+	}
+
+	var warnings []string
+	result := estimatePhase(p, nodes, &warnings)
+
+	assert.Greater(t, result.TotalLatencyMs, 0.0, "inputLength=1 should have non-zero latency")
+	assert.NotEmpty(t, result.TopOps, "should have op breakdown")
+}
