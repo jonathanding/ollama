@@ -33,12 +33,16 @@ func buildSamplingGrids(op, computeDtype, weightDtype string) []SamplingGridWith
 		}
 		return grids
 	case "FLASH_ATTN_EXT":
-		heads := Phase1FlashAttnHeads()
-		grids := make([]SamplingGridWithFixed, len(heads))
-		for i, h := range heads {
+		configs := Phase1FlashAttnGQAConfigs()
+		grids := make([]SamplingGridWithFixed, len(configs))
+		for i, cfg := range configs {
 			grids[i] = SamplingGridWithFixed{
 				Op: op, Dtype: computeDtype,
-				FixedDims: map[string]int64{"num_heads": h, "head_dim": 128},
+				FixedDims: map[string]int64{
+					"num_heads":    cfg[0],
+					"num_kv_heads": cfg[1],
+					"head_dim":     128,
+				},
 			}
 		}
 		return grids
@@ -665,15 +669,21 @@ func benchmarkMulMat(backend ml.Backend, caps BackendCapabilities, weightDtype s
 func benchmarkFlashAttn(backend ml.Backend, caps BackendCapabilities, dtype string, fixedDims map[string]int64, cfg BenchmarkConfig) []LatencyPoint {
 	var points []LatencyPoint
 
-	numHeads := int64(32)
+	numQHeads := int64(32)
+	numKVHeads := int64(32)
 	if h, ok := fixedDims["num_heads"]; ok {
-		numHeads = h
+		numQHeads = h
+	}
+	if h, ok := fixedDims["num_kv_heads"]; ok {
+		numKVHeads = h
+	} else {
+		numKVHeads = numQHeads
 	}
 
 	// Decode: seq_q=1, sweep seq_kv (1D: shape[0] = seq_kv)
 	decodeMeasure := func(shape []int64) LatencyPoint {
 		seqKV := shape[0]
-		pt := measureOpForBackend(backend, caps, "FLASH_ATTN_EXT", []int64{1, seqKV, numHeads}, dtype, cfg)
+		pt := measureOpForBackend(backend, caps, "FLASH_ATTN_EXT", []int64{1, seqKV, numQHeads, numKVHeads}, dtype, cfg)
 		// Keep shape 1D for AdaptiveSample1D's internal sorting/interpolation
 		pt.Shape = []int64{seqKV}
 		return pt
@@ -689,7 +699,7 @@ func benchmarkFlashAttn(backend ml.Backend, caps BackendCapabilities, dtype stri
 	// Prefill: seq_q=seq_kv, sweep both (1D: shape[0] = seq_len)
 	prefillMeasure := func(shape []int64) LatencyPoint {
 		seqLen := shape[0]
-		pt := measureOpForBackend(backend, caps, "FLASH_ATTN_EXT", []int64{seqLen, seqLen, numHeads}, dtype, cfg)
+		pt := measureOpForBackend(backend, caps, "FLASH_ATTN_EXT", []int64{seqLen, seqLen, numQHeads, numKVHeads}, dtype, cfg)
 		// Keep shape 1D for AdaptiveSample1D
 		pt.Shape = []int64{seqLen}
 		return pt

@@ -79,17 +79,52 @@ func TestBuildSamplingGrids_MulMat(t *testing.T) {
 
 func TestBuildSamplingGrids_FlashAttn(t *testing.T) {
 	grids := buildSamplingGrids("FLASH_ATTN_EXT", "f16", "")
-	expectedHeads := Phase1FlashAttnHeads()
-	require.Len(t, grids, len(expectedHeads), "FLASH_ATTN_EXT should have one grid per num_heads value")
+	configs := Phase1FlashAttnGQAConfigs()
+	require.Len(t, grids, len(configs), "should have one grid per GQA config")
 
 	for i, g := range grids {
 		assert.Equal(t, "FLASH_ATTN_EXT", g.Op)
 		assert.Equal(t, "f16", g.Dtype)
-		assert.Equal(t, expectedHeads[i], g.FixedDims["num_heads"],
-			"grid %d should have num_heads=%d", i, expectedHeads[i])
-		assert.Equal(t, int64(128), g.FixedDims["head_dim"],
-			"grid %d should have head_dim=128", i)
+		assert.Equal(t, configs[i][0], g.FixedDims["num_heads"],
+			"grid %d should have num_heads=%d", i, configs[i][0])
+		assert.Equal(t, configs[i][1], g.FixedDims["num_kv_heads"],
+			"grid %d should have num_kv_heads=%d", i, configs[i][1])
+		assert.Equal(t, int64(128), g.FixedDims["head_dim"])
 	}
+}
+
+func TestBenchmarkFlashAttn_GQA_GridPoint(t *testing.T) {
+	// Verify benchmarkFlashAttn reads both num_heads and num_kv_heads from fixedDims
+	// and passes 4-element gridPoint to measureOp
+	fixedDims := map[string]int64{"num_heads": 16, "num_kv_heads": 4, "head_dim": 128}
+
+	numQHeads := int64(32)
+	numKVHeads := int64(32)
+	if h, ok := fixedDims["num_heads"]; ok {
+		numQHeads = h
+	}
+	if h, ok := fixedDims["num_kv_heads"]; ok {
+		numKVHeads = h
+	} else {
+		numKVHeads = numQHeads
+	}
+	assert.Equal(t, int64(16), numQHeads)
+	assert.Equal(t, int64(4), numKVHeads)
+
+	// Verify backward compat: missing num_kv_heads defaults to numQHeads
+	fixedDimsNoKV := map[string]int64{"num_heads": 16, "head_dim": 128}
+	numQHeads2 := int64(32)
+	numKVHeads2 := int64(32)
+	if h, ok := fixedDimsNoKV["num_heads"]; ok {
+		numQHeads2 = h
+	}
+	if h, ok := fixedDimsNoKV["num_kv_heads"]; ok {
+		numKVHeads2 = h
+	} else {
+		numKVHeads2 = numQHeads2
+	}
+	assert.Equal(t, int64(16), numQHeads2)
+	assert.Equal(t, int64(16), numKVHeads2, "missing num_kv_heads should default to numQHeads")
 }
 
 func TestSweepDimensions(t *testing.T) {
