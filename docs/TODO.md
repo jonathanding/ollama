@@ -10,14 +10,15 @@
 ### 近期 Roadmap (2026-04-04)
 
 **Phase 1A: 测量质量提升**
-- [ ] [HIGH] 收敛早停: CV < 5% on trimmed samples，统一应用到 measureOp + hwchar (来源: 2026-04-04)
-- [ ] [HIGH] 4-dtype MUL_MAT 参考曲线: f32, f16, q4_0, q8_0 各跑一条，提取独立效率常量 (来源: 2026-04-04)
-- [ ] K-quant dtype 映射: estimate 时 q4_K→q4_0, q6_K→q8_0 等 (来源: 2026-04-04)
-- [ ] 验证优化后 benchmark 总时间 (目标 ~12-14 min) (来源: 2026-04-04)
+- [x] [HIGH] 收敛早停: CV < 5% on trimmed samples，统一应用到 measureOp + hwchar (来源: 2026-04-04, 完成: 2026-04-05)
+- [x] [HIGH] 4-dtype MUL_MAT 参考曲线: f32, f16, q4_0, q8_0 各跑一条，提取独立效率常量 (来源: 2026-04-04, 完成: 2026-04-05)
+- [x] K-quant dtype 映射: estimate 时 q4_K→q4_0, q6_K→q8_0 等 (来源: 2026-04-04, 完成: 2026-04-05)
+- [x] 验证优化后 benchmark 总时间 (目标 ~12-14 min) — 实测 1m34s (来源: 2026-04-04, 完成: 2026-04-06)
 
 **Phase 1B: 完整算子覆盖**
-- [ ] 实现剩余 element-wise 算子: GELU, SOFTMAX, ADD, MUL, RMS_NORM 等 (~22 个) (来源: 2026-04-04)
-- [ ] 每个新算子的测试覆盖 (来源: 2026-04-04)
+- [x] 实现剩余 element-wise 算子: ADD, MUL, SILU, GELU, RELU, SOFT_MAX, CONT, RMS_NORM, ROPE, FLASH_ATTN_EXT, RMS_NORM_MUL, RMS_NORM_MUL_ROPE (来源: 2026-04-04, 完成: 2026-04-05)
+- [x] 每个新算子的测试覆盖 (来源: 2026-04-04, 完成: 2026-04-05)
+- [ ] 新增算子: GLU, SET_ROWS (qwen3 模型使用，当前未校准，影响 <1%) (来源: 2026-04-06)
 
 **Phase 1C: 端到端验证**
 - [ ] [HIGH] daop-estimate 端到端测试: 加载真实模型 (如 llama3:8b-q4_0)，生成预测 (来源: 2026-04-04)
@@ -35,9 +36,9 @@
 - [x] Fused op benchmark entries (来源: 2026-04-05, 完成: 2026-04-05)
 - [x] CPU orchestration overhead benchmark (来源: 2026-04-05, 完成: 2026-04-05)
 - [x] 共享基础设施 `perf/common.go` (来源: 2026-04-05, 完成: 2026-04-05)
-- [ ] 端到端验证: estimate qwen3:1.7b 误差 < 2x vs 实际 75ms/tok (来源: 2026-04-05)
-  - 当前状态: 272ms 预测 vs 75ms 实际 = 3.6x 误差（从 18x 降至 3.6x）
-  - 主要剩余误差来源: benchmark bw_eff 过低（见 Phase 1F）
+- [x] 端到端验证: estimate qwen3:1.7b 误差 < 2x vs 实际 75ms/tok (来源: 2026-04-05, 完成: 2026-04-06)
+  - 最终结果: 64.4ms 预测 vs 61.8ms VK实测 = **1.04x 误差** (从 18x → 3.6x → 1.04x)
+  - Per-op 验证: 主力 q4_K MUL_MAT 1.06x，vocab 外推(M=151936) 0.89x
 
 **Phase 1E: Direct Backend Execution（benchmark 在 CPU 而非 GPU 运行的修正）**
 - [x] `ComputeOnBackend(backendIdx)` CGO 方法 + `transfer_ctx_tensors` C helper (来源: 2026-04-05, 完成: 2026-04-05)
@@ -53,15 +54,16 @@
 - [x] 去除 per-op OverheadUs: dispatch overhead 是 per-batch 而非 per-op (来源: 2026-04-05, 完成: 2026-04-05)
 
 **Phase 1F: Benchmark 精度提升（3.6x → <2x 误差）**
-- [ ] [HIGH] benchmark bw_eff 严重偏低 (q4_0: 0.096, q8_0: 0.095): reference curve 只在 M=K=4096 采样，小 N 带宽利用率被低估 ~10x (来源: 2026-04-05)
-- [ ] MUL_MAT_VEC 独立 calibration: N=1~8 走 VEC shader，需独立效率常数 (来源: 2026-04-05)
-- [ ] 多 shape 覆盖: 覆盖模型常见的 (M,K) 对，不只是 4096x4096 (来源: 2026-04-05)
-- [ ] 小 N 直接测量: 对 N=1,2,4,8 直接 benchmark 延迟，不用 roofline 外推 (来源: 2026-04-05)
+- [x] [HIGH] benchmark bw_eff 严重偏低: 改用 3×3 (M,K) 网格 + direct interpolation 取代单点 roofline (来源: 2026-04-05, 完成: 2026-04-06)
+- [x] MUL_MAT_VEC 独立 calibration: strategic N=1,32,512 直接测量 (来源: 2026-04-05, 完成: 2026-04-06)
+- [x] 多 shape 覆盖: 3×3 log-spaced (M,K) = {512, 2048, 8192} 网格 (来源: 2026-04-05, 完成: 2026-04-06)
+- [x] 小 N 直接测量: strategic N points 直接 benchmark (来源: 2026-04-05, 完成: 2026-04-06)
+- [x] [HIGH] Clean graph fix: randomTensor Cast/CPY 污染 benchmark 测量，改用两阶段数据准备 (来源: 2026-04-06, 完成: 2026-04-06)
 
 **Phase 1G: Estimate 速度优化**
-- [ ] [HIGH] SkipWeightAlloc: model.New() 跳过 ggml_backend_alloc_ctx_tensors_from_buft，不分配 GPU 权重 buffer。tensor metadata 仍正常创建（shape/dtype），只是 buffer=NULL (来源: 2026-04-05)
-- [ ] [HIGH] Go 层 backend assignment: 替代 split_graph，根据 schedule + tensor name (blk.{i}.*) 在 Go 层标记每个 graph node 的 backend。不需要 weight buffer 归属 (来源: 2026-04-05)
-- [ ] 合并两次 model.New() 为一次: discoverModelSchedule 不再需要单独加载模型，schedule 在 Go 层构建 (来源: 2026-04-05)
+- [x] [HIGH] SkipWeightAlloc: model.New() 跳过 ggml_backend_alloc_ctx_tensors_from_buft (来源: 2026-04-05, 完成: 2026-04-06)
+- [x] [HIGH] Go 层 backend assignment: assignBackends() 替代 split_graph (来源: 2026-04-05, 完成: 2026-04-06)
+- [x] 合并两次 model.New() 为一次: EstimateModel 单次加载 (来源: 2026-04-05, 完成: 2026-04-06)
 - [ ] Server API 路径: daop-estimate 作为 server 内 API 时，直接复用已加载模型的 backend，零额外开销 (来源: 2026-04-05)
 
 **Phase 1H: Partial Offload Estimate**
