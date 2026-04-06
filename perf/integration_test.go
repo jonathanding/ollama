@@ -88,7 +88,7 @@ func TestEndToEndEstimation_Synthetic(t *testing.T) {
 		// FLASH_ATTN decode
 		nodes = append(nodes, ml.GraphNode{
 			Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
-			InputShapes: [][]int64{{128, 32, 1, 1}, {128, 32, 2048, 1}},
+			InputShapes: [][]int64{{128, 1, 32, 1}, {128, 2048, 32, 1}},
 		})
 		// FFN: up [14336, 4096] × [4096, 1]
 		nodes = append(nodes, ml.GraphNode{

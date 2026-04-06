@@ -77,8 +77,8 @@ func TestNodeToQueryShape_FlashAttn(t *testing.T) {
 		Backend:      "cuda",
 		ComputeDtype: "f16",
 		InputShapes: [][]int64{
-			{128, 32, 1, 1},    // Q
-			{128, 32, 2048, 1}, // K
+			{128, 1, 32, 1},    // Q: ne=[head_dim, seqQ=1, num_heads, batch]
+			{128, 2048, 32, 1}, // K: ne=[head_dim, seqKV=2048, num_kv_heads, batch]
 		},
 	}
 	op, shape, _, _ := nodeToQueryShape(node)
@@ -94,8 +94,8 @@ func TestNodeToQueryShape_FlashAttn_Prefill(t *testing.T) {
 		Backend:      "cuda",
 		ComputeDtype: "f16",
 		InputShapes: [][]int64{
-			{128, 32, 512, 1},
-			{128, 32, 512, 1},
+			{128, 512, 32, 1}, // Q: ne=[head_dim, seqQ=512, num_heads, batch]
+			{128, 512, 32, 1}, // K: ne=[head_dim, seqKV=512, num_kv_heads, batch]
 		},
 	}
 	_, shape, _, _ := nodeToQueryShape(node)
@@ -402,7 +402,7 @@ func TestEstimatePhase_LlamaLikeDecodeLayer(t *testing.T) {
 		{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
 			InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
 		{Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
-			InputShapes: [][]int64{{128, 32, 1, 1}, {128, 32, 2048, 1}}},
+			InputShapes: [][]int64{{128, 1, 32, 1}, {128, 2048, 32, 1}}},
 		{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
 			InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
 		{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
@@ -516,7 +516,7 @@ func TestEstimatePhase_LlamaDecodeLayerNoWarnings(t *testing.T) {
 			InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
 		{Op: "ROPE", Backend: "cuda", Shape: [4]int64{128, 32, 1, 1}, ComputeDtype: "f32"},
 		{Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
-			InputShapes: [][]int64{{128, 32, 1, 1}, {128, 32, 2048, 1}}},
+			InputShapes: [][]int64{{128, 1, 32, 1}, {128, 2048, 32, 1}}},
 		{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
 			InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
 		{Op: "ADD", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
@@ -548,7 +548,7 @@ func TestEstimatePhase_GemmaDecodeLayerNoWarnings(t *testing.T) {
 			InputShapes: [][]int64{{4096, 4096}, {4096, 1}}},
 		{Op: "ROPE", Backend: "cuda", Shape: [4]int64{128, 32, 1, 1}, ComputeDtype: "f32"},
 		{Op: "FLASH_ATTN_EXT", Backend: "cuda", ComputeDtype: "f16",
-			InputShapes: [][]int64{{128, 32, 1, 1}, {128, 32, 2048, 1}}},
+			InputShapes: [][]int64{{128, 1, 32, 1}, {128, 2048, 32, 1}}},
 		{Op: "SOFT_MAX", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
 		{Op: "ADD", Backend: "cuda", Shape: [4]int64{4096, 1, 1, 1}, ComputeDtype: "f32"},
 		{Op: "MUL_MAT", Backend: "cuda", ComputeDtype: "f16", WeightDtype: "q4_0",
