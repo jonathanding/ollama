@@ -1,6 +1,7 @@
 package perf
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"sort"
@@ -68,6 +69,38 @@ func materializeTensor(backend ml.Backend, dt ml.DType, shape ...int) []byte {
 	prepCtx.Forward(castTensor)
 	prepCtx.ComputeOnBackend(0, castTensor)
 	return castTensor.Bytes()
+}
+
+// prepKey identifies a unique (dtype, shape) combination for caching materialized tensor bytes.
+type prepKey struct {
+	dtype string
+	shape string
+}
+
+// BytesCache caches materialized tensor bytes to avoid redundant prep work.
+type BytesCache map[prepKey][]byte
+
+// materializeTensorCached is like materializeTensor but caches results.
+// Same (dtype, shape) combination returns the same bytes without re-executing Cast.
+func materializeTensorCached(backend ml.Backend, cache BytesCache, dt ml.DType, shape ...int) []byte {
+	key := prepKey{dtypeToString(dt), fmt.Sprint(shape)}
+	if b, ok := cache[key]; ok {
+		return b
+	}
+	b := materializeTensor(backend, dt, shape...)
+	cache[key] = b
+	return b
+}
+
+// randomLeafTensor creates a tensor with random data as a graph leaf node.
+// For f32: uses FromFloats directly (no Cast, no prep context).
+// For non-f32: uses materializeTensorCached + FromBytes to avoid injecting Cast ops.
+func randomLeafTensor(ctx ml.Context, backend ml.Backend, cache BytesCache, dt ml.DType, shape ...int) ml.Tensor {
+	if dt == ml.DTypeF32 {
+		return randomTensor(ctx, ml.DTypeF32, shape...)
+	}
+	bytes := materializeTensorCached(backend, cache, dt, shape...)
+	return ctx.Input().FromBytes(dt, bytes, shape...)
 }
 
 // opRegistry maps GGML op names to their benchmark definitions.

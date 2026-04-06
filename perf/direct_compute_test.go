@@ -465,3 +465,91 @@ func TestMulMatCleanGraph_TimingAccuracy(t *testing.T) {
 	assert.Less(t, q40Time, f32Time*2,
 		"q4_0 should not be much slower than f32 — if it is, Cast timing may still be included")
 }
+
+func TestMaterializeTensorCached_HitAndMiss(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	cache := make(BytesCache)
+
+	// Miss: first call creates bytes
+	b1 := materializeTensorCached(backend, cache, ml.DTypeQ40, 64, 32)
+	require.NotNil(t, b1)
+	assert.Len(t, cache, 1, "first call should add one entry")
+
+	// Hit: same dtype+shape returns cached bytes (same slice)
+	b2 := materializeTensorCached(backend, cache, ml.DTypeQ40, 64, 32)
+	assert.Equal(t, len(b1), len(b2), "cached bytes should have same length")
+	assert.Len(t, cache, 1, "second call should not add new entry")
+
+	// Miss: different shape
+	b3 := materializeTensorCached(backend, cache, ml.DTypeQ40, 128, 32)
+	assert.Len(t, cache, 2, "different shape should add new entry")
+	assert.NotEqual(t, len(b1), len(b3), "different shapes should produce different byte lengths")
+
+	// Miss: different dtype, same shape
+	b4 := materializeTensorCached(backend, cache, ml.DTypeF16, 64, 32)
+	assert.Len(t, cache, 3, "different dtype should add new entry")
+	assert.NotEqual(t, len(b1), len(b4), "different dtypes should produce different byte lengths")
+}
+
+func TestRandomLeafTensor_F32_NoPrep(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	cache := make(BytesCache)
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	// f32 should use randomTensor directly, not materialize
+	leaf := randomLeafTensor(ctx, backend, cache, ml.DTypeF32, 256)
+	require.NotNil(t, leaf)
+	assert.Len(t, cache, 0, "f32 should not add to cache — no materialization needed")
+}
+
+func TestRandomLeafTensor_Q40_UsesCache(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	cache := make(BytesCache)
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	leaf := randomLeafTensor(ctx, backend, cache, ml.DTypeQ40, 64, 32)
+	require.NotNil(t, leaf)
+	assert.Len(t, cache, 1, "q4_0 should add to cache")
+
+	// Second call with same shape should hit cache
+	leaf2 := randomLeafTensor(ctx, backend, cache, ml.DTypeQ40, 64, 32)
+	require.NotNil(t, leaf2)
+	assert.Len(t, cache, 1, "same shape should hit cache")
+}
+
+func TestRandomLeafTensor_CleanGraph(t *testing.T) {
+	backend := setupBenchBackend(t)
+
+	caps := DiscoverBackend(backend)
+	if !caps.HasGPUTimestamp {
+		t.Skip("no GPU timestamp support")
+	}
+
+	cache := make(BytesCache)
+
+	backend.EnableGPUTimestamps(true)
+	defer backend.EnableGPUTimestamps(false)
+
+	ctx := backend.NewContext()
+	defer ctx.Close()
+
+	// Use f16 leaf tensors for ADD — verifies no Cast/CPY in graph
+	a16 := randomLeafTensor(ctx, backend, cache, ml.DTypeF16, 256)
+	b16 := randomLeafTensor(ctx, backend, cache, ml.DTypeF16, 256)
+	out := a16.Add(ctx, b16)
+	ctx.Forward(out)
+
+	ctx.ComputeOnBackend(0, out)
+	ctx.ComputeOnBackend(0, out)
+	timings := backend.GetOpTimings()
+
+	for _, timing := range timings {
+		assert.NotEqual(t, "CPY", timing.OpName,
+			"randomLeafTensor graph should not contain CPY ops")
+	}
+}
