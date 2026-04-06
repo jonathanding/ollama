@@ -136,7 +136,7 @@ nodeToQueryShape 提取: shape = [seqQ=300, seqKV=512, Q=16, KV=8]
 
 **Benchmark 对比**: benchmark 用精确 shape [n,n] 跑 kernel，没有 padding/masking，所以 benchmark 的 [300,512] 附近数据点反映的是真实的 512 计算量。
 
-**修复方向**: estimate 在构造 FLASH_ATTN shape 时，用实际 input length（batchSize / positions）而不是 cache padding 后的 K tensor 维度。
+**修复**: `InterpolateFlashAttn` 的 prefill 分量改用 `seqQ` 而非 `seqKV` 插值（`interpolate.go:369`）。benchmark prefill 数据是方阵 [n,n]，GPU kernel 高效跳过 masked padding，所以 [seqQ, seqKV] 的有效计算量接近 [seqQ, seqQ]。同时添加单调性下限，确保 blend 结果不低于 decode 延迟。预期从 2.08x → ~0.84x。
 
 ---
 

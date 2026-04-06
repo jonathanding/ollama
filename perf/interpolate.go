@@ -316,8 +316,11 @@ func InterpolateFlashAttnMultiHead(curves []OperatorCurve, querySeqQ, querySeqKV
 }
 
 // InterpolateFlashAttn interpolates flash_attn latency between decode and prefill regimes.
-// Decode regime: seqQ=1, varying seqKV
-// Prefill regime: seqQ=seqKV
+// Decode regime: seqQ=1, varying seqKV (context length determines cost).
+// Prefill regime: seqQ=seqKV (square matrices from benchmark).
+// For non-square queries (seqQ < seqKV, e.g. CachePadding-aligned KV cache), the prefill
+// component interpolates at seqQ rather than seqKV, because GPU flash attention kernels
+// skip masked padding positions efficiently.
 // Blends between regimes using log-space interpolation on seqQ.
 func InterpolateFlashAttn(curve *OperatorCurve, querySeqQ, querySeqKV int64) float64 {
 	// Separate decode and prefill points
@@ -335,7 +338,7 @@ func InterpolateFlashAttn(curve *OperatorCurve, querySeqQ, querySeqKV int64) flo
 		return 0
 	}
 	if len(decodePts) == 0 {
-		return Interpolate1DByDim(prefillPts, 1, querySeqKV)
+		return Interpolate1DByDim(prefillPts, 1, querySeqQ)
 	}
 	if len(prefillPts) == 0 {
 		return Interpolate1DByDim(decodePts, 1, querySeqKV)
@@ -356,9 +359,14 @@ func InterpolateFlashAttn(curve *OperatorCurve, querySeqQ, querySeqKV int64) flo
 		return Interpolate1DByDim(decodePts, 1, querySeqKV)
 	}
 
-	// Blend between decode and prefill
+	// Blend between decode and prefill.
+	// Decode uses seqKV (context length determines decode cost).
+	// Prefill uses seqQ: benchmark prefill data is square [n,n], and GPU flash
+	// attention kernels skip masked padding positions efficiently, so the effective
+	// compute for [seqQ, seqKV] with CachePadding-aligned seqKV is closer to
+	// [seqQ, seqQ] than [seqKV, seqKV].
 	decodeLat := Interpolate1DByDim(decodePts, 1, querySeqKV)
-	prefillLat := Interpolate1DByDim(prefillPts, 1, querySeqKV)
+	prefillLat := Interpolate1DByDim(prefillPts, 1, querySeqQ)
 
 	// Compute blend factor: t=0 at decode, t=1 at prefill
 	t := math.Log(float64(querySeqQ)) / math.Log(float64(querySeqKV))
@@ -370,5 +378,13 @@ func InterpolateFlashAttn(curve *OperatorCurve, querySeqQ, querySeqKV int64) flo
 	}
 
 	// Log-space blend
-	return math.Exp(math.Log(decodeLat)*(1-t) + math.Log(prefillLat)*t)
+	result := math.Exp(math.Log(decodeLat)*(1-t) + math.Log(prefillLat)*t)
+
+	// Monotonicity floor: adding more query tokens should never be cheaper than
+	// pure decode. When seqQ << seqKV, prefillLat at seqQ can be very small,
+	// pulling the blend below decodeLat. Clamp to ensure correctness.
+	if result < decodeLat {
+		result = decodeLat
+	}
+	return result
 }

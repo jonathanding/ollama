@@ -498,6 +498,80 @@ func TestInterpolateFlashAttn_EmptyBothRegimes(t *testing.T) {
 	assert.Equal(t, 0.0, result) // no matching regime
 }
 
+func TestInterpolateFlashAttn_PaddedSeqKV(t *testing.T) {
+	// Simulates the real scenario: seqQ=300, seqKV=512 (CachePadding aligned).
+	// GPU efficiently skips masked padding positions, so actual compute is closer
+	// to [seqQ, seqQ] than [seqQ, seqKV]. The prefill component should interpolate
+	// at seqQ (not seqKV) to reflect this.
+	curve := makeFlashAttnCurve(
+		[]int64{64, 256, 512, 1024},
+		[]int64{64, 256, 512, 1024},
+		func(seqQ, seqKV int64) float64 {
+			// Latency grows quadratically with seq length for prefill
+			return float64(seqQ*seqKV) * 0.01
+		},
+	)
+
+	// Non-square query: seqQ=300, seqKV=512 (padded from 300 to next CachePadding multiple)
+	paddedResult := InterpolateFlashAttn(curve, 300, 512)
+
+	// Pure prefill at seqQ=300 (no padding)
+	unpaddedResult := InterpolateFlashAttn(curve, 300, 300)
+
+	// Pure prefill at seqQ=512 (full square matrix, what old code effectively computed)
+	fullSquareResult := InterpolateFlashAttn(curve, 512, 512)
+
+	// The padded result should be much closer to the unpadded [300,300] result
+	// than to the full [512,512] result, because GPU skips masked positions.
+	distToUnpadded := math.Abs(paddedResult - unpaddedResult)
+	distToSquare := math.Abs(paddedResult - fullSquareResult)
+	assert.Less(t, distToUnpadded, distToSquare,
+		"padded [300,512] should be closer to [300,300] than [512,512]")
+
+	// Specifically: padded result should NOT exceed 2x the unpadded result.
+	// Before fix, it was ~2x overestimate. After fix it should be close.
+	assert.Less(t, paddedResult/unpaddedResult, 1.5,
+		"padded [300,512] should be within 1.5x of unpadded [300,300]")
+}
+
+func TestInterpolateFlashAttn_PaddedSeqKV_PureDecodeUnchanged(t *testing.T) {
+	// Verify that pure decode (seqQ=1) is unaffected by the fix.
+	curve := makeFlashAttnCurve(
+		[]int64{64, 256, 512, 1024},
+		[]int64{64, 256, 512, 1024},
+		func(seqQ, seqKV int64) float64 {
+			return float64(seqQ*seqKV) * 0.01
+		},
+	)
+
+	// Pure decode: seqQ=1, seqKV=512
+	result := InterpolateFlashAttn(curve, 1, 512)
+	expected := Interpolate1DByDim(curve.Points[:4], 1, 512) // decode points only
+	assert.InDelta(t, expected, result, 1.0)
+}
+
+func TestInterpolateFlashAttn_PaddedSeqKV_PurePrefillUnchanged(t *testing.T) {
+	// Verify that pure prefill (seqQ=seqKV) is unaffected.
+	curve := makeFlashAttnCurve(
+		[]int64{64, 256, 512},
+		[]int64{64, 256, 512},
+		func(seqQ, seqKV int64) float64 {
+			return float64(seqQ*seqKV) * 0.01
+		},
+	)
+
+	result := InterpolateFlashAttn(curve, 384, 384)
+	// When seqQ=seqKV, takes pure prefill path — should be unchanged
+	var prefillPts []LatencyPoint
+	for _, pt := range curve.Points {
+		if pt.Shape[0] == pt.Shape[1] {
+			prefillPts = append(prefillPts, pt)
+		}
+	}
+	expected := Interpolate1DByDim(prefillPts, 1, 384)
+	assert.InDelta(t, expected, result, 1.0)
+}
+
 func TestInterpolateMulMat_Extrapolation(t *testing.T) {
 	// Grid with max M=8192. Query at M=16384 (2x outside grid).
 	curves := []OperatorCurve{
