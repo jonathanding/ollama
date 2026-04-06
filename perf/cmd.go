@@ -64,7 +64,11 @@ func RunBenchmarkCLI(backend ml.Backend, opts BenchmarkCLIOptions) error {
 
 // RunEstimateCLI is the entry point for `ollama daop-estimate`.
 func RunEstimateCLI(modelRef string, opts EstimateCLIOptions) error {
-	result, err := RunEstimate(modelRef, opts.Profile)
+	inputLength := opts.InputLength
+	if inputLength <= 0 {
+		inputLength = 512
+	}
+	result, err := RunEstimate(modelRef, opts.Profile, inputLength)
 	if err != nil {
 		return err
 	}
@@ -119,9 +123,10 @@ type BenchmarkCLIOptions struct {
 
 // EstimateCLIOptions controls `ollama daop-estimate`.
 type EstimateCLIOptions struct {
-	Profile string // --profile: profile path
-	JSON    bool   // --json: output as JSON
-	Verbose bool   // --verbose: show per-op breakdown
+	Profile     string // --profile: profile path
+	JSON        bool   // --json: output as JSON
+	Verbose     bool   // --verbose: show per-op breakdown
+	InputLength int    // --input-length: input prompt length in tokens (default 512)
 }
 
 // ViewerCLIOptions controls `ollama daop-viewer`.

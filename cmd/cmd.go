@@ -2107,9 +2107,11 @@ func daopBenchHandler(cmd *cobra.Command, args []string) error {
 func daopEstimateHandler(cmd *cobra.Command, args []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	verbose, _ := cmd.Flags().GetBool("detail")
+	inputLength, _ := cmd.Flags().GetInt("input-length")
 	return perf.RunEstimateCLI(args[0], perf.EstimateCLIOptions{
-		JSON:    jsonOutput,
-		Verbose: verbose,
+		JSON:        jsonOutput,
+		Verbose:     verbose,
+		InputLength: inputLength,
 	})
 }
 

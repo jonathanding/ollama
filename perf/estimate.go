@@ -533,7 +533,7 @@ func estimatePhase(profile *Profile, nodes []ml.GraphNode, warnings *[]string) P
 }
 
 // EstimateModel estimates inference performance for a model using a calibrated profile.
-func EstimateModel(profile *Profile, modelPath string) (*EstimateResult, error) {
+func EstimateModel(profile *Profile, modelPath string, inputLength int) (*EstimateResult, error) {
 	ensureLibraryPath()
 
 	// Single model load: skip weight buffer allocation, capture raw graph
@@ -559,7 +559,7 @@ func EstimateModel(profile *Profile, modelPath string) (*EstimateResult, error) 
 
 	// Initialize KV cache for graph capture
 	if cache := m.Config().Cache; cache != nil {
-		cache.Init(m.Backend(), ml.DTypeF16, 1, 2048, 512)
+		cache.Init(m.Backend(), ml.DTypeF16, 1, inputLength, inputLength)
 	}
 
 	// Capture raw graph nodes (no split_graph, backend="" initially)
@@ -598,7 +598,7 @@ func EstimateModel(profile *Profile, modelPath string) (*EstimateResult, error) 
 		return ctx.GraphNodes(), nil
 	}
 
-	prefillNodes, err := captureGraph(512)
+	prefillNodes, err := captureGraph(inputLength)
 	if err != nil {
 		return nil, fmt.Errorf("prefill graph: %w", err)
 	}
@@ -639,7 +639,7 @@ func EstimateModel(profile *Profile, modelPath string) (*EstimateResult, error) 
 }
 
 // RunEstimate is the CLI entry point for estimation.
-func RunEstimate(modelRef string, profilePath string) (*EstimateResult, error) {
+func RunEstimate(modelRef string, profilePath string, inputLength int) (*EstimateResult, error) {
 	if profilePath == "" {
 		profilePath = ProfilePath()
 	}
@@ -653,5 +653,5 @@ func RunEstimate(modelRef string, profilePath string) (*EstimateResult, error) {
 		return nil, err
 	}
 
-	return EstimateModel(profile, ggufPath)
+	return EstimateModel(profile, ggufPath, inputLength)
 }
