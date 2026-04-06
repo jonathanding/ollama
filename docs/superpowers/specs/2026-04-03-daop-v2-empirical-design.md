@@ -124,12 +124,201 @@ Each sampling point goes through a two-level measurement pipeline:
 
 2. **Adaptive level**: `AdaptiveSample1D` uses existing measured points to find intervals with poor interpolation fit (`worstInterval`), measures one midpoint per round, and stops when interpolation error < `ErrorThreshold` (default 5%). This ensures the curve is well-represented without over-sampling smooth regions.
 
-### Phase 2: Full Operator Coverage (out of scope)
+### Phase 2: MUL_MAT Accuracy Redesign
+
+**Problem**: Phase 1's roofline model has 3.6x prediction error for small models (qwen3:1.7b decode: 272ms predicted vs 75ms actual). Root causes:
+
+1. **Single calibration point**: Only (M,K)=(4096,4096) was benchmarked. Extrapolating to qwen3:1.7b's smaller shapes (e.g., 2048×2048) fails because the relationship between (M,K) size and latency is non-linear at small N.
+2. **Roofline structurally wrong for VEC**: At N=1 with q4_0, effective BW=4.68 GB/s (9.6% of peak), effective compute=16.6 GFLOPS (1.06% of peak). The op is "latency-bound" — dominated by dequantization pipeline, memory latency, and warp scheduling. The roofline `max(compute, bw)` model cannot represent this regime.
+3. **Roofline self-consistent at calibration point**: At (4096,4096,N=1,q4_0), roofline predicts 2023μs vs measured 2021μs (<0.1% error). The error is purely from extrapolation, not from the model at its calibration shape.
+
+**Design**: Replace roofline as the primary MUL_MAT prediction engine with direct interpolation from multi-(M,K) reference curves. Roofline is retained as a validator and extrapolation fallback.
+
+#### 2.1 Architecture Overview
+
+| Role | Method | When Used |
+|------|--------|-----------|
+| **Primary prediction** | IDW interpolation from reference curves | Query (M,K) within range of measured reference points |
+| **Extrapolation fallback** | Nearest reference × scaling factor `(M_q×K_q)/(M_ref×K_ref)` | Query (M,K) far from all reference points |
+| **Anomaly monitoring** | Roofline cross-check + multi-dimensional consistency checks | During benchmark (online) and after benchmark (report) |
+| **Confidence scoring** | IDW distance from query to nearest reference | During estimation, warn if low confidence |
+
+#### 2.2 (M,K) Grid + Strategic N Sampling
+
+##### (M,K) Grid: Systematic Log-Spaced Coverage
+
+Instead of hardcoding specific model shapes, use a 3×3 log-spaced grid in (M,K) space:
+
+**Grid values**: {512, 2048, 8192} — log-spaced (factor of 4 between steps)
+
+```
+K\M      512        2048       8192
+512    (512,512)  (2048,512)  (8192,512)
+2048   (512,2048) (2048,2048) (8192,2048)
+8192   (512,8192) (2048,8192) (8192,8192)
+```
+
+**9 (M,K) pairs** — provides uniform coverage of the (log M, log K) plane. Any query shape within [512, 8192]² falls inside the convex hull, enabling accurate IDW interpolation.
+
+Coverage of qwen3:1.7b actual shapes (hidden=2048, intermediate=8960, GQA kv_heads=4):
+- (512, 2048) — exact hit (K/V projection)
+- (2048, 2048) — exact hit (Q/O projection)
+- (8960, 2048) — near (8192, 2048), IDW interpolates
+- (2048, 8960) — near (2048, 8192), IDW interpolates
+
+**Design principle**: The grid is model-agnostic. It covers any transformer architecture with dimensions in [512, 8192]. Larger shapes (>8192) require extrapolation via the scaling fallback (Section 2.4).
+
+##### N Sampling: Roofline-Guided Strategic Points
+
+Instead of full adaptive curves over N, measure at **3 strategic N values** per (M,K,dtype):
+
+| N | Purpose |
+|---|---------|
+| 1 | Decode (BW-bound / VEC regime) |
+| N_cross | Roofline crossover point — BW↔compute transition |
+| 512 | Prefill (compute-bound) |
+
+**N_cross** is computed from hardware peaks — where compute time equals BW time:
+
+```
+N_cross = peak_tops[dtype] × elemBytes(dtype) / (2 × peak_bw)
+```
+
+This depends only on dtype and hardware, not on (M,K):
+
+| dtype | N_cross (Intel iGPU) |
+|-------|---------------------|
+| q4_0 | ~9 |
+| q8_0 | ~6 |
+| f16 | ~12 |
+| f32 | ~19 |
+
+**Rationale**: Roofline provides the *structure* (where to measure), measurements provide the *accuracy*. Three points define two segments in log-log space:
+- N=1 to N_cross: BW-bound segment (relatively flat — weight bytes dominate)
+- N_cross to N=512: compute-bound segment (linear in log-log — latency ∝ N)
+
+Piecewise linear interpolation in log-log space between these 3 points covers any query N.
+
+**Benchmark step count**: 9 (M,K) × 4 dtypes × 3 N = **108 measurements**
+
+**Benchmark time**: ~3–4 minutes on Intel iGPU (each measurement ~2s with convergence early stop). This is ~4x faster than full adaptive curves.
+
+#### 2.3 Prediction: Two-Stage Interpolation
+
+For any query (M_q, K_q, N_q, dtype):
+
+1. **Filter** reference points by matching dtype
+2. **Stage 1 — N interpolation**: For each (M,K) grid point, interpolate among its 3 measured N values (N=1, N_cross, N=512) in log-log space to get latency at N_q
+3. **Stage 2 — (M,K) interpolation**: IDW blend in log (M,K) space across grid points to get final latency
+
+This replaces the Phase 1 split between VEC (N≤8) and MAT (N>8) paths. The two-stage interpolation works uniformly for all N.
+
+```go
+// lookupLatencyV3 MUL_MAT case (simplified)
+case "MUL_MAT", "MUL_MAT_ADD":
+    lat := PredictMulMatDirect(profile, M, K, N, mappedWdt)
+    if lat > 0 {
+        return lat, nil
+    }
+    // Fallback: roofline (for backward compatibility with v2 profiles)
+    return PredictMulMatLatency(&profile.Hardware, M, K, N, mappedWdt), nil
+```
+
+Note: `InterpolateMulMat()` already implements this two-stage pattern (1D interpolation over N per curve, then IDW blend). Each "curve" simply has 3 points instead of 8–10 from adaptive sampling.
+
+#### 2.4 Extrapolation: Scaling Fallback
+
+When the query (M,K) is far from all reference points (IDW distance > threshold), direct interpolation degrades to nearest-neighbor, losing accuracy. In this case, apply physics-informed scaling:
+
+```
+lat_predicted = lat_nearest × scale_factor(M_q, K_q, N_q, M_ref, K_ref)
+```
+
+Where:
+- **BW-bound (small N)**: `scale_factor ≈ (M_q × K_q) / (M_ref × K_ref)` — latency proportional to weight size
+- **Compute-bound (large N)**: `scale_factor ≈ (M_q × K_q × N_q) / (M_ref × K_ref × N_ref)` — latency proportional to FLOPs
+- **Transition**: blend between the two using the roofline balance point
+
+This is essentially roofline with the nearest reference point as the "anchor" instead of global efficiency constants. It preserves the physics structure without requiring accurate global calibration.
+
+#### 2.5 Anomaly Monitoring
+
+##### 2.5.1 Online Checks (During Benchmark)
+
+Run after each reference curve is measured. Immediate warnings in benchmark log.
+
+**Single-curve checks:**
+
+| Check | Method | Trigger |
+|-------|--------|---------|
+| **Monotonicity** | Within a single (M,K) curve, latency must increase with N | Adjacent points where `lat[i+1] < lat[i] × 0.9` (>10% decrease) |
+| **Physical lower bound** | No measurement should be faster than theoretical minimum | `measured < min(weight_bytes/peak_bw, 2MKN/peak_tops)` |
+| **Measurement stability** | Per-point CV from convergent measurement | `CV > 0.20` (20%) after convergence attempts |
+| **Adaptive convergence** | Adaptive sampling should converge | `max_error > ErrorThreshold` after all refinement rounds exhausted |
+
+**Cross-curve checks (run after all curves of same dtype):**
+
+| Check | Method | Trigger |
+|-------|--------|---------|
+| **Scaling consistency** | At large N (compute-bound), latency should scale ∝ M×K across shapes | `lat(M2,K2)/lat(M1,K1)` deviates from `(M2×K2)/(M1×K1)` by >2x |
+| **Efficiency consistency** | Extract compute_eff from each curve at large N; should be similar | `max(eff) / min(eff) > 2.0` across same-dtype curves |
+| **Roofline cross-check** | Compare measured N=1 latency against roofline prediction using efficiency from large-N points | `measured / roofline_predicted > 5x` (expected ~1-3x due to VEC overhead) |
+
+##### 2.5.2 Offline Report (After Benchmark)
+
+Generated as summary after benchmark completes. Saved to profile or printed to console.
+
+**Cross-dtype checks:**
+
+| Check | Method | Trigger |
+|-------|--------|---------|
+| **Dtype ordering** | At same (M,K) and large N: q4_0 should be fastest (least data), f32 slowest | Ordering violated |
+| **Peak TOPS consistency** | Implied TOPS from large-N measurements should not exceed hardware peak | `implied_tops > 1.1 × peak_tops` |
+
+**Temporal checks (when re-running benchmark):**
+
+| Check | Method | Trigger |
+|-------|--------|---------|
+| **Reproducibility** | Compare new profile against previous profile | Same (M,K,N,dtype) point changed by >30% |
+| **Hardware degradation** | Peak TOPS/BW from hw characterization vs previous | Changed by >20% |
+
+##### 2.5.3 Estimation-Time Checks
+
+Run during `daop-estimate` to flag unreliable predictions.
+
+| Check | Method | Output |
+|-------|--------|--------|
+| **IDW distance** | Compute min log-distance from query (M,K) to nearest reference curve | Warning if distance > `ln(2)` (query shape >2x away from nearest reference) |
+| **N range coverage** | Query N within measured range of reference curves? | Warning if extrapolating beyond measured N range |
+| **Confidence score** | `confidence = 1 / (1 + min_distance)` normalized to [0, 1] | Print in estimate output; low confidence (<0.5) gets explicit warning |
+
+#### 2.6 Efficiency Constants: Retained for Validation Only
+
+Phase 1's `extractEfficiencyConstants` and `EfficiencyConstants` in `HardwareProfile` are retained but their role changes:
+
+| Phase 1 | Phase 2 |
+|---------|---------|
+| Primary prediction input | Validation-only: cross-check measured data |
+| Extracted from every (M,K) curve | Extracted from (4096,4096) curve only (canonical reference) |
+| Stored in profile, required for estimation | Stored in profile, optional (estimation works without them) |
+
+#### 2.7 Code Changes Summary
+
+| File | Change |
+|------|--------|
+| `perf/estimate.go` (lookupLatencyV3) | MUL_MAT: call PredictMulMatDirect for all N, not just VEC range. Remove VEC/MAT split. |
+| `perf/bench.go` (RunBenchmark) | Extract efficiency only from (4096,4096) curve. Skip for other (M,K). |
+| `perf/bench.go` (benchmarkMulMat) | Dynamic N_max cap based on (M,K) size. |
+| `perf/registry.go` (Phase1MulMatFixedDims) | Replace 70B shapes with small-model shapes (2048, 5504). |
+| `perf/monitor.go` (new) | Anomaly monitoring: online checks, offline report, confidence scoring. |
+| `perf/bench.go` (PredictMulMatDirect) | Already implemented in Phase 1; no change needed. |
+
+### Phase 3: Extended Coverage (out of scope)
 
 - Extend to specialized architecture operators (SSM_CONV, SSM_SCAN for Mamba; TRI, SOLVE_TRI for DeltaNet; Conv2D/Conv3D for vision models).
 - **Cross-backend transfer cost**: Measure interconnect bandwidth (PCIe, NVLink), add transfer latency when consecutive graph nodes are on different backends. Phase 1 assumes single backend.
 - **Incremental calibration (`--update`)**: Load existing profile, diff against model graph to find uncalibrated (op, dtype) combos, benchmark only the missing ones, merge into profile. v1's `RunUpdateBenchmark` pattern is preserved but reimplemented on the new data model.
-- **`HardwareProfile.InterconnectBWBytesPerSec`**: Populated in Phase 2 when cross-backend support is added. Phase 1 leaves it as 0.
+- **`HardwareProfile.InterconnectBWBytesPerSec`**: Populated in Phase 3 when cross-backend support is added. Phase 1 leaves it as 0.
 
 ## 2. Changes from v1
 
