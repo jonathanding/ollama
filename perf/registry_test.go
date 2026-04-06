@@ -120,12 +120,21 @@ func TestExpandShapes_FlashAttn_Prefill(t *testing.T) {
 }
 
 func TestExpandShapes_FlashAttn_NumHeads(t *testing.T) {
-	// 3-element gridPoint should use custom num_heads
+	// 3-element gridPoint should use custom num_heads for both Q and K/V (MHA backward compat)
 	shapes := expandShapes("FLASH_ATTN_EXT", []int64{1, 2048, 8})
 	require.Len(t, shapes, 3)
 	assert.Equal(t, []int64{128, 8, 1, 1}, shapes[0], "Q with num_heads=8")
-	assert.Equal(t, []int64{128, 8, 2048, 1}, shapes[1], "K with num_heads=8")
-	assert.Equal(t, []int64{128, 8, 2048, 1}, shapes[2], "V with num_heads=8")
+	assert.Equal(t, []int64{128, 8, 2048, 1}, shapes[1], "K with num_heads=8 (same as Q for MHA)")
+	assert.Equal(t, []int64{128, 8, 2048, 1}, shapes[2], "V with num_heads=8 (same as Q for MHA)")
+}
+
+func TestExpandShapes_FlashAttn_GQA(t *testing.T) {
+	// 4-element gridPoint: [seqQ, seqKV, numQHeads, numKVHeads]
+	shapes := expandShapes("FLASH_ATTN_EXT", []int64{1, 2048, 16, 4})
+	require.Len(t, shapes, 3)
+	assert.Equal(t, []int64{128, 16, 1, 1}, shapes[0], "Q with num_q_heads=16")
+	assert.Equal(t, []int64{128, 4, 2048, 1}, shapes[1], "K with num_kv_heads=4")
+	assert.Equal(t, []int64{128, 4, 2048, 1}, shapes[2], "V with num_kv_heads=4")
 }
 
 func TestExpandShapes_FlashAttn_DefaultHeads(t *testing.T) {
@@ -140,6 +149,20 @@ func TestExpandShapes_FlashAttn_DefaultHeads(t *testing.T) {
 func TestPhase1FlashAttnHeads(t *testing.T) {
 	heads := Phase1FlashAttnHeads()
 	assert.Equal(t, []int64{4, 8, 16, 32}, heads)
+}
+
+func TestPhase1FlashAttnGQAConfigs(t *testing.T) {
+	configs := Phase1FlashAttnGQAConfigs()
+	// 4 Q values x KV <= Q: (4,4), (8,4), (8,8), (16,4), (16,8), (16,16), (32,4), (32,8), (32,16), (32,32)
+	assert.Len(t, configs, 10)
+	// Verify all have KV <= Q
+	for _, c := range configs {
+		assert.LessOrEqual(t, c[1], c[0], "num_kv_heads (%d) must be <= num_q_heads (%d)", c[1], c[0])
+	}
+	// Verify specific entries
+	assert.Contains(t, configs, [2]int64{16, 4}, "should include GQA config Q=16,KV=4")
+	assert.Contains(t, configs, [2]int64{32, 8}, "should include GQA config Q=32,KV=8")
+	assert.Contains(t, configs, [2]int64{8, 8}, "should include MHA config Q=8,KV=8")
 }
 
 func TestParseDType(t *testing.T) {

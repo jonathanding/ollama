@@ -155,17 +155,23 @@ var opRegistry = map[string]OpRunnerML{
 		Dimensions: []string{"seq_q", "seq_kv"},
 		CreateInputs: func(ctx ml.Context, backend ml.Backend, dtypeStr string, gridPoint []int64) []ml.Tensor {
 			// Q is f32 (matmul output in real inference), K/V are f16 (KV cache)
+			// gridPoint = [seq_q, seq_kv] or [seq_q, seq_kv, num_heads] or [seq_q, seq_kv, num_q_heads, num_kv_heads]
 			seqQ, seqKV := gridPoint[0], gridPoint[1]
-			numHeads := 32
+			numQHeads := 32
+			numKVHeads := 32
 			if len(gridPoint) >= 3 {
-				numHeads = int(gridPoint[2])
+				numQHeads = int(gridPoint[2])
+				numKVHeads = numQHeads // default: MHA
 			}
-			q := randomTensor(ctx, ml.DTypeF32, 128, numHeads, int(seqQ), 1)
+			if len(gridPoint) >= 4 {
+				numKVHeads = int(gridPoint[3])
+			}
+			q := randomTensor(ctx, ml.DTypeF32, 128, numQHeads, int(seqQ), 1)
 			// K/V are f16 — use materializeTensor to avoid Cast/CPY in graph
-			kBytes := materializeTensor(backend, ml.DTypeF16, 128, numHeads, int(seqKV), 1)
-			vBytes := materializeTensor(backend, ml.DTypeF16, 128, numHeads, int(seqKV), 1)
-			k := ctx.Input().FromBytes(ml.DTypeF16, kBytes, 128, numHeads, int(seqKV), 1)
-			v := ctx.Input().FromBytes(ml.DTypeF16, vBytes, 128, numHeads, int(seqKV), 1)
+			kBytes := materializeTensor(backend, ml.DTypeF16, 128, numKVHeads, int(seqKV), 1)
+			vBytes := materializeTensor(backend, ml.DTypeF16, 128, numKVHeads, int(seqKV), 1)
+			k := ctx.Input().FromBytes(ml.DTypeF16, kBytes, 128, numKVHeads, int(seqKV), 1)
+			v := ctx.Input().FromBytes(ml.DTypeF16, vBytes, 128, numKVHeads, int(seqKV), 1)
 			return []ml.Tensor{q, k, v}
 		},
 		Run: func(ctx ml.Context, in []ml.Tensor) ml.Tensor {
@@ -333,16 +339,21 @@ func mulMatInputShapes(gridPoint []int64) (weightShape, activationShape []int) {
 func expandShapes(op string, gridPoint []int64) [][]int64 {
 	switch op {
 	case "FLASH_ATTN_EXT":
-		// gridPoint = [seq_q, seq_kv] or [seq_q, seq_kv, num_heads]
+		// gridPoint = [seq_q, seq_kv] or [seq_q, seq_kv, num_heads] or [seq_q, seq_kv, num_q_heads, num_kv_heads]
 		seqQ, seqKV := gridPoint[0], gridPoint[1]
-		numHeads := int64(32)
+		numQHeads := int64(32)
+		numKVHeads := int64(32)
 		if len(gridPoint) >= 3 {
-			numHeads = gridPoint[2]
+			numQHeads = gridPoint[2]
+			numKVHeads = numQHeads // default: MHA
+		}
+		if len(gridPoint) >= 4 {
+			numKVHeads = gridPoint[3]
 		}
 		return [][]int64{
-			{128, numHeads, seqQ, 1},  // Q
-			{128, numHeads, seqKV, 1}, // K
-			{128, numHeads, seqKV, 1}, // V
+			{128, numQHeads, seqQ, 1},   // Q
+			{128, numKVHeads, seqKV, 1}, // K
+			{128, numKVHeads, seqKV, 1}, // V
 		}
 	case "ADD", "MUL":
 		return [][]int64{gridPoint, gridPoint}
@@ -424,8 +435,23 @@ func Phase1MulMatFixedDims() [][2]int64 {
 	return pairs
 }
 
-// Phase1FlashAttnHeads returns the num_heads values for FLASH_ATTN_EXT benchmarks.
-// Covers common transformer configurations from small (4) to large (32) models.
+// Phase1FlashAttnGQAConfigs returns (numQHeads, numKVHeads) pairs for FLASH_ATTN_EXT benchmarks.
+// Covers all combinations where KV <= Q from {4, 8, 16, 32}, including both MHA and GQA configs.
+func Phase1FlashAttnGQAConfigs() [][2]int64 {
+	heads := []int64{4, 8, 16, 32}
+	var configs [][2]int64
+	for _, q := range heads {
+		for _, kv := range heads {
+			if kv <= q {
+				configs = append(configs, [2]int64{q, kv})
+			}
+		}
+	}
+	return configs
+}
+
+// Phase1FlashAttnHeads returns the unique num_q_heads values for FLASH_ATTN_EXT benchmarks.
+// Deprecated: use Phase1FlashAttnGQAConfigs for full GQA coverage.
 func Phase1FlashAttnHeads() []int64 {
 	return []int64{4, 8, 16, 32}
 }
