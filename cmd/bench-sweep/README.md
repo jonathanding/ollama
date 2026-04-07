@@ -1,6 +1,6 @@
 # bench-sweep
 
-Repeatable inference benchmark for Ollama. Sweeps multiple prompt sizes in one run, measures prefill throughput (tokens/s) and TTFT, flags unstable results via CV%, and stores named run history for cross-run comparison.
+Repeatable inference benchmark for Ollama. Sweeps multiple prompt sizes in one run, measures five metrics (prefill_ms, prefill_tps, ttft_ms, gen_ms, gen_tps), flags unstable results via CV%, and stores named run history for cross-run comparison.
 
 ---
 
@@ -67,16 +67,17 @@ bench-sweep run -model qwen3-coder-next -name baseline -sizes 512,1024,2048,4096
 Starting benchmark: model=qwen3-coder-next  sizes=512,1024,2048,4096  epochs=6  warmup=4
 
 Model: qwen3-coder-next  |  Epochs: 6  |  Warmup: 4
+note: prefill_ms is the server-side prompt processing time (Ollama internal metric); ttft_ms is the wall-clock time to first token (= prefill_ms + HTTP round-trip + scheduling, typically 80–200 ms longer on localhost).
 
-prompt_tokens │ prefill_tps (mean) │ prefill_tps (p99) │   CV% │ TTFT mean │ TTFT p99 │   CV% │ gen_tps │ status
-──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-          512 │         4,850 t/s  │         4,720 t/s │  1.8% │     28 ms │    35 ms │  2.3% │  37 t/s │ ✓
-        1,024 │         4,266 t/s  │         4,100 t/s │  2.1% │     52 ms │    64 ms │  2.8% │  37 t/s │ ✓
-        2,048 │         4,180 t/s  │         4,050 t/s │  2.4% │    103 ms │   121 ms │  3.1% │  37 t/s │ ✓
-        4,096 │         3,890 t/s  │         3,200 t/s │  8.7% │    198 ms │   240 ms │  9.2% │  36 t/s │ ⚠
-
-⚠ [size=4096] prefill_tps CV=8.7% exceeds threshold 5.0%
-  hint: consider increasing -warmup (current: 4) or closing background processes
+prompt_tokens │ prefill_ms │   CV% │ prefill_tps │   CV% │ ttft_ms    │   CV% │ gen_ms    │   CV% │ gen_tps   │   CV% │ status
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+512           │   1598 ms │  4.6% │     295 t/s │  4.6% │    1688 ms │  3.3% │    842 ms │  1.2% │    19 t/s │  1.2% │ ✓
+  note: 1 epoch(s) excluded from stats for size=1024 (early EOS)
+1024          │   3140 ms │  2.9% │     308 t/s │  2.9% │    3228 ms │  3.5% │    889 ms │  2.1% │    18 t/s │  2.1% │ ✓
+2048          │   6846 ms │  3.7% │     308 t/s │  3.7% │    6946 ms │  5.2% │    941 ms │  1.8% │    17 t/s │  1.8% │ ⚠
+⚠ [size=2048] ttft_ms CV=5.2% exceeds threshold 5.0%
+  note: 2 epoch(s) excluded from stats for size=4096 (early EOS)
+4096          │  12448 ms │  1.0% │     326 t/s │  1.0% │   12548 ms │  2.2% │   1000 ms │  1.4% │    16 t/s │  1.4% │ ✓
 
 Run "baseline" saved to C:\Users\you\.ollama\bench\qwen3-coder-next_baseline.json
 ```
@@ -124,23 +125,35 @@ Run history is stored in `~/.ollama/bench/` as JSON files.
 
 ## Understanding Results
 
-### prefill_tps
-Tokens per second during the prefill phase, derived from Ollama's internal `prompt_eval_duration` metric. Higher is better. This is compute-bound: it stresses the model's ability to process your input prompt across potentially multiple 512-token batches.
+### prefill_ms
+Server-side prompt processing time in milliseconds, derived directly from Ollama's internal `prompt_eval_duration` metric. This is the most stable prefill measurement: it excludes HTTP and scheduling overhead and is measured inside the inference server. Lower is better.
 
-### TTFT (Time to First Token)
-Wall-clock milliseconds from request start to first output token. Combines prefill time and any scheduling/HTTP overhead. Lower is better. This directly reflects user-perceived latency.
+### prefill_tps
+Tokens per second during the prefill phase (`prompt_eval_count / prefill_ms × 1000`). Higher is better. This is compute-bound at large prompt sizes: it stresses the model's ability to process input tokens across 512-token batches on the GPU.
+
+`prefill_ms` and `prefill_tps` carry the same information (one is the inverse of the other scaled by token count). `prefill_ms` is more intuitive for latency comparisons; `prefill_tps` is more intuitive for hardware throughput comparisons.
+
+### ttft_ms (Time to First Token)
+Wall-clock milliseconds from the moment the request is sent to receipt of the first output token. Equal to `prefill_ms` plus HTTP round-trip and server scheduling overhead — typically **80–200 ms longer** than `prefill_ms` on localhost. Lower is better.
+
+`ttft_ms` directly reflects user-perceived latency; `prefill_ms` isolates the inference engine contribution. Use `prefill_ms` when comparing two runs on the same machine; use `ttft_ms` when reasoning about end-to-end user experience.
+
+### gen_ms
+Server-side decode time in milliseconds for the `max_tokens` output tokens, derived from Ollama's internal `eval_duration` metric. With the default `-max-tokens 16`, this is typically 800–1 100 ms depending on model size and hardware.
+
+### gen_tps
+Token generation speed during the decode phase (`eval_count / gen_ms × 1000`). Higher is better. This is memory-bandwidth-bound: each generated token requires reading the full model weight from VRAM (or system RAM for CPU-offloaded layers).
+
+> **Note:** With the default `-max-tokens 16`, decode throughput is measured over only 16 tokens. This underestimates steady-state `gen_tps` because per-token CUDA kernel launch overhead is proportionally larger for short sequences. Use `-max-tokens 64` or higher for a more representative decode measurement.
 
 ### CV% (Coefficient of Variation)
-`stddev / mean × 100`. Measures run-to-run stability. A result is flagged ⚠ if CV% > threshold (default 5%). High CV% means the measurement is noisy — a difference between two runs may be noise rather than a real optimization effect.
-
-### p99
-With the default 6 epochs, p99 equals the worst observed value (maximum). It becomes meaningful as a true tail-latency metric with `-epochs 20+`.
+`stddev / mean × 100`. Measures run-to-run stability. A result is flagged ⚠ if CV% > threshold (default 5%) for either `prefill_tps` or `ttft_ms`. High CV% means the measurement is noisy — a difference between two runs may be noise rather than a real optimisation effect.
 
 ### Stability warnings
-If CV% exceeds `-cv-threshold` for either `prefill_tps` or `TTFT` at a given size, that row is marked ⚠. In `diff` output, the note column flags which run was unstable.
+If CV% exceeds `-cv-threshold` for `prefill_tps` or `ttft_ms` at a given size, that row is marked ⚠. In `diff` output, the note column flags which run was unstable.
 
 **If you see instability warnings:**
-1. Increase `-warmup` (try `-warmup 4`)
+1. Increase `-warmup` (try `-warmup 6` or higher; default is already 4)
 2. Close browser tabs, background services, and other GPU workloads
 3. On Windows, check Task Manager for CPU/GPU spikes during the run
 
