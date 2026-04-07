@@ -145,7 +145,9 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	var llamaModel *llama.Model
 	var tok tokenizer.Tokenizer
 	var err error
-	if envconfig.NewEngine() || f.KV().OllamaEngineRequired() {
+	if envconfig.LegacyEngine() {
+		slog.Info("OLLAMA_LEGACY_ENGINE is set, forcing legacy llama engine", "model", modelPath)
+	} else if envconfig.NewEngine() || f.KV().OllamaEngineRequired() {
 		if len(projectors) == 0 {
 			tok, err = model.NewTextProcessor(modelPath)
 		} else {
@@ -313,8 +315,10 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	}()
 
 	if tok != nil {
+		slog.Info("using ollama engine (new runner)", "model", modelPath)
 		return &ollamaServer{llmServer: s, tokenizer: tok}, nil
 	} else {
+		slog.Info("using llama engine (legacy runner)", "model", modelPath)
 		return &llamaServer{llmServer: s, ggml: f}, nil
 	}
 }

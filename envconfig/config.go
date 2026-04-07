@@ -228,6 +228,8 @@ var (
 	MultiUserCache = Bool("OLLAMA_MULTIUSER_CACHE")
 	// Enable the new Ollama engine
 	NewEngine = Bool("OLLAMA_NEW_ENGINE")
+	// Force use of the legacy llama engine, bypassing OllamaEngineRequired
+	LegacyEngine = Bool("OLLAMA_LEGACY_ENGINE")
 	// ContextLength sets the default context length
 	ContextLength = Uint("OLLAMA_CONTEXT_LENGTH", 0)
 	// Auth enables authentication between the Ollama client and server
