@@ -41,10 +41,12 @@ type EpochResult struct {
 	GenTPS          float64 `json:"gen_tps"`
 }
 
-// SizeStats holds aggregate statistics for all three metrics.
+// SizeStats holds aggregate statistics for all five metrics.
 type SizeStats struct {
+	PrefillMs  MetricStats `json:"prefill_ms"`
 	PrefillTPS MetricStats `json:"prefill_tps"`
 	TTFTMs     MetricStats `json:"ttft_ms"`
+	GenMs      MetricStats `json:"gen_ms"`
 	GenTPS     MetricStats `json:"gen_tps"`
 }
 

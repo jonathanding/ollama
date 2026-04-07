@@ -152,16 +152,18 @@ func TestPrintRunTable_ContainsExpectedColumns(t *testing.T) {
 			PromptTokens: 512,
 			Stable:       true,
 			Stats: SizeStats{
-				PrefillTPS: MetricStats{Mean: 4850, P99: 4720, CVPct: 1.8},
-				TTFTMs:     MetricStats{Mean: 28, P99: 35, CVPct: 2.3},
-				GenTPS:     MetricStats{Mean: 37},
+				PrefillMs:  MetricStats{Mean: 106, CVPct: 1.8},
+				PrefillTPS: MetricStats{Mean: 4850, CVPct: 1.8},
+				TTFTMs:     MetricStats{Mean: 28, CVPct: 2.3},
+				GenMs:      MetricStats{Mean: 432, CVPct: 1.2},
+				GenTPS:     MetricStats{Mean: 37, CVPct: 1.2},
 			},
 		},
 	}
 	var sb strings.Builder
 	printRunTable(&sb, "test-model", results, RunConfig{Epochs: 6, Warmup: 2}, true)
 	out := sb.String()
-	for _, want := range []string{"512", "4850", "28", "37", "1.8", "2.3", "✓"} {
+	for _, want := range []string{"512", "106", "4850", "28", "432", "37", "1.8", "2.3", "1.2", "✓", "prefill_ms", "ttft_ms", "gen_ms"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in run table output:\n%s", want, out)
 		}
@@ -174,9 +176,11 @@ func TestPrintRunTable_UnstableFlag(t *testing.T) {
 			PromptTokens: 4096,
 			Stable:       false,
 			Stats: SizeStats{
-				PrefillTPS: MetricStats{Mean: 3890, P99: 3200, CVPct: 8.7},
-				TTFTMs:     MetricStats{Mean: 198, P99: 240, CVPct: 9.2},
-				GenTPS:     MetricStats{Mean: 36},
+				PrefillMs:  MetricStats{Mean: 3593, CVPct: 8.7},
+				PrefillTPS: MetricStats{Mean: 3890, CVPct: 8.7},
+				TTFTMs:     MetricStats{Mean: 198, CVPct: 9.2},
+				GenMs:      MetricStats{Mean: 444, CVPct: 1.5},
+				GenTPS:     MetricStats{Mean: 36, CVPct: 1.5},
 			},
 		},
 	}

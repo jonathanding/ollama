@@ -155,18 +155,24 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 		}
 
 		// Compute stats from valid epochs only.
-		prefillVals := make([]float64, len(statsEpochs))
-		ttftVals := make([]float64, len(statsEpochs))
-		genVals := make([]float64, len(statsEpochs))
+		prefillMsVals  := make([]float64, len(statsEpochs))
+		prefillTPSVals := make([]float64, len(statsEpochs))
+		ttftVals       := make([]float64, len(statsEpochs))
+		genMsVals      := make([]float64, len(statsEpochs))
+		genTPSVals     := make([]float64, len(statsEpochs))
 		for i, r := range statsEpochs {
-			prefillVals[i] = r.PrefillTPS
-			ttftVals[i] = r.TTFTMs
-			genVals[i] = r.GenTPS
+			prefillMsVals[i]  = r.PrefillMs
+			prefillTPSVals[i] = r.PrefillTPS
+			ttftVals[i]       = r.TTFTMs
+			genMsVals[i]      = r.GenMs
+			genTPSVals[i]     = r.GenTPS
 		}
 		stats := SizeStats{
-			PrefillTPS: computeStats(prefillVals),
+			PrefillMs:  computeStats(prefillMsVals),
+			PrefillTPS: computeStats(prefillTPSVals),
 			TTFTMs:     computeStats(ttftVals),
-			GenTPS:     computeStats(genVals),
+			GenMs:      computeStats(genMsVals),
+			GenTPS:     computeStats(genTPSVals),
 		}
 		stable := stats.PrefillTPS.CVPct <= cfg.CVThreshPct && stats.TTFTMs.CVPct <= cfg.CVThreshPct
 
@@ -202,37 +208,34 @@ func printRunTable(w io.Writer, model string, results []SizeResult, cfg RunConfi
 		return
 	}
 	if first {
-		fmt.Fprintf(w, "\nModel: %s  |  Epochs: %d  |  Warmup: %d\n\n", model, cfg.Epochs, cfg.Warmup)
-		// Column widths (content between │ separators):
-		//   prompt_tokens: 13  prefill mean/p99: 18  CV%: 6  TTFT mean/p99: 10  gen_tps: 9  status: var
-		fmt.Fprintf(w, "%-13s │ %-18s │ %-18s │ %6s │ %-10s │ %-10s │ %6s │ %-9s │ %s\n",
+		fmt.Fprintf(w, "\nModel: %s  |  Epochs: %d  |  Warmup: %d\n", model, cfg.Epochs, cfg.Warmup)
+		fmt.Fprintf(w, "note: prefill_ms is the server-side prompt processing time (Ollama internal metric); ttft_ms is the wall-clock time to first token (= prefill_ms + HTTP round-trip + scheduling, typically 80–200 ms longer on localhost).\n\n")
+		// Column widths: prompt_tokens=13, each metric value column matches its header label width,
+		// CV% columns are 5 chars (" 1.8%"), status is variable.
+		fmt.Fprintf(w, "%-13s │ %-10s │ %5s │ %-11s │ %5s │ %-10s │ %5s │ %-9s │ %5s │ %-9s │ %5s │ %s\n",
 			"prompt_tokens",
-			"prefill_tps (mean)",
-			"prefill_tps (p99)",
-			"CV%",
-			"TTFT mean",
-			"TTFT p99",
-			"CV%",
-			"gen_tps",
+			"prefill_ms", "CV%",
+			"prefill_tps", "CV%",
+			"ttft_ms", "CV%",
+			"gen_ms", "CV%",
+			"gen_tps", "CV%",
 			"status",
 		)
-		fmt.Fprintln(w, strings.Repeat("─", 120))
+		fmt.Fprintln(w, strings.Repeat("─", 122))
 	}
 	r := results[len(results)-1]
 	status := "✓"
 	if !r.Stable {
 		status = "⚠"
 	}
-	// Data column widths must match header: prefill=14+4=18, TTFT=7+3=10, gen_tps=5+4=9
-	fmt.Fprintf(w, "%-13d │ %14.0f t/s │ %14.0f t/s │ %5.1f%% │ %7.0f ms │ %7.0f ms │ %5.1f%% │ %5.0f t/s │ %s\n",
+	// Data widths: %7.0f ms=10, %7.0f t/s=11, %7.0f ms=10, %6.0f ms=9, %5.0f t/s=9 — match header labels.
+	fmt.Fprintf(w, "%-13d │ %7.0f ms │ %4.1f%% │ %7.0f t/s │ %4.1f%% │ %7.0f ms │ %4.1f%% │ %6.0f ms │ %4.1f%% │ %5.0f t/s │ %4.1f%% │ %s\n",
 		r.PromptTokens,
-		r.Stats.PrefillTPS.Mean,
-		r.Stats.PrefillTPS.P99,
-		r.Stats.PrefillTPS.CVPct,
-		r.Stats.TTFTMs.Mean,
-		r.Stats.TTFTMs.P99,
-		r.Stats.TTFTMs.CVPct,
-		r.Stats.GenTPS.Mean,
+		r.Stats.PrefillMs.Mean,  r.Stats.PrefillMs.CVPct,
+		r.Stats.PrefillTPS.Mean, r.Stats.PrefillTPS.CVPct,
+		r.Stats.TTFTMs.Mean,     r.Stats.TTFTMs.CVPct,
+		r.Stats.GenMs.Mean,      r.Stats.GenMs.CVPct,
+		r.Stats.GenTPS.Mean,     r.Stats.GenTPS.CVPct,
 		status,
 	)
 }
