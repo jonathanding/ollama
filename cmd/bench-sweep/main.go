@@ -85,6 +85,10 @@ RUN FLAGS
   -max-tokens <n>       Max output tokens per request  (default: 16)
                         Keep small to isolate prefill; output is not the focus.
   -cv-threshold <pct>   CV% above which a size is flagged unstable  (default: 5.0)
+  -num-ctx <n>          KV cache context size passed to Ollama as num_ctx  (default: 0 = follow model Modelfile)
+                        Smaller values reduce VRAM usage; may allow more model layers to stay on GPU.
+  -batch-size <n>       Prompt processing batch size passed as num_batch  (default: 0 = Ollama default, typically 512)
+                        Larger values improve GPU utilization during prefill at the cost of peak memory.
   -host <url>           Ollama server URL  (default: $OLLAMA_HOST or http://localhost:11434)
 
 METRICS
@@ -155,6 +159,8 @@ func runRun(args []string) error {
 	warmup    := fs.Int("warmup", 4, "Warmup iterations before timing (>=2 recommended)")
 	maxTokens := fs.Int("max-tokens", 16, "Max output tokens per request")
 	cvThresh  := fs.Float64("cv-threshold", 5.0, "CV% threshold above which a result is flagged unstable")
+	numCtx    := fs.Int("num-ctx", 0, "KV cache context size (0 = follow model Modelfile default)")
+	batchSize := fs.Int("batch-size", 0, "Prompt processing batch size / n_batch (0 = use Ollama default, typically 512)")
 	host      := fs.String("host", "", "Ollama host URL (default: $OLLAMA_HOST or http://localhost:11434)")
 
 	if err := fs.Parse(args); err != nil {
@@ -191,6 +197,8 @@ func runRun(args []string) error {
 		MaxTokens:   *maxTokens,
 		CVThreshPct: *cvThresh,
 		Sizes:       sizes,
+		NumCtx:      *numCtx,
+		BatchSize:   *batchSize,
 	}
 
 	dir, err := historyDir()
@@ -202,8 +210,14 @@ func runRun(args []string) error {
 		fmt.Fprintf(os.Stderr, "Warning: run name %q already exists, renamed to %q\n", *name, chosen)
 	}
 
-	fmt.Printf("Starting benchmark: model=%s  sizes=%s  epochs=%d  warmup=%d\n",
-		*model, *sizesStr, *epochs, *warmup)
+	startMsg := fmt.Sprintf("Starting benchmark: model=%s  sizes=%s  epochs=%d  warmup=%d", *model, *sizesStr, *epochs, *warmup)
+	if *numCtx > 0 {
+		startMsg += fmt.Sprintf("  num-ctx=%d", *numCtx)
+	}
+	if *batchSize > 0 {
+		startMsg += fmt.Sprintf("  batch-size=%d", *batchSize)
+	}
+	fmt.Println(startMsg)
 
 	sizeResults, hw, err := runBenchmark(context.Background(), client, *model, cfg)
 	if err != nil {

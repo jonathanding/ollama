@@ -15,15 +15,22 @@ import (
 
 // sendRequest sends one /api/generate request and returns the epoch metrics.
 // TTFT is measured as wall-clock time from request start to first response token.
-func sendRequest(ctx context.Context, client *api.Client, model, prompt string, maxTokens int) (EpochResult, error) {
+func sendRequest(ctx context.Context, client *api.Client, model, prompt string, maxTokens, numCtx, batchSize int) (EpochResult, error) {
+	options := map[string]interface{}{
+		"temperature": 0,
+		"num_predict": maxTokens,
+	}
+	if numCtx > 0 {
+		options["num_ctx"] = numCtx
+	}
+	if batchSize > 0 {
+		options["num_batch"] = batchSize
+	}
 	req := &api.GenerateRequest{
-		Model:  model,
-		Prompt: prompt,
-		Raw:    true,
-		Options: map[string]interface{}{
-			"temperature": 0,
-			"num_predict": maxTokens,
-		},
+		Model:   model,
+		Prompt:  prompt,
+		Raw:     true,
+		Options: options,
 	}
 
 	var result EpochResult
@@ -88,7 +95,7 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 		var warmupTPS []float64
 		for i := 0; i < cfg.Warmup; i++ {
 			wCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			result, err := sendRequest(wCtx, client, model, promptText(chars, (sizeIdx+1)*1000+i), cfg.MaxTokens)
+			result, err := sendRequest(wCtx, client, model, promptText(chars, (sizeIdx+1)*1000+i), cfg.MaxTokens, cfg.NumCtx, cfg.BatchSize)
 			cancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: warmup %d/%d for size=%d failed: %v\n", i+1, cfg.Warmup, size, err)
@@ -123,7 +130,7 @@ func runBenchmark(ctx context.Context, client *api.Client, model string, cfg Run
 		var epochResults []EpochResult
 		for epoch := 0; epoch < cfg.Epochs; epoch++ {
 			eCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			result, err := sendRequest(eCtx, client, model, promptText(chars, sizeIdx*10000+epoch), cfg.MaxTokens)
+			result, err := sendRequest(eCtx, client, model, promptText(chars, sizeIdx*10000+epoch), cfg.MaxTokens, cfg.NumCtx, cfg.BatchSize)
 			cancel()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: epoch %d/%d for size=%d failed: %v\n", epoch+1, cfg.Epochs, size, err)

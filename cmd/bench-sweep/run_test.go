@@ -64,7 +64,7 @@ func TestSendRequest_CapsTTFT(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", srv.URL)
 
 	client, _ := api.ClientFromEnvironment()
-	result, err := sendRequest(context.Background(), client, "test-model", "hello", 16)
+	result, err := sendRequest(context.Background(), client, "test-model", "hello", 16, 0, 0)
 	if err != nil {
 		t.Fatalf("sendRequest: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestSendRequest_ComputesTPS(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", srv.URL)
 
 	client, _ := api.ClientFromEnvironment()
-	result, err := sendRequest(context.Background(), client, "test-model", "hello", 16)
+	result, err := sendRequest(context.Background(), client, "test-model", "hello", 16, 0, 0)
 	if err != nil {
 		t.Fatalf("sendRequest: %v", err)
 	}

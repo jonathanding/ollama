@@ -55,6 +55,8 @@ bench-sweep run -model <model> -name <run-name> [options]
 | `-warmup` | `4` | Warmup iterations before timing (≥2 recommended) |
 | `-max-tokens` | `16` | Max output tokens per request (keep small to isolate prefill) |
 | `-cv-threshold` | `5.0` | CV% above which a result is flagged ⚠ unstable |
+| `-num-ctx` | `0` (model default) | KV cache context size (`num_ctx`); smaller values reduce VRAM usage |
+| `-batch-size` | `0` (Ollama default) | Prompt processing batch size (`num_batch`); larger values improve prefill GPU utilization |
 | `-host` | `$OLLAMA_HOST` | Ollama server URL |
 
 **Example:**
@@ -156,6 +158,41 @@ If CV% exceeds `-cv-threshold` for `prefill_tps` or `ttft_ms` at a given size, t
 1. Increase `-warmup` (try `-warmup 6` or higher; default is already 4)
 2. Close browser tabs, background services, and other GPU workloads
 3. On Windows, check Task Manager for CPU/GPU spikes during the run
+
+---
+
+## Context Size and Batch Size
+
+### `-num-ctx` — KV cache context size
+
+Controls how many tokens Ollama pre-allocates in the KV cache (`num_ctx`). When not set (default `0`), Ollama uses the value from the model's Modelfile — typically 4 096–32 768 depending on the model.
+
+**Why this matters for benchmarking:**
+- A large `num_ctx` allocates a proportionally large VRAM block for the KV cache. For example, a 27B model with `num_ctx=32768` uses ≈5.7 GiB for the KV cache, potentially pushing model layers (especially the output projection) onto CPU memory. This silently reduces `gen_tps` from the GPU-bound value (e.g. ~50 t/s) to a CPU-memory-bound value (e.g. ~24 t/s).
+- Reducing `num_ctx` to the minimum needed for your sweep (e.g. `-num-ctx 8192` for a 4 096-token sweep) frees VRAM and can allow all model layers to stay on the GPU.
+
+**Example:**
+```bash
+# Benchmark with a specific context window to control VRAM usage
+bench-sweep run -model qwen3.5:27b -name ctx8k -num-ctx 8192
+```
+
+### `-batch-size` — prompt processing batch size
+
+Controls the maximum number of tokens processed per GPU forward pass during the prefill phase (`num_batch`). When not set (default `0`), Ollama uses its built-in default (typically 512).
+
+**Why this matters for benchmarking:**
+- Larger prompts already fill a 512-token batch efficiently, so changing `-batch-size` has limited effect for `prompt_tokens >= 512`.
+- Smaller batch sizes (e.g. 128) can be used to observe the effect of reduced GPU utilization on `prefill_tps`.
+- Larger batch sizes (e.g. 1024, 2048) may improve throughput for very large prompts if the GPU has spare compute capacity, at the cost of higher peak VRAM usage.
+
+**Example:**
+```bash
+# Compare default batch vs larger batch for prefill throughput
+bench-sweep run -model qwen3-coder-next -name batch512  # default
+bench-sweep run -model qwen3-coder-next -name batch1024 -batch-size 1024
+bench-sweep diff batch512 batch1024
+```
 
 ---
 

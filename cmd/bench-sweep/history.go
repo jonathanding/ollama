@@ -21,6 +21,8 @@ type RunConfig struct {
 	MaxTokens   int     `json:"max_tokens"`
 	CVThreshPct float64 `json:"cv_threshold_pct"`
 	Sizes       []int   `json:"sizes"`
+	NumCtx      int     `json:"num_ctx,omitempty"`
+	BatchSize   int     `json:"batch_size,omitempty"`
 }
 
 // Hardware captures the hardware state at benchmark time.
