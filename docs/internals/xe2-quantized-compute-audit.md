@@ -501,3 +501,250 @@ graph LR
 | **硬件单元** | XMX fp16 管线 |
 | **Shader 源文件** | `mul_mm.comp` + `mul_mm_funcs.glsl`（编译为 `*_cm1.spv`） |
 | **禁用方式** | `export GGML_VK_DISABLE_COOPMAT=1` |
+
+### 2.3 Flash Attention Coopmat 路径
+
+> **根本差异**：Flash Attention (FA) 与上述 matmul 路径（Section 2.1, 2.2）**完全独立**。FA 操作的输入是 **f16 Q/K/V**（Q 实际从 fp32 buffer 读取，K/V 来自 f16 KV cache），而非量化权重。换言之，FA 不涉及 GGUF 量化权重的计算——它处理的是注意力层内部的 Q·K^T 和 P·V 乘法。
+
+#### 2.3.1 路径选择：coopmat2 > coopmat1 > scalar
+
+FA 路径选择发生在 `ggml_vk_flash_attn` 中：
+
+```cpp
+FaCodePath path = ctx->device->coopmat2 ? FA_COOPMAT2 :
+                  ctx->device->coopmat1_fa_support ? FA_COOPMAT1 : FA_SCALAR;
+```
+(source: `ggml-vulkan.cpp:8072-8073`)
+
+**Xe2 路径分析**：
+
+- `coopmat2` 要求 `VK_NV_cooperative_matrix2`（NVIDIA 专有），Xe2 不支持 → `false`
+- `coopmat1_fa_support` 要求 KHR coopmat 可用 + subgroup size control + 32-invocation subgroup 支持 (source: `ggml-vulkan.cpp:4648-4651`)
+
+```cpp
+device->coopmat1_fa_support = device->coopmat_support && device->subgroup_require_full_support &&
+                              device->subgroup_size_control && device->subgroup_min_size <= 32 &&
+                              device->subgroup_max_size >= 32;
+```
+(source: `ggml-vulkan.cpp:4649-4651`)
+
+Xe2 满足这些条件（KHR coopmat 已在 Section 2.2 确认启用）→ **Xe2 FA 使用 `flash_attn_cm1.comp`（coopmat1 路径）**。
+
+但还有额外的运行时检查——coopmat1 FA 要求 16×16×16 coopmat 尺寸：
+
+```cpp
+if (path == FA_COOPMAT1) {
+    const bool coopmat_shape_supported = (dst->op_params[3] == GGML_PREC_F32 && ctx->device->coopmat_support_16x16x16_f32acc) ||
+                                         (dst->op_params[3] != GGML_PREC_F32 && ctx->device->coopmat_support_16x16x16_f16acc);
+    const bool coopmat_shmem_supported = ggml_vk_flash_attn_coopmat_shmem_support(...);
+    if (!coopmat_shape_supported || !coopmat_shmem_supported) {
+        path = FA_SCALAR;
+    }
+}
+```
+(source: `ggml-vulkan.cpp:8075-8083`)
+
+> ⚠️ **待确认**：Xe2 驱动是否报告 16×16×16 f16→f32/f16 coopmat 尺寸。若是，则 FA 走 coopmat1；若否，则 fallback 到 scalar。
+
+#### 2.3.2 Decode 时的 Scalar Fallback
+
+Coopmat1 FA 的最小 tile 行数为 **Br = 16**（`coopmat1_flash_attention_num_large_rows = 16`，source: `ggml-vulkan.cpp:2557`），因为 coopmat 矩阵的 MatBr/MatBc 均为 16 (source: `flash_attn_cm1.comp:44-45`)。
+
+Decode 阶段 N=1（单 token），小于 16 行。路径选择逻辑：
+
+```cpp
+bool small_rows = N <= get_fa_num_small_rows(path);
+// get_fa_num_small_rows 对 non-coopmat2 返回 scalar_flash_attention_num_small_rows = 1
+// 即 N <= 1 → small_rows = true
+
+if (small_rows && path == FA_COOPMAT1) {
+    path = FA_SCALAR;  // coopmat1 不支持 small rows，降级到 scalar
+}
+```
+(source: `ggml-vulkan.cpp:8118-8123`; 常量: `ggml-vulkan.cpp:2542, 2557`)
+
+**结论**：Decode (N=1) 时 FA 使用 `flash_attn.comp`（scalar shader），**不使用 XMX**。仅在 prefill (N≥16) 或 GQA batching (gqa_ratio ≥ 16) 时，FA 才走 coopmat1 路径。
+
+#### 2.3.3 输入绑定与数据类型
+
+`flash_attn_cm1.comp` 的输入绑定 (source: `flash_attn_cm1.comp:26-32`)：
+
+| Binding | 数据 | 类型 | 来源 |
+|---------|------|------|------|
+| 0 | Q | `float` (`vec4`) | fp32 buffer，乘以 `p.scale` 后转为 f16 存入 shared memory `Qf` |
+| 1 | K | `float16_t` (`f16vec4`) | KV cache（默认 f16） |
+| 2 | V | `float16_t` (`f16vec4`) | KV cache（默认 f16） |
+| 3 | M | `float16_t` | 注意力 mask |
+
+Q 在加载到 shared memory 时从 fp32 转为 f16（乘以 scale 后通过 `f16vec4()` 转换）：
+```glsl
+Qf[r * qstride + d] = f16vec4(data_qv4[...] * p.scale);
+```
+(source: `flash_attn_cm1.comp:100`)
+
+K 在默认 f16 KV cache 场景下直接从全局内存读取 f16：
+```glsl
+K_Tf = f16vec4(data_kv4[k_offset / 4 + (j * Bc + c) * k_stride / 4 + d]);
+```
+(source: `flash_attn_cm1.comp:195`)
+
+#### 2.3.4 QK^T 计算 — Coopmat f16×f16 → ACC_TYPE
+
+QK^T 使用 cooperative matrix 乘法 (source: `flash_attn_cm1.comp:207-218`)：
+
+```glsl
+coopmat<ACC_TYPE, gl_ScopeSubgroup, MatBc, MatBr, gl_MatrixUseAccumulator> SfMat = ...(0);
+coopmat<float16_t, gl_ScopeSubgroup, MatBc, 16, gl_MatrixUseA> KMat;
+coopmat<float16_t, gl_ScopeSubgroup, 16, MatBr, gl_MatrixUseB> QMat;
+
+for (uint32_t d = 0; d < HSK_pad / 16; ++d) {
+    coopMatLoad(QMat, Qf, ...);   // f16 from shared memory
+    coopMatLoad(KMat, ksh, ...);   // f16 from shared memory
+    SfMat = coopMatMulAdd(KMat, QMat, SfMat);  // K^T · Q → S^T
+}
+```
+
+- **A/B 输入**：`float16_t`（f16×f16 乘法）
+- **累加器**：`ACC_TYPE` — `float`（f32acc 变体）或 `float16_t`（f16acc 变体）
+- **Tile 尺寸**：MatBc × 16 × MatBr = **16 × 16 × 16**（hardcoded）(source: `flash_attn_cm1.comp:44-45`)
+- **硬件映射**：在 Xe2 上映射到 **XMX fp16 DPAS** 指令
+
+ACC_TYPE 选择由 shader 生成时决定 (source: `vulkan-shaders-gen.cpp:626-631`)：
+```cpp
+for (const auto& f16acc : {false, true}) {
+    fa_base_dict["ACC_TYPE"] = f16acc ? "float16_t" : "float";
+    fa_base_dict["ACC_TYPEV4"] = f16acc ? "f16vec4" : "vec4";
+```
+两个变体（f32acc 和 f16acc）都会生成。运行时选择取决于 `GGML_PREC_F32` 参数 (source: `ggml-vulkan.cpp:8076-8077`)。
+
+#### 2.3.5 Softmax — 始终 fp32
+
+QK^T 结果从 coopmat 存回 shared memory `sfsh`（`ACC_TYPE` 精度）后，softmax 在标量寄存器上执行。所有关键操作使用 `float`：
+
+```glsl
+float rowmaxf = NEG_FLT_MAX_OVER_2;
+rowmaxf = max(rowmaxf, float(sfsh[...]));          // max: float
+Mf[r] = max(rowmaxf, Moldf);                        // running max: float
+eMf[r] = exp(Moldf - Mf[r]);                        // exp: float
+Pf[r] = exp(sfsh[...] - Mf[r]);                     // exp: float
+Lf[r] += Pf[r];                                     // sum: float
+```
+(source: `flash_attn_cm1.comp:253-286`)
+
+注意 `sfsh` 的读取通过 `float(sfsh[...])` 转为 fp32（即使 sfsh 类型为 ACC_TYPE 可能是 f16），softmax 的 max/exp/sum **始终在 fp32 精度**下进行。
+
+#### 2.3.6 PV 计算 — 标量逐元素乘法
+
+PV 乘法（probability × value）**不使用 coopmat**，而是标量逐元素计算 (source: `flash_attn_cm1.comp:287-299`)：
+
+```glsl
+[[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
+    // V 从全局内存/反量化加载
+    vec4 Vf = vec4(data_vv4[v_offset / 4 + ... ]);  // f16 → fp32
+    [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
+        Of[r][d] += ACC_TYPE(Pf[r]) * ACC_TYPEV4(Vf);  // P × V 累加
+    }
+}
+```
+
+- **Pf[r]**：`float`（来自 softmax exp 结果）
+- **Vf**：`vec4`（fp32，从 f16 KV cache 提升或从量化 cache 反量化而来）
+- **Of[r][d]**：`ACC_TYPEV4`（f32 或 f16，取决于 ACC_TYPE）
+- **执行单元**：标量 ALU / Vector Engine，**不经过 XMX**
+
+这与 `flash_attn.comp`（scalar shader）的 PV 计算结构相同，区别仅在 QK^T 使用了 coopmat。
+
+#### 2.3.7 量化 KV Cache 场景
+
+当 KV cache 使用量化格式（如 Q4_0、Q8_0）时，K/V 数据通过 shader 内的 `dequantize4()` 函数反量化到 fp32 `vec4`，然后参与计算。以 Q4_0 为例 (source: `flash_attn_base.glsl:95-113`)：
+
+```glsl
+vec4 dequantize4(uint ib, uint iqs, uint a_offset, uint binding_idx) {
+    uint vui_lo = uint(k_packed.k_data_packed16[a_offset + ib].qs[...]);
+    // ... nibble 提取、shift、mask ...
+    return float(k_packed.k_data_packed16[a_offset + ib].d) * (vec4(...) - 8.0f);
+}
+```
+
+这意味着即使 KV cache 被量化，FA shader 内部仍然先将 K/V 反量化为 fp32/f16，再进入上述 QK^T 和 PV 计算流程。反量化发生在**每个 FA shader 的循环迭代中**。
+
+coopmat1 shader 中 K 的量化路径 (source: `flash_attn_cm1.comp:189-193`)：
+```glsl
+#if BLOCK_SIZE > 1
+    uint coord = (j * Bc + c) * k_stride * BLOCK_SIZE + 4 * d;
+    uint ib = coord / BLOCK_SIZE;
+    uint iqs = (coord % BLOCK_SIZE);
+    K_Tf = f16vec4(dequantize4(ib, iqs, k_offset, BINDING_IDX_K));
+#else
+    K_Tf = f16vec4(data_kv4[...]);  // 默认 f16 直读
+#endif
+```
+
+shader 生成时，coopmat1 FA 支持 f16、q4_0、q8_0、f32 四种 KV cache 类型 (source: `vulkan-shaders-gen.cpp:648-655`)。
+
+#### 2.3.8 Scalar Fallback Shader (flash_attn.comp)
+
+Decode (N=1) 或 coopmat 条件不满足时使用 `flash_attn.comp`。其结构与 coopmat1 类似但全部使用标量运算：
+
+- **QK^T**：逐元素 `dot(Qf[r][d], K_Tf)` 累加 → `Sf[r][c]`（`float`）(source: `flash_attn.comp:165-166`)
+- **Softmax**：同样全 `float` 精度 (source: `flash_attn.comp:199-228`)
+- **PV**：逐元素 `Pf[r][c] * Vf` → `Of[r][d]`（`vec4`，fp32）(source: `flash_attn.comp:250-251`)
+
+Scalar shader 不使用任何 cooperative matrix 或 dot product 扩展指令，所有计算在标量/向量 ALU 上执行，**完全不经过 XMX**。
+
+#### 2.3.9 完整精度流水线图
+
+```mermaid
+graph LR
+    classDef cpp stroke:#f97316,stroke-width:3px
+    classDef legend fill:#fff,stroke:#999
+    classDef decision fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
+
+    L["🟠 = llama.cpp Vulkan shader"]:::legend
+
+    Q["Q fp32 buffer<br/>(来自上游 matmul 输出)"]:::cpp
+    Q1["× scale → f16<br/>存入 shared mem Qf<br/>(flash_attn_cm1:100)"]:::cpp
+
+    K["K f16 KV cache<br/>(或量化 → dequant4 → f16)"]:::cpp
+    K1["加载到 shared mem ksh<br/>f16vec4<br/>(flash_attn_cm1:195/193)"]:::cpp
+
+    QKT["coopMatMulAdd<br/>K^T · Q → S^T<br/>f16 × f16 → ACC_TYPE<br/>16×16×16 tile<br/>→ XMX fp16 DPAS<br/>(flash_attn_cm1:217)"]:::cpp
+
+    SF["Softmax (标量 fp32)<br/>max → exp → sum<br/>(flash_attn_cm1:253-286)"]:::cpp
+
+    V["V f16 KV cache<br/>(或量化 → dequant4 → fp32)"]:::cpp
+
+    PV["P × V 标量乘法<br/>float × vec4 → ACC_TYPEV4<br/>Vector Engine ALU<br/>(flash_attn_cm1:297)"]:::cpp
+
+    O["输出 O<br/>÷ L → D_TYPE<br/>(flash_attn_cm1:422-424)"]:::cpp
+
+    DEC{{"N ≤ 1 ?<br/>(decode)"}}:::decision
+
+    SC["flash_attn.comp<br/>全标量 ALU<br/>无 XMX<br/>(flash_attn.comp)"]:::cpp
+
+    Q --> Q1 --> QKT
+    K --> K1 --> QKT
+    QKT --> SF --> PV
+    V --> PV
+    PV --> O
+
+    DEC -->|"是"| SC
+    DEC -->|"否 (prefill, N≥16)"| QKT
+```
+
+#### 2.3.10 小结
+
+| 属性 | Prefill (N≥16) | Decode (N=1) |
+|------|----------------|--------------|
+| **Shader** | `flash_attn_cm1.comp` | `flash_attn.comp` |
+| **QK^T 计算** | `coopMatMulAdd` f16×f16 → ACC_TYPE (XMX) | 标量 `dot` (ALU) |
+| **PV 计算** | 标量 `float × vec4` (ALU) | 标量 `float × vec4` (ALU) |
+| **Softmax 精度** | fp32（始终） | fp32（始终） |
+| **累加精度** | f32（`GGML_PREC_F32`）或 f16 | fp32（`vec4`） |
+| **Tile 尺寸** | 16×16×16（hardcoded MatBr/MatBc） | N/A |
+| **XMX 使用** | ✅ 仅 QK^T | ❌ 全标量 |
+| **输入数据** | Q: fp32→f16, K/V: f16 KV cache | 同左 |
+| **量化 KV cache** | `dequantize4()` → f16/fp32 后参与计算 | 同左 |
+| **与 matmul 的关系** | 完全独立，不涉及 GGUF 量化权重 | 同左 |
+| **Xe2 coopmat 版本** | KHR coopmat1（非 NV coopmat2） | N/A |
+| **Coopmat 尺寸要求** | `coopmat_support_16x16x16_f32acc` 或 `_f16acc` ⚠️ 待确认 | N/A |
