@@ -884,3 +884,119 @@ name = base + (f16acc ? "_f16acc" : "") + (coopmat ? "_cm1" : "") + (coopmat2 ? 
 | 5 | FA decode pipeline 名称 | 不含 `_cm1`（scalar） | debug 构建 |
 | 6 | 禁用 MMQ 后 matmul pipeline | 含 `_cm1`（coopmat1） | `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1` + debug 构建 |
 | 7 | 禁用 MMQ+coopmat 后 matmul pipeline | 不含 `_cm1` 也不含 `_q8_1` | 两个 DISABLE 同时设置 + debug 构建 |
+
+---
+
+## Section 4: 精度细节
+
+本节为需要 shader 级精度分析的读者提供深度参考。按数据生命周期分为五个子节：存储 → 反量化/量化 → 计算 → 累加 → 输出。
+
+### 4.1 存储精度
+
+#### 4.1.1 Q4_K_M 混合量化策略
+
+Q4_K_M 并非"所有层都用 Q4_K"——它是一种**混合量化策略**（mixed quantization），根据层位置和张量类型选择不同的量化精度。
+
+**核心启发式：`use_more_bits()`** (source: `llama-quant.cpp:185-186`)：
+
+```cpp
+auto use_more_bits = [](int i_layer, int n_layers) -> bool {
+    return i_layer < n_layers/8 || i_layer >= 7*n_layers/8 || (i_layer - n_layers/8)%3 == 2;
+};
+```
+
+此函数对以下层返回 `true`：
+- 前 1/8 层（`i_layer < n_layers/8`）
+- 后 1/8 层（`i_layer >= 7*n_layers/8`）
+- 中间层中每 3 层取 1 层（`(i_layer - n_layers/8) % 3 == 2`）
+
+**各张量的实际量化类型**（非 Falcon 架构，标准模型）：
+
+| 张量 | 条件 | 量化类型 | Source |
+|------|------|----------|--------|
+| **output.weight** | 默认（`new_type` 初始为 Q4_K，但 else 分支提升） | Q6_K | `llama-quant.cpp:225-226` |
+| **attn_v.weight** | `use_more_bits()` 返回 `true` 的层 | Q6_K | `llama-quant.cpp:302-303` |
+| **attn_v.weight** | 其他层 | Q4_K（default_type 不变） | `llama-quant.cpp:557` |
+| **ffn_down.weight** | `use_more_bits()` 返回 `true` 的层 | Q6_K | `llama-quant.cpp:358-364` |
+| **ffn_down.weight** | 其他层 | Q4_K（default_type 不变） | `llama-quant.cpp:557` |
+| **attn_qkv.weight** | 所有层 | Q5_K | `llama-quant.cpp:405` |
+| **其他权重** | 所有层 | Q4_K（default_type） | `llama-quant.cpp:557` |
+
+> **修正说明**：早期文档中描述的"FFN down + Output Head 用 q6_K"不够准确。实际上，`ffn_down` 的量化类型取决于层位置（`use_more_bits()` 启发式），并非所有层的 `ffn_down` 都是 Q6_K。`output.weight` 确实升级为 Q6_K。此外，`attn_qkv` 合并张量始终使用 Q5_K（而非 Q4_K 或 Q6_K）。
+
+#### 4.1.2 Q4_K Block 结构
+
+Q4_K 的 super-block 包含 **QK_K = 256 个量化值** (source: `ggml-common.h:89`)，结构如下：
+
+```c
+typedef struct {
+    ggml_half d;           // super-block scale for quantized scales (fp16)
+    ggml_half dmin;        // super-block scale for quantized mins (fp16)
+    uint8_t scales[K_SCALE_SIZE];  // 6-bit sub-block scales and mins (K_SCALE_SIZE=12 bytes)
+    uint8_t qs[QK_K/2];           // 4-bit quants, packed 2 per byte (128 bytes)
+} block_q4_K;
+```
+(source: `ggml-common.h:295-305`)
+
+总大小 = 2×2 + 12 + 128 = **144 bytes / 256 values = 4.5 bits/weight**。
+
+在 Vulkan shader 侧，对应的 GLSL 结构 (source: `types.glsl:289-294`)：
+```glsl
+struct block_q4_K {
+    f16vec2 dm;                        // (d, dmin) as fp16
+    uint8_t scales[3*QUANT_K_Q4_K/64]; // = 12 bytes, 6-bit scale/min 编码
+    uint8_t qs[QUANT_K_Q4_K/2];        // = 128 bytes, 4-bit packed quants
+};
+```
+
+#### 4.1.3 Q6_K / Q5_K Block 结构简述
+
+- **Q6_K**：256 values / block，6-bit quants（ql + qh 分离存储）+ int8 scales + fp16 d。实际 bpw ≈ 6.5625
+- **Q5_K**：256 values / block，5-bit quants（qs + qh）+ 6-bit scales/mins + fp16 (d, dmin)。实际 bpw ≈ 5.5
+
+#### 4.1.4 KV Cache 精度
+
+KV cache 默认精度为 **f16**（fp16）。
+
+环境变量 `OLLAMA_KV_CACHE_TYPE` 可覆盖此默认值，描述为 "Quantization type for the K/V cache (default: f16)" (source: `envconfig/config.go:219-220, 310`)。
+
+在 Flash Attention shader 中，K/V 绑定类型为 `float16_t`（`f16vec4`）(source: `flash_attn_cm1.comp:27-28`)，与此默认值一致。当启用量化 KV cache 时，shader 内通过 `dequantize4()` 反量化为 fp32/f16 后参与计算 (source: `flash_attn_cm1.comp:189-193`)。
+
+### 4.2 反量化与量化精度
+
+#### 4.2.1 权重反量化（Dequant+F16 路径）
+
+在 Dequant+F16 路径中，Q4_K 权重被完全反量化为浮点 (source: `mul_mm_funcs.glsl:174-202`)：
+
+1. **Nibble 提取**：`(qs[i] >> shift) & 0xF` → uint [0, 15]
+2. **6-bit scale/min 拼合**：从 `scales[]` 数组组合高低位，得到 6-bit `sc` 和 `mbyte`
+3. **FMA 还原**：`fma(d × sc, float(nibble), -(dmin × mbyte))` — 所有中间运算在 **fp32** 精度下
+4. **截断为 f16**：`FLOAT_TYPE_VEC2(result)` = `f16vec2(result)` — fp32 → fp16 截断存入 shared memory
+
+**精度损失点**：步骤 4 的 fp32→fp16 截断。fp16 的尾数仅 10-bit，对于 [-1, 1] 范围外的较大值，截断误差更显著。
+
+#### 4.2.2 权重提取（MMQ 路径）
+
+MMQ 路径中，Q4_K 权重**不反量化为浮点**，而是保持在整数域 (source: `mul_mmq_funcs.glsl:314-317`)：
+
+1. **Nibble 提取**：`(qs >> shift) & 0x0F0F0F0F` → 4 个 uint8 packed 在 int32
+2. **零扩展**：4-bit [0, 15] 被零扩展到 8-bit 容器
+
+**精度损失**：无额外损失——int4 值被无损放入 int8 容器。原始量化误差在 GGUF 文件生成时已固定。
+
+#### 4.2.3 激活量化（MMQ 路径：fp32 → Q8_1）
+
+`quantize_q8_1.comp` 将 fp32 激活量化为 Q8_1 (source: `quantize_q8_1.comp:84-91`)：
+
+1. **absmax 归约**：每 32 个 fp32 值找最大绝对值 `amax`（跨 8 线程的 clustered max 或 shared memory 归约）
+2. **Scale 计算**：`d = amax / 127.0`（fp32 运算）(source: `quantize_q8_1.comp:84`)
+3. **量化**：`round(vals * (1.0 / d))` → int8 范围 [-127, 127] (source: `quantize_q8_1.comp:85-86`)
+4. **Pack**：`pack32(i8vec4(round(vals)))` — 4 个 int8 打包为 1 个 int32 (source: `quantize_q8_1.comp:89-91`)
+
+**精度损失**：fp32 → int8 的 `round()` 操作。对于 absmax = A 的 block，量化分辨率为 A/127，最大单元素误差为 ±A/254。这是 MMQ 路径独有的额外误差源。
+
+#### 4.2.4 KV Cache 反量化（Flash Attention）
+
+默认 f16 KV cache 时无反量化开销——K/V 数据直接以 `f16vec4` 读取。
+
+量化 KV cache 场景（如 Q4_0、Q8_0），shader 内 `dequantize4()` 将量化值还原为 `vec4`（fp32）(source: `flash_attn_base.glsl:95-113`)，然后通过 `f16vec4()` 转为 f16 送入 coopmat 或标量计算。
