@@ -391,6 +391,8 @@ enum llm_tensor {
     LLM_TENSOR_SSM_NORM,
     LLM_TENSOR_SSM_OUT,
     LLM_TENSOR_SSM_BETA_ALPHA,      // qwen3next
+    LLM_TENSOR_SSM_ATTN_QKV,       // qwen3next ollama split format
+    LLM_TENSOR_SSM_ATTN_GATE,      // qwen3next ollama split format
     LLM_TENSOR_TIME_MIX_W0,
     LLM_TENSOR_TIME_MIX_W1,
     LLM_TENSOR_TIME_MIX_W2,

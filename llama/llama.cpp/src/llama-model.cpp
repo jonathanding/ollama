@@ -6594,10 +6594,12 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", i), { n_embd }, 0);
 
                         if (!hparams.is_recurrent(i)) {
-                            // Attention layers
+                            // Attention layers — use per-layer K/V dimensions (qwen3next has mixed attn/recurrent)
+                            const int64_t n_embd_k_gqa_i = hparams.n_embd_k_gqa(i);
+                            const int64_t n_embd_v_gqa_i = hparams.n_embd_v_gqa(i);
                             layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), { n_embd, n_embd_head_k * n_head * 2 }, 0);
-                            layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), { n_embd, n_embd_k_gqa }, 0);
-                            layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), { n_embd, n_embd_v_gqa }, 0);
+                            layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), { n_embd, n_embd_k_gqa_i }, 0);
+                            layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), { n_embd, n_embd_v_gqa_i }, 0);
                             layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), { n_embd_head_k * n_head, n_embd }, 0);
 
                             // Q/K normalization for attention layers
@@ -6606,9 +6608,19 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         } else {
                             // Linear attention (gated delta net) specific tensors
                             // Create tensors with calculated dimensions
-                            layer.ssm_in         = create_tensor(tn(LLM_TENSOR_SSM_IN,         "weight", i), { n_embd, qkvz_dim }, 0);
+                            // Supports two GGUF formats:
+                            //   (a) ssm_in: per-head interleaved [q|k|v|z per head] — standard llama.cpp format
+                            //   (b) attn_qkv + attn_gate: block [all_Q|all_K|all_V] + [all_Z] — ollama split format
+                            const int64_t qkv_dim  = key_dim * 2 + value_dim;  // Q+K+V (no Z)
+                            layer.ssm_in         = create_tensor(tn(LLM_TENSOR_SSM_IN,        "weight", i), { n_embd, qkvz_dim }, TENSOR_NOT_REQUIRED);
+                            layer.ssm_attn_qkv   = create_tensor(tn(LLM_TENSOR_SSM_ATTN_QKV,  "weight", i), { n_embd, qkv_dim  }, TENSOR_NOT_REQUIRED);
+                            layer.ssm_attn_gate  = create_tensor(tn(LLM_TENSOR_SSM_ATTN_GATE, "weight", i), { n_embd, value_dim }, TENSOR_NOT_REQUIRED);
                             layer.ssm_conv1d     = create_tensor(tn(LLM_TENSOR_SSM_CONV1D,     "weight", i), { hparams.ssm_d_conv, conv_dim }, 0);
-                            layer.ssm_dt         = create_tensor(tn(LLM_TENSOR_SSM_DT,         "bias",   i), { hparams.ssm_dt_rank }, 0);
+                            // ssm_dt: llama.cpp format uses "blk.X.ssm_dt.bias"; ollama format uses "blk.X.ssm_dt" (no suffix)
+                            layer.ssm_dt         = create_tensor(tn(LLM_TENSOR_SSM_DT,         "bias",   i), { hparams.ssm_dt_rank }, TENSOR_NOT_REQUIRED);
+                            if (layer.ssm_dt == nullptr) {
+                                layer.ssm_dt     = create_tensor(tn(LLM_TENSOR_SSM_DT,                   i), { hparams.ssm_dt_rank }, 0);
+                            }
                             layer.ssm_a          = create_tensor(tn(LLM_TENSOR_SSM_A_NOSCAN,             i), { hparams.ssm_dt_rank }, 0);
                             layer.ssm_beta_alpha = create_tensor(tn(LLM_TENSOR_SSM_BETA_ALPHA, "weight", i), { n_embd, ba_dim }, 0);
                             layer.ssm_norm       = create_tensor(tn(LLM_TENSOR_SSM_NORM,       "weight", i), { head_v_dim }, 0);

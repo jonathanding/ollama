@@ -442,7 +442,8 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
         ggml_tensor *             cur,
         ggml_tensor *             inp_pos,
         int                       il) {
-    const int64_t n_embd_head = hparams.n_embd_head_v;
+    const int64_t n_embd_head  = hparams.n_embd_head_v;
+    const int64_t n_head_kv_il = hparams.n_head_kv(il);  // per-layer (qwen3next mixed attn/recurrent)
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
 
     // Order: joint QG projection, QG split, Q norm, KV projection, K norm, RoPE, attention
@@ -478,7 +479,7 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
     cb(Vcur, "Vcur", il);
 
     // Apply K normalization
-    Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
+    Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv_il, n_tokens);
     Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, nullptr, LLM_NORM_RMS, il);
     cb(Kcur, "Kcur_normed", il);
 
@@ -486,7 +487,7 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn(
     gate = ggml_cont_2d(ctx0, gate, n_embd_head * n_head, n_tokens);
     cb(gate, "gate_reshaped", il);
 
-    Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
+    Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv_il, n_tokens);
 
     // Apply RoPE
     Qcur = ggml_rope_ext(
@@ -547,14 +548,12 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn_linear(
     GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
 
     // Input projections
-    ggml_tensor * mixed_qkvz = build_lora_mm(model.layers[il].ssm_in, cur);
-    cb(mixed_qkvz, "linear_attn_mixed_qkvz", il);
+    // Supports two GGUF formats:
+    //   (a) ssm_in: per-head interleaved [q|k|v|z per head] — standard llama.cpp format
+    //   (b) attn_qkv + attn_gate: block [all_Q|all_K|all_V] + [all_Z] — ollama split format
 
     ggml_tensor * mixed_ba = build_lora_mm(model.layers[il].ssm_beta_alpha, cur);
     cb(mixed_ba, "linear_attn_mixed_ba", il);
-
-    int64_t       qkvz_new_dim        = 2 * head_k_dim + 2 * head_v_dim * (num_v_heads / num_k_heads);
-    ggml_tensor * mixed_qkvz_reshaped = ggml_reshape_4d(ctx0, mixed_qkvz, qkvz_new_dim, num_k_heads, n_seq_tokens, n_seqs);
 
     // Reshape mixed_ba: [batch, seq_len, hidden_size] -> [batch, seq_len, num_k_heads, 2*num_v_heads/num_k_heads]
     int64_t       ba_new_dim        = 2 * num_v_heads / num_k_heads;
@@ -585,47 +584,82 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn_linear(
     ggml_tensor * gate = ggml_mul(ctx0, alpha_softplus, model.layers[il].ssm_a);  // -A_log.exp() * softplus
     cb(gate, "gate", il);
 
-    // Split mixed_qkvz into query, key, value, z
-    int64_t split_sizes_qkvz[4] = {
-        head_k_dim,                              // query size
-        head_k_dim,                              // key size
-        head_v_dim * num_v_heads / num_k_heads,  // value size
-        head_v_dim * num_v_heads / num_k_heads   // z size
-    };
+    ggml_tensor * qkv_mixed;
+    ggml_tensor * z;
 
-    ggml_tensor * query =
-        ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[0], num_k_heads, n_seq_tokens, n_seqs,
-                     mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3], 0);
-    cb(query, "q", il);
+    GGML_ASSERT(model.layers[il].ssm_in != nullptr ||
+                (model.layers[il].ssm_attn_qkv != nullptr && model.layers[il].ssm_attn_gate != nullptr));
 
-    ggml_tensor * key = ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[1], num_k_heads, n_seq_tokens, n_seqs,
-                                     mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3],
-                                     split_sizes_qkvz[0] * sizeof(float));
-    cb(key, "k", il);
+    if (model.layers[il].ssm_in != nullptr) {
+        // Standard path: ssm_in uses per-head interleaved layout [q|k|v|z per head]
+        ggml_tensor * mixed_qkvz = build_lora_mm(model.layers[il].ssm_in, cur);
+        cb(mixed_qkvz, "linear_attn_mixed_qkvz", il);
 
-    ggml_tensor * value =
-        ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[2], num_k_heads, n_seq_tokens, n_seqs,
-                     mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3],
-                     (split_sizes_qkvz[0] + split_sizes_qkvz[1]) * sizeof(float));
-    cb(value, "v", il);
+        int64_t       qkvz_new_dim        = 2 * head_k_dim + 2 * head_v_dim * (num_v_heads / num_k_heads);
+        ggml_tensor * mixed_qkvz_reshaped = ggml_reshape_4d(ctx0, mixed_qkvz, qkvz_new_dim, num_k_heads, n_seq_tokens, n_seqs);
 
-    ggml_tensor * z = ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[3], num_k_heads, n_seq_tokens, n_seqs,
-                                   mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3],
-                                   (split_sizes_qkvz[0] + split_sizes_qkvz[1] + split_sizes_qkvz[2]) * sizeof(float));
-    cb(z, "z", il);
+        // Split mixed_qkvz into query, key, value, z
+        int64_t split_sizes_qkvz[4] = {
+            head_k_dim,                              // query size
+            head_k_dim,                              // key size
+            head_v_dim * num_v_heads / num_k_heads,  // value size
+            head_v_dim * num_v_heads / num_k_heads   // z size
+        };
 
-    // After creating query, key, and value_reshaped, reshape each to flatten the head dimensions
-    // query: [head_k_dim, num_k_heads, n_tokens, n_seqs] -> [head_k_dim * num_k_heads, n_tokens, n_seqs]
-    ggml_tensor * query_flat = ggml_cont_3d(ctx0, query, head_k_dim * num_k_heads, n_seq_tokens, n_seqs);
-    cb(query_flat, "query_flat", il);
+        ggml_tensor * query =
+            ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[0], num_k_heads, n_seq_tokens, n_seqs,
+                         mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3], 0);
+        cb(query, "q", il);
 
-    // key: [head_k_dim, num_k_heads, n_tokens, n_seqs] -> [head_k_dim * num_k_heads, n_tokens, n_seqs]
-    ggml_tensor * key_flat = ggml_cont_3d(ctx0, key, head_k_dim * num_k_heads, n_seq_tokens, n_seqs);
-    cb(key_flat, "key_flat", il);
+        ggml_tensor * key = ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[1], num_k_heads, n_seq_tokens, n_seqs,
+                                         mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3],
+                                         split_sizes_qkvz[0] * sizeof(float));
+        cb(key, "k", il);
 
-    // value_reshaped: [head_v_dim, num_v_heads, n_tokens, n_seqs] -> [head_v_dim * num_v_heads, n_tokens, n_seqs]
-    ggml_tensor * value_flat = ggml_cont_3d(ctx0, value, head_v_dim * num_v_heads, n_seq_tokens, n_seqs);
-    cb(value_flat, "value_flat", il);
+        ggml_tensor * value =
+            ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[2], num_k_heads, n_seq_tokens, n_seqs,
+                         mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3],
+                         (split_sizes_qkvz[0] + split_sizes_qkvz[1]) * sizeof(float));
+        cb(value, "v", il);
+
+        z = ggml_view_4d(ctx0, mixed_qkvz_reshaped, split_sizes_qkvz[3], num_k_heads, n_seq_tokens, n_seqs,
+                         mixed_qkvz_reshaped->nb[1], mixed_qkvz_reshaped->nb[2], mixed_qkvz_reshaped->nb[3],
+                         (split_sizes_qkvz[0] + split_sizes_qkvz[1] + split_sizes_qkvz[2]) * sizeof(float));
+        cb(z, "z", il);
+
+        // Flatten head dimensions
+        ggml_tensor * query_flat = ggml_cont_3d(ctx0, query, head_k_dim * num_k_heads, n_seq_tokens, n_seqs);
+        cb(query_flat, "query_flat", il);
+
+        ggml_tensor * key_flat = ggml_cont_3d(ctx0, key, head_k_dim * num_k_heads, n_seq_tokens, n_seqs);
+        cb(key_flat, "key_flat", il);
+
+        ggml_tensor * value_flat = ggml_cont_3d(ctx0, value, head_v_dim * num_v_heads, n_seq_tokens, n_seqs);
+        cb(value_flat, "value_flat", il);
+
+        // Concatenate to [conv_dim, n_tokens, n_seqs]
+        qkv_mixed = ggml_concat(ctx0, query_flat, key_flat, 0);
+        qkv_mixed = ggml_concat(ctx0, qkv_mixed, value_flat, 0);
+        cb(qkv_mixed, "qkv_mixed", il);
+    } else {
+        // Ollama split format: attn_qkv outputs block [all_Q|all_K|all_V] directly (no reshape needed)
+        // attn_gate outputs [all_Z]
+        ggml_tensor * qkv_proj = build_lora_mm(model.layers[il].ssm_attn_qkv, cur);
+        cb(qkv_proj, "linear_attn_qkv_proj", il);
+
+        z = build_lora_mm(model.layers[il].ssm_attn_gate, cur);
+        cb(z, "linear_attn_z_proj", il);
+
+        // z needs to be 4D for downstream code: [head_v_dim * num_v_heads/num_k_heads, num_k_heads, n_seq_tokens, n_seqs]
+        z = ggml_reshape_4d(ctx0, z,
+                            head_v_dim * num_v_heads / num_k_heads, num_k_heads, n_seq_tokens, n_seqs);
+        cb(z, "z", il);
+
+        // Reshape to 3D to match the original path's qkv_mixed shape [qkv_dim, n_seq_tokens, n_seqs]
+        int64_t qkv_proj_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads;
+        qkv_mixed = ggml_reshape_3d(ctx0, qkv_proj, qkv_proj_dim, n_seq_tokens, n_seqs);
+        cb(qkv_mixed, "qkv_mixed", il);
+    }
 
     // Get convolution states from cache
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
@@ -636,11 +670,6 @@ ggml_tensor * llm_build_qwen3next::build_layer_attn_linear(
     // Build the convolution states tensor
     ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
     cb(conv_states, "conv_states", il);
-
-    // Now concatenate along the feature dimension (dim 0) to get [conv_dim, n_tokens, n_seqs]
-    ggml_tensor * qkv_mixed = ggml_concat(ctx0, query_flat, key_flat, 0);
-    qkv_mixed               = ggml_concat(ctx0, qkv_mixed, value_flat, 0);
-    cb(qkv_mixed, "qkv_mixed", il);
 
     qkv_mixed = ggml_permute(ctx0, qkv_mixed, 1, 0, 2, 3);
     cb(qkv_mixed, "qkv_mixed_permuted", il);

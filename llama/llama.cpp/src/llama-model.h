@@ -314,6 +314,8 @@ struct llama_layer {
 
     // qwen3next
     struct ggml_tensor * ssm_beta_alpha = nullptr;
+    struct ggml_tensor * ssm_attn_qkv   = nullptr;  // ollama split format
+    struct ggml_tensor * ssm_attn_gate  = nullptr;  // ollama split format
 
     // rwkv
     struct ggml_tensor * time_mix_w1         = nullptr;
