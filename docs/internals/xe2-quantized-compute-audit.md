@@ -317,3 +317,187 @@ MMQ 路径的核心特征：
 | **硬件单元** | 整数加速（DP4A 或 DPAS int8） ⚠️ 待确认具体单元 |
 | **支持的量化类型** | Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, MXFP4 |
 | **禁用方式** | `export GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1` |
+
+### 2.2 Dequant+F16 KHR Coopmat 路径（Cooperative Matrix）
+
+> **优先级说明**：Q4_K 在 Xe2 上正常走 MMQ 路径（Section 2.1）。本节描述的 Dequant+F16 路径是 **fallback / 对比路径**，仅在 MMQ 不可用时（如设置 `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`）生效。
+
+#### 2.2.1 触发条件与 Fallback 链
+
+**Xe2 使用 KHR coopmat（coopmat1），而非 NV coopmat2。**
+
+`coopmat2` 标志要求设备支持 `VK_NV_cooperative_matrix2` 扩展 (source: `ggml-vulkan.cpp:4322-4324`)，这是 NVIDIA 专有扩展，Intel Xe2 不具备。因此 `device->coopmat2 == false`。
+
+Xe2 的 coopmat 启用路径：
+
+1. **扩展检测**：设备枚举到 `VK_KHR_cooperative_matrix` 且未设置 `GGML_VK_DISABLE_COOPMAT` 环境变量 → `device->coopmat_support = true` (source: `ggml-vulkan.cpp:4314-4316`)
+
+2. **架构白名单**：`ggml_vk_khr_cooperative_matrix_support()` 对 Intel 设备仅允许 `INTEL_XE2` 架构 (source: `ggml-vulkan.cpp:14686-14691`)。不满足则覆盖为 `device->coopmat_support = false` (source: `ggml-vulkan.cpp:4474-4476`)
+
+3. **Coopmat 维度查询**：通过 `vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR` 运行时查询支持的矩阵尺寸（M, N, K），要求 A/B 类型为 `Float16`，scope 为 `Subgroup` (source: `ggml-vulkan.cpp:4759-4804`)。代码分别检查 f32 累加和 f16 累加两种变体，记录第一个匹配的 (M, N, K) 尺寸到 `device->coopmat_m/n/k`。若无匹配或不支持 f32 累加，则禁用 coopmat (source: `ggml-vulkan.cpp:4838-4841`)
+
+> ⚠️ **待确认**：Xe2 驱动实际报告的 coopmat (M, N, K) 尺寸。根据 XMX fp16 规格，预期为 (M=16, N=16, K=16) 或类似值，但需实机验证。
+
+**Pipeline 选择 fallback 链** (`ggml_vk_get_mul_mat_mat_pipeline`, source: `ggml-vulkan.cpp:5498-5505`)：
+
+```
+if (device->coopmat2)           → pipeline_dequant_mul_mat_mat_f16[type]  (NV coopmat2, 不适用于 Xe2)
+else if (device->coopmat_support) → pipeline_dequant_mul_mat_mat[type]     (KHR coopmat1, ✅ Xe2 走这里)
+else                              → pipeline_dequant_mul_mat_mat[type]     (标量/SIMD fallback)
+```
+
+对于 Xe2（`coopmat_support == true, coopmat2 == false`），走第二分支。精度选择：若 `device->fp16 && device->coopmat_acc_f16_support && prec == GGML_PREC_DEFAULT`，用 f16 累加器；否则用 f32 累加器 (source: `ggml-vulkan.cpp:5502-5503`)。
+
+**但注意**：在 `ggml_vk_mul_mat_mat` 中，MMQ 被**优先**尝试 (source: `ggml-vulkan.cpp:6722-6730`)。只有当 MMQ pipeline 返回 `nullptr`（如 `integer_dot_product == false`）时，才 fall back 到此 Dequant+F16 coopmat 路径。
+
+#### 2.2.2 Shader 生成
+
+Coopmat1 变体在 `vulkan-shaders-gen.cpp` 的 `process_shaders()` 中生成 (source: `vulkan-shaders-gen.cpp:611-614`)：
+
+```cpp
+// Coopmat, fp32acc and fp16acc
+matmul_shaders(true, matmul_id_type, true, false, false);  // coopmat=true, coopmat2=false, f16acc=false
+matmul_shaders(true, matmul_id_type, true, false, true);   // coopmat=true, coopmat2=false, f16acc=true
+```
+
+`matmul_shaders` 内部设置关键 define：
+- `FLOAT16 = 1`（fp16 模式）
+- `COOPMAT = 1`（启用 cooperative matrix 代码路径）(source: `vulkan-shaders-gen.cpp:454-456`)
+- `ACC_TYPE = float`（f32acc 变体）或 `float16_t`（f16acc 变体）(source: `vulkan-shaders-gen.cpp:448`)
+- `FLOAT_TYPE = float16_t`, `FLOAT_TYPE_VEC2 = f16vec2`（fp16 模式下的浮点类型）(source: `vulkan-shaders-gen.cpp:470-484`)
+
+源文件为 `mul_mm.comp`（而非 coopmat2 的 `mul_mm_cm2.comp`）(source: `vulkan-shaders-gen.cpp:458`)。
+
+编译后 shader 名称以 `_cm1` 后缀标识（如 `matmul_q4_k_f32_cm1.spv`）(source: `vulkan-shaders-gen.cpp:408`)。
+
+Pipeline 创建在 `#if defined(VK_KHR_cooperative_matrix)` 块内，使用 `CREATE_MM2` 宏同时创建 f16acc 和 f32acc 两个变体 (source: `ggml-vulkan.cpp:3105-3152`)。
+
+#### 2.2.3 数据流详解
+
+##### Step 1: Q4_K 反量化 — int4 → f16 (mul_mm_funcs.glsl)
+
+`load_a_to_shmem` 中的 `DATA_A_Q4_K` 分支 (source: `mul_mm_funcs.glsl:170-202`) 将 Q4_K 权重**完全反量化为 f16** 存入 shared memory：
+
+```glsl
+const uint ib = idx / 128;                 // super-block index (256 weights / 2 per idx)
+const uint iqs = idx % 128;                // 0..127
+const uint n = iqs / 32;                   // sub-block 0,1,2,3
+const uint b = (iqs % 32) / 16;            // nibble half 0,1
+const uint is = 2 * n + b;                 // scale index 0..7
+
+const vec2 loadd = vec2(data_a[ib].dm);    // fp16 → fp32: (d, dmin)
+
+// 提取 6-bit scale 和 min (组合高低位)
+const uint8_t sc = uint8_t((...) | (...));  // 6-bit scale
+const uint8_t mbyte = uint8_t((...) | (...));  // 6-bit min
+
+const float d = loadd.x * sc;              // d × scale
+const float m = -loadd.y * mbyte;          // -(dmin × min)
+
+buf_a[buf_idx] = FLOAT_TYPE_VEC2(          // f16vec2
+    fma(d, float((data_a[ib].qs[qsi    ] >> (b * 4)) & 0xF), m),
+    fma(d, float((data_a[ib].qs[qsi + 1] >> (b * 4)) & 0xF), m)
+);
+```
+(source: `mul_mm_funcs.glsl:174-202`)
+
+逐步拆解：
+
+1. **Nibble 提取**：`(data_a[ib].qs[qsi] >> (b * 4)) & 0xF` — 从 packed byte 中取高或低 4-bit nibble，得到 uint 值 [0, 15]
+
+2. **Scale/min 提取**：6-bit scale (`sc`) 和 6-bit min (`mbyte`) 从 `data_a[ib].scales[]` 数组中拼合高低位得到（Q4_K 的 scale 编码分散存储在多个字节中）(source: `mul_mm_funcs.glsl:184-196`)
+
+3. **FMA 反量化**：`fma(d, float(nibble), m)` = `d × nibble + m` = `(global_d × sc) × nibble − (global_dmin × mbyte)`。这将 int4 值完全还原为浮点数
+
+4. **转型为 f16**：结果通过 `FLOAT_TYPE_VEC2`（即 `f16vec2`）构造函数从 fp32 截断为 fp16 存入 shared memory `buf_a`
+
+**与 MMQ 路径的本质区别**：MMQ 将权重保持在整数域（int4 → int8 容器），而此路径将权重完全反量化为 f16 浮点数。反量化引入 fp32→fp16 截断误差，但后续乘法在浮点域进行，避免了激活侧的量化误差。
+
+##### Step 2: 激活加载 — fp32 → f16 (buf_b)
+
+激活（B 矩阵）以 fp32 或 fp16 从全局内存加载到 shared memory `buf_b`。在 fp16 coopmat 模式下，`B_TYPE = float16_t`（对齐变体使用 `f16mat2x4`），数据类型已在 shader 生成时确定 (source: `vulkan-shaders-gen.cpp:430, 584-585`)。
+
+##### Step 3: Cooperative Matrix 乘加 — coopMatMulAdd (mul_mm.comp)
+
+从 shared memory 加载到寄存器级 cooperative matrix，执行矩阵乘加：
+
+```glsl
+// Coopmat 类型声明
+coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a;     // f16, MxK
+coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> cache_b;     // f16, KxN
+coopmat<ACC_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> sums; // f32 or f16, MxN
+```
+(source: `mul_mm.comp:245-247`)
+
+主计算循环：
+```glsl
+coopMatLoad(cache_a, buf_a, ..., SHMEM_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+coopMatLoad(cache_b, buf_b, ..., SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+sums[...] = coopMatMulAdd(cache_a, cache_b, sums[...]);
+```
+(source: `mul_mm.comp:285-293`)
+
+`coopMatMulAdd` 执行 `C += A × B`，其中：
+- **A, B 输入**：`FLOAT_TYPE = float16_t`（f16×f16 乘法）
+- **累加器 C**：`ACC_TYPE = float`（f32 累加，默认）或 `float16_t`（f16 累加，`GGML_PREC_DEFAULT` 时）
+- **Tile 尺寸 (TM, TK, TN)**：由运行时查询的 `device->coopmat_m/n/k` 决定
+
+在 Xe2 上，`coopMatMulAdd` 映射到 **XMX fp16 DPAS 指令**。与 MMQ 路径（整数 dot product）不同，此路径直接利用 XMX 的浮点矩阵乘法管线。
+
+#### 2.2.4 完整精度流水线图
+
+```mermaid
+graph LR
+    classDef cpp stroke:#f97316,stroke-width:3px
+    classDef legend fill:#fff,stroke:#999
+
+    L["🟠 = llama.cpp Vulkan shader"]:::legend
+
+    W["GGUF Q4_K 权重<br/>int4 packed 存储"]:::cpp
+
+    W1["nibble 提取<br/>(qs >> shift) & 0xF<br/>→ uint [0,15]<br/>(mul_mm_funcs:201)"]:::cpp
+    W2["scale/min 拼合<br/>6-bit sc, mbyte<br/>(mul_mm_funcs:195-196)"]:::cpp
+    W3["FMA 反量化<br/>fma(d×sc, nibble, -dmin×mb)<br/>→ fp32<br/>(mul_mm_funcs:201-202)"]:::cpp
+    W4["截断为 f16<br/>FLOAT_TYPE_VEC2 = f16vec2<br/>→ buf_a (shared mem)<br/>(mul_mm_funcs:201)"]:::cpp
+
+    B["激活 fp32/fp16<br/>(来自上一层)"]:::cpp
+    B1["加载到 buf_b<br/>f16 shared memory"]:::cpp
+
+    CM["coopMatMulAdd<br/>f16 × f16 → ACC_TYPE<br/>TM×TK × TK×TN → TM×TN<br/>(mul_mm.comp:293)"]:::cpp
+    ACC["累加器<br/>ACC_TYPE = float (f32)<br/>或 float16_t (f16)<br/>(mul_mm.comp:247)"]:::cpp
+
+    W --> W1
+    W --> W2
+    W1 --> W3
+    W2 --> W3
+    W3 --> W4 --> CM
+    B --> B1 --> CM
+    CM --> ACC
+```
+
+#### 2.2.5 与 MMQ 路径的精度对比
+
+| 方面 | MMQ (Section 2.1) | Dequant+F16 Coopmat (本节) |
+|------|-------------------|---------------------------|
+| **权重处理** | int4 → int8 容器（零扩展，无反量化） | int4 → fp32 (FMA) → **fp16 截断** |
+| **激活处理** | fp32 → int8 (Q8_1 量化，`round` 误差) | fp32 → f16（截断或直接 f16 输入） |
+| **乘法** | int8 × int8 → int32 (`dotPacked4x8EXT`) | f16 × f16 → f32/f16 (`coopMatMulAdd`) |
+| **累加** | fp32（scale 还原后） | f32 或 f16（编译期选择） |
+| **额外误差源** | 激活量化 round 误差 (±A/254) | 权重反量化 fp32→f16 截断 |
+| **硬件单元** | 整数 DP4A / DPAS int8 | **XMX fp16 DPAS** |
+| **Xe2 实际使用** | ✅ 默认路径 | ❌ 仅 MMQ 禁用时 fallback |
+
+#### 2.2.6 小结
+
+| 属性 | 值 |
+|------|-----|
+| **路径选择优先级** | 低于 MMQ，高于标量（Xe2 上为 fallback） |
+| **Xe2 coopmat 版本** | KHR coopmat1（`VK_KHR_cooperative_matrix`），非 NV coopmat2 |
+| **权重精度** | int4 → fp32 (FMA 反量化) → f16（截断） |
+| **激活精度** | fp32 → f16 |
+| **计算指令** | `coopMatMulAdd`（SPIR-V `OpCooperativeMatrixMulAddKHR`） |
+| **Tile 尺寸** | 运行时从驱动查询 `(coopmat_m, coopmat_n, coopmat_k)` ⚠️ 待确认实际值 |
+| **累加精度** | f32（默认）或 f16（`GGML_PREC_DEFAULT`） |
+| **硬件单元** | XMX fp16 管线 |
+| **Shader 源文件** | `mul_mm.comp` + `mul_mm_funcs.glsl`（编译为 `*_cm1.spv`） |
+| **禁用方式** | `export GGML_VK_DISABLE_COOPMAT=1` |
