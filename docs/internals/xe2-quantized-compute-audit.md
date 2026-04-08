@@ -1000,3 +1000,185 @@ MMQ 路径中，Q4_K 权重**不反量化为浮点**，而是保持在整数域 
 默认 f16 KV cache 时无反量化开销——K/V 数据直接以 `f16vec4` 读取。
 
 量化 KV cache 场景（如 Q4_0、Q8_0），shader 内 `dequantize4()` 将量化值还原为 `vec4`（fp32）(source: `flash_attn_base.glsl:95-113`)，然后通过 `f16vec4()` 转为 f16 送入 coopmat 或标量计算。
+
+### 4.3 计算精度
+
+#### 4.3.1 MMQ 路径：dotPacked4x8EXT
+
+MMQ 路径的核心计算指令是 `dotPacked4x8EXT`，在 Q4_K 的 `mmq_dot_product` 中循环调用 **8 次** (source: `mul_mmq_funcs.glsl:349-363`)：
+
+```glsl
+[[unroll]] for (uint iqs = 0; iqs < 8; iqs++) {
+    const int32_t qs_a = int32_t((cache_a[ib_a].qs[iqs / 2] >> ((iqs % 2) * 4)) & 0x0F0F0F0F);
+    q_sum += dotPacked4x8EXT(qs_a, cache_b.qs[iqs]);
+}
+```
+
+每次 `dotPacked4x8EXT` 执行 4 路 int8×int8 乘法并累加到 int32 结果。8 次迭代共处理 8×4 = **32 个 int8×int8 乘对**（对应 1 个 Q8_1 block 的 32 个元素）。
+
+**精度特征**：
+- 乘法：int8 × int8 → int16（无精度损失，最大乘积 127×15 = 1905，int16 容纳无误）
+- 累加：4 路乘积求和 → int32（无溢出风险，最大单次 dot = 4×1905 = 7620）
+- 跨迭代累加：8 次 int32 加法到 `q_sum`（int32），最大值 8×7620 = 60960，int32 容纳无误
+
+**Scale 还原**（从 int32 回到 fp32）(source: `mul_mmq_funcs.glsl:362`)：
+
+```glsl
+return ACC_TYPE(float(cache_b.ds.x) * float(cache_a[ib_a].dm.x) * float(q_sum)
+              - float(cache_a[ib_a].dm.y) * float(cache_b.ds.y));
+```
+
+- `cache_b.ds.x`（Q8_1 的 d）和 `cache_a[ib_a].dm.x/y`（Q4_K 的 d×scale / dmin×min）均为 fp16，通过 `float()` 提升为 fp32 后相乘
+- `q_sum` 从 int32 通过 `float()` 转为 fp32
+- 所有乘法和减法在 **fp32 精度**下执行
+- 结果 `ACC_TYPE = float`（fp32）
+
+#### 4.3.2 Dequant+F16 路径：coopMatMulAdd
+
+反量化后的 f16 权重与 f16 激活通过 `coopMatMulAdd` 执行矩阵乘加 (source: `mul_mm.comp:285-293`)：
+
+- **输入精度**：`float16_t`（A 矩阵和 B 矩阵均为 f16）
+- **乘法精度**：f16×f16 — 在 XMX fp16 管线中执行，乘法结果精度取决于硬件实现（Xe2 的 XMX fp16 乘法器产出至少 fp16 精度的中间结果）
+- **累加精度**：`ACC_TYPE = float`（f32，默认）或 `float16_t`（f16，`GGML_PREC_DEFAULT` 时）
+
+#### 4.3.3 Flash Attention：QK^T
+
+QK^T 在 coopmat1 shader 中通过 `coopMatMulAdd` 执行 (source: `flash_attn_cm1.comp:207-218`)：
+
+- **输入**：Q 和 K 均为 `float16_t`
+- **乘法**：f16 × f16（XMX fp16 DPAS）
+- **累加**：`ACC_TYPE`（f32 或 f16）
+
+Softmax 始终在 **fp32** 精度下执行：`max()`、`exp()`、求和、归一化均使用 `float` 类型变量 (source: `flash_attn_cm1.comp:253-286`)。
+
+PV 乘法为标量逐元素运算：`float(Pf[r]) * ACC_TYPEV4(Vf)` (source: `flash_attn_cm1.comp:287-299`)，在 Vector Engine ALU 上以 fp32 精度执行。
+
+#### 4.3.4 标量算子精度
+
+推理过程中 matmul 之间穿插的逐元素算子（element-wise ops），全部在 **fp32** 精度下计算：
+
+| 算子 | Shader | 计算精度 | 输入转换 | 输出转换 | Source |
+|------|--------|----------|----------|----------|--------|
+| **RMS_NORM** | `norm.comp` | fp32 | `float(data_a[...])` | `D_TYPE(result)` | `norm.comp:23,42` |
+| **SiLU** | `silu.comp` | fp32 | `float(data_a[i])` | `D_TYPE(xi / (1 + exp(-xi)))` | `silu.comp:20-21` |
+| **SwiGLU** | `swiglu.comp` + `glu_main.glsl` | fp32 | `float(data_a[idx])` | `D_TYPE(op(...))` | `glu_main.glsl:16` |
+| **ADD** | `add.comp` | fp32（FLOAT_TYPE 中间变量） | `FLOAT_TYPE(data_a[...]) + FLOAT_TYPE(data_b[...])` | `D_TYPE(sum)` | `add.comp:39,42` |
+| **GET_ROWS** | `get_rows.comp` | fp32 | `TEMP_TYPE(data_a[...])` | `D_TYPE(v)` | `get_rows.comp:31-34` |
+| **GET_ROWS (quant)** | `get_rows_quant.comp` | fp32 | `dequantize()` → `vec2` (fp32) | `D_TYPE(v.x/v.y)` | `get_rows_quant.comp:40-45` |
+| **RoPE** | `rope_funcs.glsl` | fp32 | `float` theta/cos/sin 全程 | `ROPE_D_TYPE(x0*cos - x1*sin)` | `rope_funcs.glsl:66-77` |
+
+所有标量算子的模式一致：**输入提升为 fp32 → fp32 中计算 → 结果通过 `D_TYPE()` 或 `ROPE_D_TYPE()` 写出**。`D_TYPE` 在大多数场景下为 `float`（fp32）。
+
+### 4.4 累加精度
+
+| 计算路径 | 累加器类型 | 累加精度 | Source |
+|----------|-----------|----------|--------|
+| **MMQ** | `ACC_TYPE = float` | fp32 | `vulkan-shaders-gen.cpp:588-592` 注释 "Integer dot mmq performs better with f32 accumulators" |
+| **Dequant+F16 coopmat (default)** | `ACC_TYPE = float` | fp32 | `mul_mm.comp:247` |
+| **Dequant+F16 coopmat (PREC_DEFAULT)** | `ACC_TYPE = float16_t` | f16 | `vulkan-shaders-gen.cpp:448` |
+| **FA coopmat1 QK^T (PREC_F32)** | `ACC_TYPE = float` | fp32 | `flash_attn_cm1.comp:207` |
+| **FA coopmat1 QK^T (non-PREC_F32)** | `ACC_TYPE = float16_t` | f16 | `vulkan-shaders-gen.cpp:626-631` |
+| **FA softmax** | `float` | fp32（始终） | `flash_attn_cm1.comp:253-286` |
+| **FA PV 乘法** | `ACC_TYPEV4` | f32 或 f16 | `flash_attn_cm1.comp:297` |
+| **FA scalar (decode)** | `float` / `vec4` | fp32（始终） | `flash_attn.comp:165-251` |
+| **标量算子** | `float` / `vec2` / `vec4` | fp32（始终） | 各 shader 源 |
+
+**关键观察**：
+- MMQ 路径的 fp32 累加器是**编译时硬编码**的——MMQ shader 仅在 `!f16acc && !coopmat && !coopmat2` 条件下生成 (source: `vulkan-shaders-gen.cpp:588-592`)，不存在 f16 累加变体
+- Flash Attention 的 softmax 始终 fp32，即使 QK^T 和 PV 使用 f16 累加器
+- Decode (N=1) 时 FA 使用标量 shader，全程 fp32
+
+### 4.5 输出精度
+
+#### 4.5.1 Matmul 输出
+
+**所有 matmul shader 的 `D_TYPE` 均为 `float`（fp32）** (source: `vulkan-shaders-gen.cpp:523-591`)。
+
+在 shader 生成代码中，无论是 f16/f32 输入、coopmat/MMQ/标量路径、任何量化类型，`D_TYPE` 参数始终被设为 `"float"`：
+
+```cpp
+// 以 Q4_K f16 为例 (source: vulkan-shaders-gen.cpp:584)
+{"D_TYPE", "float"}
+// MMQ 路径 (source: vulkan-shaders-gen.cpp:591)
+{"D_TYPE", "float"}
+```
+
+MMQ 写出示例 (source: `mul_mmq.comp:296`)：
+```glsl
+data_d[offsets + (dc_warp + cc) * p.stride_d + dr_warp + cr] = D_TYPE(sums[sums_idx].x);
+```
+
+Dequant+F16 coopmat 写出 (source: `mul_mm.comp:379,385`)：
+```glsl
+data_d[...] = D_TYPE(coopmat_stage[...]);
+// 注释: "Assumption: D_TYPE == float"
+```
+
+`mul_mm.comp:385` 甚至有内联注释明确假设 `D_TYPE == float`。
+
+#### 4.5.2 Flash Attention 输出
+
+FA 输出同样为 fp32（`D_TYPE = float`）(source: `vulkan-shaders-gen.cpp:640,650,659`)。
+
+写出前先除以归一化因子 `Lf[r]`，然后转为 `D_TYPE` (source: `flash_attn_cm1.comp:422-424,448`)：
+
+```glsl
+Of[r][d] *= ACC_TYPE(Lfrcp[r]);   // 归一化（ACC_TYPE 精度）
+// ...
+data_o[...] = D_TYPE(Of[r][d][comp]);  // 输出为 D_TYPE = float
+```
+
+#### 4.5.3 标量算子输出
+
+标量算子的输出 `D_TYPE` 通常也是 `float`，但这取决于 pipeline 创建时的具体配置。以 `norm.comp` 为例 (source: `norm.comp:42`)：
+
+```glsl
+data_d[row*p.KX + col] = D_TYPE((float(data_a[row*p.KX + col]) - mean) * inv_std);
+```
+
+#### 4.5.4 端到端精度总结
+
+```mermaid
+graph TD
+    classDef cpp stroke:#f97316,stroke-width:3px
+    classDef legend fill:#fff,stroke:#999
+    classDef fp32 fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
+    classDef fp16 fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
+    classDef int fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
+
+    L1["🔵 = fp32"]:::fp32
+    L2["🟡 = fp16"]:::fp16
+    L3["🟢 = int8/int4"]:::int
+
+    STORE["存储<br/>Q4_K: int4 packed<br/>Q6_K: int6 packed<br/>KV cache: f16"]:::int
+
+    DQ_MMQ["MMQ 权重提取<br/>int4 → int8 容器<br/>（无损零扩展）"]:::int
+    DQ_F16["F16 权重反量化<br/>int4 → fp32 (FMA)<br/>→ fp16 (截断)"]:::fp16
+    AQ["激活量化 (MMQ)<br/>fp32 → int8 (Q8_1)<br/>round() 误差"]:::int
+
+    COMP_MMQ["MMQ 计算<br/>dotPacked4x8EXT<br/>int8×int8→int32<br/>×8 iter = 32 pairs"]:::int
+    COMP_F16["Coopmat 计算<br/>coopMatMulAdd<br/>f16×f16"]:::fp16
+    COMP_FA["FA QK^T<br/>coopMatMulAdd<br/>f16×f16"]:::fp16
+
+    SCALE["Scale 还原<br/>fp16→fp32 提升<br/>× int32 → fp32"]:::fp32
+    ACC_F32["fp32 累加器"]:::fp32
+    SOFTMAX["Softmax<br/>max/exp/sum<br/>始终 fp32"]:::fp32
+    PV["P×V 标量乘法<br/>fp32"]:::fp32
+    SCALAR["标量算子<br/>norm/silu/rope/add<br/>全 fp32 计算"]:::fp32
+
+    OUT["输出 D_TYPE = float<br/>fp32"]:::fp32
+
+    STORE --> DQ_MMQ --> COMP_MMQ --> SCALE --> ACC_F32 --> OUT
+    STORE --> DQ_F16 --> COMP_F16 --> ACC_F32
+    STORE --> AQ --> COMP_MMQ
+    STORE --> COMP_FA --> SOFTMAX --> PV --> OUT
+    ACC_F32 --> SCALAR --> OUT
+```
+
+**总结**：在 Q4_K_M 模型于 Xe2 ggml Vulkan 后端的默认计算路径（MMQ + FA coopmat1）中，整个推理管线的精度可概括为：
+
+- **权重**：int4 存储 → int8 容器（无损） → int8×int8 dot product（int32 精确累加） → fp32 scale 还原
+- **激活**：fp32 → int8 量化（`round()` 误差，±A/254） → 参与 int8 dot product
+- **Flash Attention**：f16 Q/K/V → f16×f16 coopmat → fp32 softmax → fp32 PV → fp32 输出
+- **标量算子**：全程 fp32
+- **输出**：所有路径最终写出 fp32（`D_TYPE = float`）
