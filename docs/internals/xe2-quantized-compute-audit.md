@@ -14,17 +14,20 @@
 
 - [Section 0: 前置概念 — W4A16 与量化计算范式](#section-0-前置概念--w4a16-与量化计算范式)
 - [Section 1: 总结表](#section-1-总结表)
-- Section 2: 计算路径详解 (TODO)
-  - 2.1 MMQ 路径
-  - 2.2 Dequant+F16 Coopmat 路径
-  - 2.3 Flash Attention Coopmat 路径
-  - 2.4 运行时路径确认
+- [Section 2: 计算路径详解](#section-2-计算路径详解)
+  - [2.1 MMQ 路径](#21-mmq-路径integer-dot-product)
+  - [2.2 Dequant+F16 Coopmat 路径](#22-dequantf16-khr-coopmat-路径cooperative-matrix)
+  - [2.3 Flash Attention Coopmat 路径](#23-flash-attention-coopmat-路径)
+  - [2.4 运行时路径确认](#24-运行时路径确认)
 - [Section 3: 推理 Walkthrough — Qwen3 1.7B (Q4_K_M)](#section-3-推理-walkthrough--qwen3-17b-q4_k_m)
   - 3.1 Prefill 阶段
   - 3.2 Decode 阶段
   - 3.3 Prefill vs Decode 流程图
   - 3.4 小结
 - [Section 4: 精度细节](#section-4-精度细节)
+- [已知不确定项](#已知不确定项)
+- [代码引用索引](#代码引用索引)
+- [不包含的内容](#不包含的内容)
 
 ---
 
@@ -1428,3 +1431,82 @@ graph TD
 - **Flash Attention**：f16 Q/K/V → f16×f16 coopmat → fp32 softmax → fp32 PV → fp32 输出
 - **标量算子**：全程 fp32
 - **输出**：所有路径最终写出 fp32（`D_TYPE = float`）
+
+---
+
+## 已知不确定项
+
+本报告基于代码静态分析，以下内容无法仅从代码确认，需实机验证或驱动文档佐证：
+
+### 1. Xe3 (Panther Lake) 行为
+
+代码中架构枚举仅包含 `INTEL_XE2` (source: `ggml-vulkan.cpp:251`)，KHR coopmat 白名单也仅匹配 `INTEL_XE2` (source: `ggml-vulkan.cpp:14691`)。Xe3（Panther Lake）预期与 Xe2 行为一致，但无法从当前代码确认——Xe3 可能需要新的架构枚举值和白名单条目才能启用 coopmat 路径。
+
+### 2. `coopmat_acc_f16_support` 在 Xe2 上的实际值
+
+Dequant+F16 路径和 FA coopmat1 路径均有 f16 累加器变体，其启用取决于驱动通过 `vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR` 上报的 cooperative matrix properties 中是否包含 f16 结果类型 (source: `ggml-vulkan.cpp:4792-4799`)。代码中无 Xe2 的硬编码值，实际结果完全取决于 Intel Vulkan 驱动版本。
+
+### 3. Decode MUL_MAT_VEC 的 XMX 映射
+
+`dotPacked4x8EXT`（`OpSDotKHR`）在 n=1（matrix-vector）场景下，Intel Vulkan 驱动的 JIT 编译器是否仍将其映射到 XMX（DPAS int8 系统阵列），还是降级到 Vector Engine 的 DP4A 指令，无法从 Vulkan API 层面确定。公开文档未说明此映射策略。这直接影响 decode 阶段 Q4_K/Q5_K matmul 是否真正利用了 XMX。
+
+### 4. `GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT` 编译宏
+
+此宏由 CMake 构建时测试 GLSL 编译器（glslc / glslangValidator）是否支持 `GL_EXT_integer_dot_product` 扩展来决定 (source: `ggml-vulkan/CMakeLists.txt:77-81`)。如果构建环境的 GLSL 编译器版本过旧，所有 MMQ pipeline 创建代码都会被 `#if` 排除 (source: `ggml-vulkan.cpp:3283`)，导致 MMQ 路径完全不可用——即使 GPU 硬件支持 integer dot product。Ollama 官方构建预期启用此宏，但自编译场景需注意。
+
+### 5. `OpSDotKHR` 与 DP4A / DPAS 的映射关系
+
+报告中多处提到"DP4A 或 DPAS int8"（如 Section 2.1.4），这反映了一个根本性不确定：SPIR-V 的 `OpSDotKHR` 是高级语义指令，驱动可将其编译为 Vector Engine 的 DP4A 指令（标量管线 4×int8 dot product）或 XMX 的 DPAS int8 模式（系统阵列矩阵乘）。两者吞吐差异显著。`integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE` 仅确认硬件加速存在，不区分具体单元。
+
+### 6. Coopmat 16×16×16 维度
+
+Flash Attention coopmat1 shader 硬编码 MatBr=16, MatBc=16 的 tile 尺寸 (source: `flash_attn_cm1.comp:44-45`)，并要求设备报告 `coopmat_support_16x16x16_f32acc`（或 f16acc）(source: `ggml-vulkan.cpp:8075-8083`)。Xe2 的 XMX fp16 规格预期支持 16×16×16，但实际取决于驱动上报的 coopmat properties。若驱动报告不同尺寸（如 8×8×16），FA 将 fallback 到 scalar shader。
+
+### 7. Q6_K MMVQ 排除的性能原因
+
+Q6_K 被全局排除于 MMVQ 路径（不分 GPU 厂商），代码注释仅说 "General performance issue with q3_k and q6_k due to 2-byte alignment" (source: `ggml-vulkan.cpp:6933-6935`)。具体的性能问题机理（2-byte alignment 如何影响 `dotPacked4x8EXT` 效率）未在代码中详细解释。这一排除导致 Q6_K 层在 decode 时退化为标量 dequant 路径，是一个显著的性能缺口。
+
+---
+
+## 代码引用索引
+
+报告中引用的所有源文件，路径相对于仓库根目录：
+
+| 文件路径 | 简述 |
+|----------|------|
+| `ml/backend/ggml/ggml/src/ggml-vulkan/ggml-vulkan.cpp` | Vulkan 后端核心：设备检测、pipeline 创建、路径选择、算子 dispatch |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq.comp` | MMQ shader 主循环：tiling、shared memory 加载/归约、fp32 累加写出 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl` | MMQ 各量化类型实现：Q4_K/Q6_K 的 `block_a_to_shmem`、`mmq_dot_product`、Q8_1 `block_b` 加载 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp` | Dequant+F16 coopmat matmul：`coopMatLoad`/`coopMatMulAdd` 主循环 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl` | Dequant 各量化类型实现：Q4_K 的 `load_a_to_shmem` 反量化为 f16 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp` | Flash Attention coopmat1 shader：QK^T coopmat 乘法、softmax、PV 标量乘法 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn.comp` | Flash Attention scalar shader：decode (N=1) fallback，全标量 ALU |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl` | FA 基础逻辑：`dequantize4()` 量化 KV cache 反量化 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp` | 激活量化 shader：fp32 → Q8_1（absmax、scale、round、pack） |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp` | Shader 编译配置：define 设置、精度变体生成、pipeline 名称拼接 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl` | MMVQ (decode) 各量化类型实现：`mmvq_dot_product` 使用 `dotPacked4x8EXT` |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/types.glsl` | GLSL 侧量化 block 结构定义（`block_q4_K` 等） |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/norm.comp` | RMS Norm shader |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/silu.comp` | SiLU 激活 shader |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/swiglu.comp` | SwiGLU 激活 shader |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/glu_main.glsl` | GLU 主逻辑（SwiGLU 等的通用框架） |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/add.comp` | 残差加法 shader |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/get_rows.comp` | GET_ROWS shader（非量化 embedding lookup） |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/get_rows_quant.comp` | GET_ROWS shader（量化 embedding 反量化） |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/rope_funcs.glsl` | RoPE 位置编码实现 |
+| `ml/backend/ggml/ggml/src/ggml-vulkan/CMakeLists.txt` | Vulkan shader 编译配置，`GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT` 宏检测 |
+| `ml/backend/ggml/ggml/include/ggml-common.h` | GGUF 量化 block 结构定义（C 侧：`block_q4_K` 等） |
+| `llama/llama.cpp/src/llama-quant.cpp` | llama.cpp 量化工具：`use_more_bits()` 启发式、Q4_K_M 混合量化策略 |
+| `envconfig/config.go` | Ollama 环境变量配置：`OLLAMA_KV_CACHE_TYPE` 等 |
+
+---
+
+## 不包含的内容
+
+本报告为**纯现状审计**，以下内容明确不在范围内：
+
+- **性能优化建议或行动提案** — 仅记录"是什么"，不回答"应该怎么做"
+- **非 Vulkan 后端的分析** — 不涉及 CUDA、Metal/MLX、CPU 后端
+- **非 Q4_K_M 格式的详细分析** — Q2_K、Q3_K、Q5_K、Q8_0、MXFP4 等仅在与 Q4_K_M 对比时简要提及
+- **Xe2 以外硬件的实测数据** — Section 3 使用的 perf log 来自 Alder Lake iGPU，仅用于模型结构分析，不代表 Xe2 性能
+- **模型质量/准确性评估** — 仅关注计算精度（数值 bit-width），不评估量化对推理质量的影响
