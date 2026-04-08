@@ -19,8 +19,12 @@
   - 2.2 Dequant+F16 Coopmat 路径
   - 2.3 Flash Attention Coopmat 路径
   - 2.4 运行时路径确认
-- Section 3: 推理 Walkthrough (TODO)
-- Section 4: 精度细节 (TODO)
+- [Section 3: 推理 Walkthrough — Qwen3 1.7B (Q4_K_M)](#section-3-推理-walkthrough--qwen3-17b-q4_k_m)
+  - 3.1 Prefill 阶段
+  - 3.2 Decode 阶段
+  - 3.3 Prefill vs Decode 流程图
+  - 3.4 小结
+- [Section 4: 精度细节](#section-4-精度细节)
 
 ---
 
@@ -884,6 +888,221 @@ name = base + (f16acc ? "_f16acc" : "") + (coopmat ? "_cm1" : "") + (coopmat2 ? 
 | 5 | FA decode pipeline 名称 | 不含 `_cm1`（scalar） | debug 构建 |
 | 6 | 禁用 MMQ 后 matmul pipeline | 含 `_cm1`（coopmat1） | `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1` + debug 构建 |
 | 7 | 禁用 MMQ+coopmat 后 matmul pipeline | 不含 `_cm1` 也不含 `_q8_1` | 两个 DISABLE 同时设置 + debug 构建 |
+
+---
+
+## Section 3: 推理 Walkthrough — Qwen3 1.7B (Q4_K_M)
+
+本节以 **Qwen3 1.7B Q4_K_M** 为具体模型，逐算子走通一次完整的 prefill 和 decode 推理过程。模型结构参数来自实际运行日志 (source: `perf_log_run1.txt:18,22`)：
+
+| 参数 | 值 |
+|------|-----|
+| **架构** | Qwen3 |
+| **Transformer 层数** | 28（repeating）+ 1 output = 29 total |
+| **隐藏维度 (d_model)** | 2048 |
+| **注意力头数 (n_head_q)** | 16 |
+| **KV 头数 (n_head_kv)** | 8（GQA ratio = 2） |
+| **head_dim** | 128 |
+| **FFN 中间维度** | 6144（= 3 × d_model） |
+| **词表大小** | 151936 |
+
+> **注意**：本节使用的算子序列和维度从 Alder Lake iGPU（非 Xe2）的 `perf_log_run1.txt` 提取，仅用于模型结构分析。计时数据不代表 Xe2 性能。
+
+### 3.1 Prefill 阶段（N tokens 并行）
+
+Prefill 时 N > 1（示例中 N=14），所有 N 个 token 作为一个 batch 同时通过整个模型。每个 Transformer 层的算子序列如下：
+
+#### 3.1.1 单层算子序列
+
+| # | 算子 | 权重类型 | 维度 (m×n×k) | 计算路径 (§2.x) | XMX 参与 |
+|---|------|---------|-------------|-----------------|---------|
+| 1 | **RMS_NORM_MUL** | — | (2048, N) | 标量 fp32 (§4.3.4) | ❌ |
+| 2 | **MUL_MAT** (attn_qkv) | Q5_K | 6144×N×2048 | §2.1 MMQ `dotPacked4x8EXT` | ⚠️ DP4A/DPAS int8 |
+| 3 | **RMS_NORM_MUL_ROPE** (Q heads) | — | (128, 16, N) | 标量 fp32 (§4.3.4) | ❌ |
+| 4 | **RMS_NORM_MUL_ROPE** (K heads) | — | (128, 8, N) | 标量 fp32 (§4.3.4) | ❌ |
+| 5 | **SET_ROWS** (KV cache write) | — | — | 标量 (§4.3.4) | ❌ |
+| 6 | **FLASH_ATTN_EXT** | — | Q(128,N,16), K/V(128,seqKV,8) | §2.3 coopmat1 (N≥16) 或 scalar (N<16) | ✅ QK^T only (coopmat1) |
+| 7 | **MUL_MAT** (attn_output) | Q4_K | 2048×N×2048 | §2.1 MMQ `dotPacked4x8EXT` | ⚠️ DP4A/DPAS int8 |
+| 8 | **ADD** (residual) | — | (2048, N) | 标量 fp32 (§4.3.4) | ❌ |
+| 9 | **RMS_NORM_MUL** (FFN pre-norm) | — | (2048, N) | 标量 fp32 (§4.3.4) | ❌ |
+| 10 | **MUL_MAT** (gate_up) | Q4_K | 6144×N×2048 | §2.1 MMQ `dotPacked4x8EXT` | ⚠️ DP4A/DPAS int8 |
+| 11 | **GLU** (SwiGLU) | — | — | 标量 fp32 (§4.3.4) | ❌ |
+| 12 | **MUL_MAT** (ffn_down) | Q4_K 或 Q6_K | 2048×N×6144 | §2.1 MMQ `dotPacked4x8EXT` | ⚠️ DP4A/DPAS int8 |
+| 13 | **ADD** (residual) | — | (2048, N) | 标量 fp32 (§4.3.4) | ❌ |
+
+> **ffn_down 权重类型**：取决于层位置。`use_more_bits()` 返回 true 的层用 Q6_K，其余用 Q4_K (source: `llama-quant.cpp:358-364`; §4.1.1)。
+
+#### 3.1.2 全模型结构
+
+28 层 Transformer 之外：
+
+| 位置 | 算子 | 权重类型 | 路径 | XMX |
+|------|------|---------|------|-----|
+| **输入** | GET_ROWS (embedding lookup) | — | 标量 | ❌ |
+| **输出 pre-norm** | RMS_NORM_MUL | — | 标量 fp32 | ❌ |
+| **输出 head** | MUL_MAT | f16 | `pipeline_dequant_mul_mat_vec_f16_f32` (§2.2 变体) | 取决于 N |
+| **复制** | CPY | — | 标量 | ❌ |
+
+输出头 (output.weight) 为 **f16** 而非量化类型（Q6_K 是 Section 4.1.1 中 llama-quant 对 output.weight 的量化策略，但在 perf log 中该 MUL_MAT 显示为 `f16 m=1024 n=14 k=2048`——这可能是因为该 Qwen3 模型的 `output.weight` 实际以 f16 存储或经过 tied embedding 处理）(source: `perf_log_run1.txt:68`)。
+
+#### 3.1.3 XMX 使用率分析
+
+在单层 13 个算子步骤中：
+
+- **使用 XMX（整数 DP4A/DPAS int8）的算子**：#2, #7, #10, #12 — 共 **4 个 MUL_MAT**，全部走 MMQ 路径
+- **使用 XMX（fp16 DPAS coopmat1）的算子**：#6 FLASH_ATTN_EXT 的 QK^T 部分（仅当 N ≥ 16 时 coopmat1 生效；PV 始终标量）
+- **纯标量 ALU 算子**：#1, #3, #4, #5, #8, #9, #11, #13 — 共 **8 个**
+
+**Prefill 时 XMX 利用率**：在计算时间占比上，4 个 matmul 占据绝对主导（从 perf log 可见 MUL_MAT 合计时间远超其他算子）。因此 **prefill 是 compute-bound 阶段，XMX（通过 MMQ 的整数 dot product）承担了大部分计算量**。
+
+### 3.2 Decode 阶段（N=1 单 token）
+
+Decode 时每次仅处理 1 个新 token (N=1)。与 prefill 的关键差异：
+
+#### 3.2.1 MUL_MAT → MUL_MAT_VEC
+
+N=1 时 matmul 退化为 matrix-vector 乘法。ggml Vulkan 使用专用的 `ggml_vk_mul_mat_vec_q_f16` 函数 (source: `ggml-vulkan.cpp:6992`)。
+
+**MMVQ 路径选择**（`ggml_vk_should_use_mmvq`，source: `ggml-vulkan.cpp:6926`）：
+
+MUL_MAT_VEC 也有自己的 MMVQ（quantized vec）pipeline，使用 `mul_mat_vecq_funcs.glsl` 中的 `mmvq_dot_product` 函数，同样基于 `dotPacked4x8EXT` (source: `mul_mat_vecq_funcs.glsl:310-322`)。但 MMVQ 的使用受启发式约束：
+
+```cpp
+bool quantize_y = ctx->device->integer_dot_product && ... && ggml_vk_should_use_mmvq(...);
+```
+(source: `ggml-vulkan.cpp:7031`)
+
+Intel 分支的启发式 (source: `ggml-vulkan.cpp:6972-6984`)：
+
+| 条件 | 结果 |
+|------|------|
+| k < 2048 | `false`（不使用 MMVQ） |
+| Q4_0, Q5_1 | `false`（排除） |
+| **Q4_K** | `true`（使用 MMVQ） ✅ |
+| **Q6_K** | `false`（被上层排除，line 6934："2-byte alignment 性能问题"） |
+| Q5_K | `true` |
+
+**重要发现**：Q6_K 在 `ggml_vk_should_use_mmvq` 中被**全局排除**（不分厂商），原因是 "General performance issue with q3_k and q6_k due to 2-byte alignment" (source: `ggml-vulkan.cpp:6933-6935`)。因此：
+
+| 权重类型 | MUL_MAT_VEC 路径 | 使用 `dotPacked4x8EXT`? |
+|----------|-----------------|----------------------|
+| **Q4_K** (k≥2048) | MMVQ: `mul_mat_vec_q4_k_q8_1_f32` | ✅ 是 |
+| **Q4_K** (k<2048) | Dequant: `mul_mat_vec_q4_k_f32_f32` | ❌ 否 |
+| **Q5_K** (k≥2048) | MMVQ: `mul_mat_vec_q5_k_q8_1_f32` | ✅ 是 |
+| **Q6_K** (任意 k) | Dequant: `mul_mat_vec_q6_k_f32_f32` | ❌ 否（全局排除） |
+| **f16** | Dequant: `mul_mat_vec_*_f16_f32` | ❌ 否 |
+
+#### 3.2.2 Flash Attention → Scalar Fallback
+
+N=1 时 `small_rows = (N <= 1) = true`，coopmat1 FA 不支持 small rows → 降级到 `flash_attn.comp`（scalar shader）(source: `ggml-vulkan.cpp:8118-8123`)：
+
+```cpp
+if (small_rows && path == FA_COOPMAT1) {
+    path = FA_SCALAR;  // coopmat1 不支持 small rows，降级到 scalar
+}
+```
+
+**注**：GQA batching 可能将 N 提升为 `gqa_ratio`（Qwen3 1.7B 的 GQA ratio=2），但 2 < 16 仍不满足 coopmat1 最小 tile 行数 (Br=16)。因此 Qwen3 1.7B decode 的 FA **始终是 scalar**。
+
+#### 3.2.3 Compute-bound → Memory-bound
+
+Decode 阶段的根本瓶颈从计算变为**显存带宽**：
+
+- **Prefill**：MUL_MAT 的 N>1 使得计算量 ∝ N，同一权重矩阵被 N 个向量复用（arithmetic intensity 高）→ compute-bound
+- **Decode**：MUL_MAT_VEC 的 N=1，每个权重元素仅被读取一次即产出一个输出元素（arithmetic intensity ≈ 2 FLOPs/byte for Q4_K）→ **memory-bandwidth-bound**
+
+这意味着 decode 性能主要取决于 GPU 的内存带宽（Xe2 iGPU 使用系统内存，带宽约 50-90 GB/s），而非 XMX 吞吐。
+
+#### 3.2.4 Decode 单层对比表
+
+| # | 算子 | Prefill 路径 | Decode 路径 | 差异 |
+|---|------|-------------|------------|------|
+| 2 | attn_qkv (Q5_K) | MUL_MAT MMQ | MUL_MAT_VEC MMVQ `dotPacked4x8EXT` | shader 不同，但同用整数 dot |
+| 6 | FLASH_ATTN_EXT | coopmat1 (XMX QK^T) | **scalar** (全 ALU) | 无 XMX |
+| 7 | attn_output (Q4_K) | MUL_MAT MMQ | MUL_MAT_VEC MMVQ `dotPacked4x8EXT` | 同上 |
+| 10 | gate_up (Q4_K) | MUL_MAT MMQ | MUL_MAT_VEC MMVQ `dotPacked4x8EXT` | 同上 |
+| 12 | ffn_down (Q6_K 层) | MUL_MAT MMQ | MUL_MAT_VEC **dequant f32**（无 MMVQ） | ⚠️ Q6_K 无整数 dot |
+| 12 | ffn_down (Q4_K 层) | MUL_MAT MMQ | MUL_MAT_VEC MMVQ `dotPacked4x8EXT` | 同上 |
+| — | 标量算子 | 标量 fp32 | 标量 fp32 | 无差异 |
+
+### 3.3 Prefill vs Decode 流程图
+
+以下 Mermaid 图展示**单个 Transformer 层**在 Prefill 和 Decode 两种模式下的完整算子流水线：
+
+```mermaid
+graph TB
+    classDef cpp stroke:#f97316,stroke-width:3px
+    classDef xmx fill:#dbeafe,stroke:#2563eb,stroke-width:2px
+    classDef scalar fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
+    classDef legend fill:#fff,stroke:#999
+    classDef phase fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
+
+    L1["🔵 = 使用 XMX / 整数 dot product"]:::xmx
+    L2["🟢 = 标量 ALU (Vector Engine)"]:::scalar
+
+    subgraph PREFILL["Prefill (N tokens)"]
+        direction TB
+        P_IN["输入 hidden state<br/>fp32 (2048, N)"]:::scalar
+        P_NORM1["① RMS_NORM_MUL<br/>fp32 标量"]:::scalar
+        P_QKV["② MUL_MAT Q5_K<br/>6144×N×2048<br/>MMQ dotPacked4x8EXT"]:::xmx
+        P_ROPE_Q["③ RMS_NORM_MUL_ROPE<br/>(Q heads: 128×16×N)"]:::scalar
+        P_ROPE_K["④ RMS_NORM_MUL_ROPE<br/>(K heads: 128×8×N)"]:::scalar
+        P_SET["⑤ SET_ROWS<br/>(KV cache write)"]:::scalar
+        P_FA["⑥ FLASH_ATTN_EXT<br/>QK^T: coopmat1 f16×f16<br/>Softmax: fp32 标量<br/>PV: fp32 标量"]:::xmx
+        P_OUT["⑦ MUL_MAT Q4_K<br/>2048×N×2048<br/>MMQ dotPacked4x8EXT"]:::xmx
+        P_ADD1["⑧ ADD 残差<br/>fp32 标量"]:::scalar
+        P_NORM2["⑨ RMS_NORM_MUL<br/>fp32 标量"]:::scalar
+        P_GU["⑩ MUL_MAT Q4_K<br/>6144×N×2048<br/>MMQ dotPacked4x8EXT"]:::xmx
+        P_GLU["⑪ GLU (SwiGLU)<br/>fp32 标量"]:::scalar
+        P_DOWN["⑫ MUL_MAT Q4_K/Q6_K<br/>2048×N×6144<br/>MMQ dotPacked4x8EXT"]:::xmx
+        P_ADD2["⑬ ADD 残差<br/>fp32 标量"]:::scalar
+
+        P_IN --> P_NORM1 --> P_QKV --> P_ROPE_Q & P_ROPE_K
+        P_ROPE_Q --> P_FA
+        P_ROPE_K --> P_SET --> P_FA
+        P_FA --> P_OUT --> P_ADD1 --> P_NORM2 --> P_GU --> P_GLU --> P_DOWN --> P_ADD2
+    end
+
+    subgraph DECODE["Decode (N=1)"]
+        direction TB
+        D_IN["输入 hidden state<br/>fp32 (2048, 1)"]:::scalar
+        D_NORM1["① RMS_NORM_MUL<br/>fp32 标量"]:::scalar
+        D_QKV["② MUL_MAT_VEC Q5_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
+        D_ROPE_Q["③ RMS_NORM_MUL_ROPE<br/>(Q heads)"]:::scalar
+        D_ROPE_K["④ RMS_NORM_MUL_ROPE<br/>(K heads)"]:::scalar
+        D_SET["⑤ SET_ROWS<br/>(KV cache write)"]:::scalar
+        D_FA["⑥ FLASH_ATTN_EXT<br/>scalar shader 全 ALU<br/>无 XMX"]:::scalar
+        D_OUT["⑦ MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
+        D_ADD1["⑧ ADD 残差"]:::scalar
+        D_NORM2["⑨ RMS_NORM_MUL"]:::scalar
+        D_GU["⑩ MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
+        D_GLU["⑪ GLU (SwiGLU)"]:::scalar
+        D_DOWN_Q4["⑫a MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
+        D_DOWN_Q6["⑫b MUL_MAT_VEC Q6_K<br/>dequant f32 标量<br/>⚠️ 无 MMVQ"]:::scalar
+        D_ADD2["⑬ ADD 残差"]:::scalar
+
+        D_IN --> D_NORM1 --> D_QKV --> D_ROPE_Q & D_ROPE_K
+        D_ROPE_Q --> D_FA
+        D_ROPE_K --> D_SET --> D_FA
+        D_FA --> D_OUT --> D_ADD1 --> D_NORM2 --> D_GU --> D_GLU
+        D_GLU --> D_DOWN_Q4
+        D_GLU --> D_DOWN_Q6
+        D_DOWN_Q4 --> D_ADD2
+        D_DOWN_Q6 --> D_ADD2
+    end
+```
+
+### 3.4 小结
+
+| 维度 | Prefill (N>1) | Decode (N=1) |
+|------|---------------|--------------|
+| **Matmul 算子** | MUL_MAT（batch 矩阵乘） | MUL_MAT_VEC（矩阵-向量乘） |
+| **Q4_K/Q5_K matmul 路径** | MMQ: `mul_mmq.comp` + `dotPacked4x8EXT` | MMVQ: `mul_mat_vecq.comp` + `dotPacked4x8EXT` (k≥2048) |
+| **Q6_K matmul 路径** | MMQ: `mul_mmq.comp` + `dotPacked4x8EXT` | ⚠️ Dequant: `mul_mat_vec_q6_k_f32_f32`（无整数 dot）(source: `ggml-vulkan.cpp:6934`) |
+| **FA shader** | `flash_attn_cm1.comp` (coopmat1, N≥16) | `flash_attn.comp` (scalar) (source: `ggml-vulkan.cpp:8122`) |
+| **FA XMX 使用** | ✅ QK^T coopmat f16 DPAS | ❌ 全标量 ALU |
+| **瓶颈特征** | Compute-bound（高 arithmetic intensity） | Memory-bandwidth-bound（低 arithmetic intensity） |
+| **XMX 整体利用率** | 高（4 matmul + FA QK^T） | 中等（Q4_K/Q5_K matmul via MMVQ，Q6_K 和 FA 不用 XMX） |
 
 ---
 
