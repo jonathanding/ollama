@@ -23,7 +23,9 @@ All paths relative to repo root:
 | `mul_mmq_funcs.glsl` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl` |
 | `mul_mm.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp` |
 | `mul_mm_funcs.glsl` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm_funcs.glsl` |
+| `flash_attn.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn.comp` |
 | `flash_attn_cm1.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp` |
+| `flash_attn_cm2.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm2.comp` |
 | `flash_attn_base.glsl` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl` |
 | `quantize_q8_1.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp` |
 | `mul_mat_vecq.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp` |
@@ -40,6 +42,9 @@ Every task MUST follow these rules:
 4. **No fabrication**: If you don't know, say you don't know. Never guess and present as fact.
 5. **Web search for hardware specs**: For Intel XMX/DPAS hardware capabilities, use web search to verify — don't rely on memory
 6. **Line numbers are approximate**: All line numbers in this plan come from a specific code snapshot (2026-04-08). They may have shifted. Always search for the relevant pattern/function name rather than jumping blindly to a line number.
+7. **报告语言**：中英混合 — 中文主体，技术术语保持英文（如 `dotPacked4x8EXT`、`coopmatMulAdd`、MMQ、XMX 等）
+8. **报告篇幅**：2000-3000 字 + 表格 + Mermaid 图。各节篇幅参考 spec 中的指引，避免过度膨胀
+9. **前提假设**：报告假设 `OLLAMA_FLASH_ATTENTION=1`（开启 Flash Attention）。如关闭，attention 的 QK^T / PV 会走普通 MUL_MAT，不在本报告范围内
 
 ## Correction from Spec
 
@@ -73,7 +78,7 @@ Search for "W4A16 weight only quantization" to confirm the terminology is standa
 - [ ] **Step 3: Create report file with header and Section 0**
 
 Create `docs/internals/xe2-quantized-compute-audit.md` with:
-- Report title, metadata (date, audience, scope, code baseline)
+- Report title, metadata (date, audience, scope, code baseline, **前提假设: `OLLAMA_FLASH_ATTENTION=1`**)
 - Section 0: "前置概念 — W4A16 与量化计算范式"
   - GGUF = weight-only PTQ, activations always fp16/fp32
   - W4A16 meaning: 4-bit weights + 16-bit activations
@@ -154,7 +159,7 @@ Write the MMQ path section with:
 - Trigger conditions (compile-time, runtime, env var — all with code citations)
 - Complete data flow with code references for each step (for both Q4_K and Q6_K)
 - XMX utilization explanation
-- Mermaid diagram: precision pipeline from storage to output
+- Mermaid diagram: precision pipeline from storage to output (primary diagram for Q4_K; if Q6_K scale restoration differs materially, add a brief note or sub-diagram showing the difference)
 
 ```mermaid
 graph LR
@@ -249,18 +254,20 @@ git commit -m "docs/internals: xe2 audit section 2.2 (Dequant+F16 Coopmat path)"
 
 ---
 
-### Task 4: Write Section 2.3 (Flash Attention Coopmat1 Path)
+### Task 4: Write Section 2.3 (Flash Attention Coopmat Path)
 
 **Files:**
 - Modify: `docs/internals/xe2-quantized-compute-audit.md`
 - Read for verification:
   - `flash_attn_cm1.comp` lines 26-32, 100, 189-196, 207-217, 251-267
-  - `flash_attn_base.glsl` (scalar fallback logic)
+  - `flash_attn_cm2.comp` (coopmat2 FA shader — may be the actual path on Xe2)
+  - `flash_attn.comp` (scalar fallback shader)
+  - `flash_attn_base.glsl` (shared logic included by all FA shaders)
   - `ggml-vulkan.cpp` lines 4649-4651 (coopmat1 FA support check)
   - `ggml-vulkan.cpp` lines 8072-8073 (FA path selection: coopmat2 > coopmat1 > scalar)
   - `vulkan-shaders-gen.cpp` lines 626-654 (FA shader generation with ACC_TYPE)
 
-**Context:** Flash Attention is completely independent from matmul paths. It operates on f16 Q/K/V (already dequantized by upstream matmul), not on quantized weights. Coopmat1 requires ≥16 rows, so decode (n=1) falls back to scalar.
+**Context:** Flash Attention is completely independent from matmul paths. It operates on f16 Q/K/V (already dequantized by upstream matmul), not on quantized weights. FA path selection follows priority: coopmat2 > coopmat1 > scalar. If Xe2 supports coopmat2, FA may use `flash_attn_cm2.comp` rather than `flash_attn_cm1.comp`. Decode (n=1) falls back to scalar `flash_attn.comp`.
 
 - [ ] **Step 1: Verify FA is independent from matmul quantization**
 
@@ -274,20 +281,29 @@ Read `flash_attn_cm1.comp` lines 207-217 for QK^T coopmat multiply. Read the PV 
 
 Read `flash_attn_cm1.comp` lines 251-267. Confirm max, exp, sum operations are all in float precision.
 
-- [ ] **Step 4: Verify decode scalar fallback**
+- [ ] **Step 4: Determine which coopmat version FA uses on Xe2**
 
-Read `ggml-vulkan.cpp` lines 8072-8073 for FA path selection. Read `flash_attn_base.glsl` to confirm the scalar shader path. Verify the minimum row count for coopmat1 (is it exactly 16? or depends on coopmat dimensions?).
+Read `ggml-vulkan.cpp` lines 8072-8073 for FA path selection priority (coopmat2 > coopmat1 > scalar). Cross-reference with Task 3 Step 4's finding on whether Xe2 has `coopmat2` flag set:
+- If Xe2 has coopmat2: FA uses `flash_attn_cm2.comp` — read that shader to verify precision (may differ from cm1)
+- If Xe2 only has coopmat1: FA uses `flash_attn_cm1.comp` (already verified in Steps 1-3)
+- Update the section title accordingly (e.g., "Flash Attention Coopmat2 路径" or "Coopmat1")
 
-- [ ] **Step 5: Verify FA ACC_TYPE selection**
+- [ ] **Step 5: Verify decode scalar fallback**
+
+Read `flash_attn.comp` (NOT `flash_attn_base.glsl` — that's a shared include). Confirm it's the scalar fallback shader. Verify the minimum row count for coopmat (is it exactly 16? or depends on coopmat dimensions?).
+
+- [ ] **Step 6: Verify FA ACC_TYPE selection**
 
 Read `vulkan-shaders-gen.cpp` lines 626-654. Confirm how `ACC_TYPE` is selected for FA shaders (f32 default, f16 when `coopmat_acc_f16_support` is true and `f16acc` variant is used). Note whether Xe2 driver reports f16 acc support — if unknown, mark ⚠️ 待确认.
 
-- [ ] **Step 6: Write Section 2.3 with Mermaid precision pipeline diagram**
+- [ ] **Step 7: Write Section 2.3 with Mermaid precision pipeline diagram**
 
 Write the Flash Attention section with:
 - Fundamental difference from matmul paths (operates on f16 Q/K/V, not quantized weights)
+- Which coopmat version Xe2 actually uses (cm1 or cm2, determined in Step 4)
 - QK^T compute, softmax, PV compute — all with code citations
-- Decode fallback to scalar (no XMX)
+- Decode fallback to scalar `flash_attn.comp` (no XMX)
+- 默认 f16 KV cache 场景，简要提及量化 KV cache 时 shader 内反量化到 f16 的代码路径
 - Mermaid diagram: FA precision pipeline
 
 ```mermaid
@@ -310,11 +326,11 @@ graph LR
     PV --> OUT
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add docs/internals/xe2-quantized-compute-audit.md
-git commit -m "docs/internals: xe2 audit section 2.3 (Flash Attention Coopmat1 path)"
+git commit -m "docs/internals: xe2 audit section 2.3 (Flash Attention Coopmat path)"
 ```
 
 ---
@@ -440,6 +456,8 @@ git commit -m "docs/internals: xe2 audit section 4.3-4.5 (compute, accumulation,
 
 Read `perf_log_run1.txt` or `perf_log_150_300.txt` to count the actual number of transformer layers and identify the operator sequence (GET_ROWS → RMS_NORM → MUL_MAT → ... per layer). Record exact layer count.
 
+**Note**: These perf logs are from an Alder Lake iGPU, not Xe2. The operator SEQUENCE is model-dependent (identical on any GPU) — we use these logs only for model structure, not for timing or path information.
+
 - [ ] **Step 2: Verify MMVQ shader uses dotPacked4x8EXT**
 
 Read `mul_mat_vecq_funcs.glsl` (full path: `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl`). Confirm:
@@ -461,6 +479,8 @@ Read `ggml-vulkan.cpp` lines 8072-8073 and `flash_attn_cm1.comp` for the minimum
 
 - [ ] **Step 5: Write Section 3.1 (Prefill) with path/XMX annotations**
 
+**INSERT POSITION**: Section 3 must be placed BETWEEN Section 2 (三条计算路径) and Section 4 (精度细节) in the report. Do NOT append to file end.
+
 Write the prefill walkthrough listing each operator in sequence:
 - Operator name, quant type, path (§2.x reference), XMX participation
 - Use the Mermaid Prefill vs Decode comparison flow diagram
@@ -474,17 +494,16 @@ Write 3-4 key differences from prefill:
 
 - [ ] **Step 7: Add Mermaid Prefill vs Decode flow diagram**
 
-```mermaid
-graph TD
-    classDef cpp stroke:#f97316,stroke-width:3px
-    
-    START{"n tokens?"}:::cpp
-    START -->|"n > 1 (Prefill)"| P_MM["MUL_MAT<br/>MMQ 路径 → XMX int8 ✅"]:::cpp
-    START -->|"n = 1 (Decode)"| D_MV["MUL_MAT_VEC<br/>MMVQ → XMX ⚠️待确认"]:::cpp
-    
-    P_MM --> P_FA["FLASH_ATTN_EXT<br/>Coopmat1 → XMX fp16 ✅"]:::cpp
-    D_MV --> D_FA["FLASH_ATTN_EXT<br/>Scalar → 无 XMX ❌"]:::cpp
-```
+Create a diagram showing a **single transformer layer's complete pipeline** for both prefill and decode side-by-side. Include ALL operators (not just matmul and FA):
+- RMS_NORM (scalar, fp32, no XMX — same in both)
+- QKV 投影: Prefill=MUL_MAT MMQ, Decode=MUL_MAT_VEC MMVQ
+- Flash Attention: Prefill=Coopmat, Decode=Scalar
+- Attention Output 投影: same split as QKV
+- ADD (scalar, fp32 — same in both)
+- FFN gate/up/down 投影: same split as QKV
+- GLU/SiLU (scalar, fp32 — same in both)
+
+This gives the reader a complete per-layer view, not just the matmul/FA highlights.
 
 - [ ] **Step 8: Commit**
 
@@ -528,9 +547,9 @@ Every cell must reference facts verified in previous tasks. If any cell is uncer
 
 Explain how to read the table, highlight key takeaways (e.g., "MMQ path dominates matmul on Xe2", "FA switches from XMX to scalar between prefill and decode").
 
-- [ ] **Step 4: Insert Section 1 after Section 0 in the report**
+- [ ] **Step 4: INSERT Section 1 between Section 0 and Section 2 in the report**
 
-The summary table goes right after Section 0 and before Section 2 in the final document.
+**INSERT POSITION**: Section 1 must be placed AFTER Section 0 (前置概念) and BEFORE Section 2 (三条计算路径). Do NOT append to file end. Use Edit tool to insert at the correct position.
 
 - [ ] **Step 5: Commit**
 
