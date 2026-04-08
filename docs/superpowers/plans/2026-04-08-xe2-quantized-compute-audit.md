@@ -26,6 +26,8 @@ All paths relative to repo root:
 | `flash_attn_cm1.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_cm1.comp` |
 | `flash_attn_base.glsl` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/flash_attn_base.glsl` |
 | `quantize_q8_1.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp` |
+| `mul_mat_vecq.comp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp` |
+| `mul_mat_vecq_funcs.glsl` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl` |
 | `vulkan-shaders-gen.cpp` | `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp` |
 | `llama-quant.cpp` | `llama/llama.cpp/src/llama-quant.cpp` |
 
@@ -37,6 +39,7 @@ Every task MUST follow these rules:
 3. **Uncertain = mark it**: If a claim cannot be confirmed from code or docs, mark it `⚠️ 待确认` with reason
 4. **No fabrication**: If you don't know, say you don't know. Never guess and present as fact.
 5. **Web search for hardware specs**: For Intel XMX/DPAS hardware capabilities, use web search to verify — don't rely on memory
+6. **Line numbers are approximate**: All line numbers in this plan come from a specific code snapshot (2026-04-08). They may have shifted. Always search for the relevant pattern/function name rather than jumping blindly to a line number.
 
 ## Correction from Spec
 
@@ -80,27 +83,14 @@ Create `docs/internals/xe2-quantized-compute-audit.md` with:
   - Use project color convention: all nodes are llama.cpp C++ (orange border) since these are shader-level decisions
   - Include legend at top
 
-```markdown
-## 0. 前置概念 — W4A16 与量化计算范式
-
-[3-5 paragraphs explaining the concepts, with code citations]
-
-```mermaid
-graph TD
-    classDef cpp stroke:#f97316,stroke-width:3px
-    classDef legend fill:#fff,stroke:#999
-
-    L["🟠 = llama.cpp C/C++ (Vulkan shader)"]:::legend
-
-    A["GGUF Q4_K 权重<br/>int4 存储"]:::cpp
-    B["激活<br/>fp32 (来自上一层)"]:::cpp
-    A --> C{"硬件无 int4×fp16 指令<br/>如何计算？"}:::cpp
-    B --> C
-
-    C -->|"方案1: 反量化权重"| D["Dequant+F16 路径<br/>权重 int4→f16<br/>激活 fp32→f16<br/>f16×f16 coopmat"]:::cpp
-
-    C -->|"方案2: 量化激活"| E["MMQ 路径<br/>权重 int4→int8 容器<br/>激活 fp32→int8 (Q8_1)<br/>int8×int8 dotProduct"]:::cpp
-```
+The Mermaid diagram for this section should be a W4A16 fork diagram (graph TD) with:
+- classDef cpp stroke:#f97316,stroke-width:3px (orange = llama.cpp C++)
+- classDef legend fill:#fff,stroke:#999
+- Legend node: "🟠 = llama.cpp C/C++ (Vulkan shader)"
+- Root nodes: "GGUF Q4_K 权重 int4 存储" and "激活 fp32 (来自上一层)"
+- Decision node: "硬件无 int4×fp16 指令，如何计算？"
+- Branch 1: "方案1: 反量化权重" → "Dequant+F16 路径: 权重 int4→f16, 激活 fp32→f16, f16×f16 coopmat"
+- Branch 2: "方案2: 量化激活" → "MMQ 路径: 权重 int4→int8 容器, 激活 fp32→int8 (Q8_1), int8×int8 dotProduct"
 
 - [ ] **Step 4: Commit**
 
@@ -147,15 +137,22 @@ Read `quantize_q8_1.comp` lines 84-91. Document: `d = amax / 127.0`, `vals = rou
 
 Read `mul_mmq_funcs.glsl` Q4_K `mmq_dot_product`. Confirm `dotPacked4x8EXT(qs_a, cache_b.qs[iqs])` → int32 result. Confirm scale restoration: `float(cache_b.ds.x) * float(cache_a.dm.x) * float(q_sum) - ...`. Confirm `ACC_TYPE=float` in `mul_mmq.comp`.
 
-- [ ] **Step 6: Web search XMX/DPAS int8 mapping**
+- [ ] **Step 6: Verify Q6_K also uses MMQ path**
+
+Q6_K is used by FFN down and Output Head layers (in Q4_K_M models). Verify:
+- Read `ggml-vulkan.cpp` ~line 3297 to confirm `CREATE_MMQ(GGML_TYPE_Q6_K, ...)` exists inside the `integer_dot_product` block
+- Read `mul_mmq_funcs.glsl` ~lines 400-420 for Q6_K's `mmq_dot_product` — confirm it uses `dotPacked4x8EXT` with a different scale restoration pattern (single `d_scales` instead of `dm.x/dm.y`)
+- Document the Q6_K vs Q4_K MMQ differences in Section 2.1 (both use MMQ, but scale handling differs)
+
+- [ ] **Step 7: Web search XMX/DPAS int8 mapping**
 
 Search for "VK_KHR_shader_integer_dot_product Intel Xe2 DPAS" to confirm that `dotPacked4x8EXT` maps to XMX DPAS int8 units on Xe2. If no definitive source found, mark as ⚠️ 待确认.
 
-- [ ] **Step 7: Write Section 2.1 with Mermaid precision pipeline diagram**
+- [ ] **Step 8: Write Section 2.1 with Mermaid precision pipeline diagram**
 
 Write the MMQ path section with:
 - Trigger conditions (compile-time, runtime, env var — all with code citations)
-- Complete data flow with code references for each step
+- Complete data flow with code references for each step (for both Q4_K and Q6_K)
 - XMX utilization explanation
 - Mermaid diagram: precision pipeline from storage to output
 
@@ -176,7 +173,7 @@ graph LR
     D --> S --> ACC
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add docs/internals/xe2-quantized-compute-audit.md
@@ -210,9 +207,14 @@ Read `mul_mm.comp` lines 245-247 for coopmat type declarations (`FLOAT_TYPE` for
 
 Read `ggml-vulkan.cpp` lines 14686-14701 for the `INTEL_XE2` gate. Read the coopmat dimension detection code to confirm 16×16×16 on Xe2 (or note if this is runtime-reported and cannot be confirmed from code alone).
 
-- [ ] **Step 4: Verify fallback chain when MMQ disabled**
+- [ ] **Step 4: Verify fallback chain when MMQ disabled and coopmat version**
 
-Read `ggml-vulkan.cpp` lines 5498-5505. Confirm the fallback order: coopmat2 → coopmat1 → scalar. Determine which path Xe2 actually takes (check if Xe2 has `coopmat2` flag set — read the coopmat2 detection code). This resolves the spec's open question about fallback behavior.
+Read `ggml-vulkan.cpp` lines 5498-5505. Confirm the fallback order: coopmat2 → coopmat1 → scalar. Determine which path Xe2 actually takes:
+- Search for `coopmat2` flag detection code — is it set for `INTEL_XE2`?
+- If Xe2 has coopmat2: the fallback is coopmat2 dequant+f16 (not coopmat1)
+- If Xe2 only has coopmat1: the fallback is coopmat1 dequant+f16
+
+**Important**: The spec §2.2 title says "Dequant+F16 Coopmat" without distinguishing versions. Based on this finding, update the section title and description to reflect the actual coopmat version used on Xe2. Preliminary investigation suggests Xe2 may use coopmat2 for this path — verify from code.
 
 - [ ] **Step 5: Write Section 2.2 with Mermaid precision pipeline diagram**
 
@@ -382,24 +384,42 @@ Search `ggml-vulkan.cpp` or Ollama Go code for `OLLAMA_KV_CACHE_TYPE` default. C
 
 Read `mul_mmq_funcs.glsl` Q4_K dot product. Count: how many `dotPacked4x8EXT` calls per block? (Should be 8 for 256 values / 32 per packed call... verify). Confirm int8×int8 → int32 semantics.
 
-- [ ] **Step 5: Verify output precision**
+- [ ] **Step 5: Verify scalar operator precision**
+
+The summary table includes GET_ROWS, RMS_NORM, RoPE, ADD, GLU — all scalar ops not covered by MMQ/coopmat paths. Verify each from shader code:
+- Search `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/` for `norm*.comp` (RMS_NORM), `glu.comp` or `silu.comp` (SwiGLU), `add.comp` (ADD), `get_rows*.comp` (GET_ROWS), `rope*.comp` (RoPE)
+- For each shader, confirm the computation precision (expected: fp32 for all, but verify)
+- For GET_ROWS: confirm it dequantizes weights to fp32 output (embedding lookup)
+
+- [ ] **Step 6: Verify output precision**
 
 Search shaders for `D_TYPE` definition. Confirm MUL_MAT output is fp32. Confirm FA output is fp32. Check if intermediate activations between layers are fp32.
 
-- [ ] **Step 6: Write Section 4 (all sub-sections)**
+- [ ] **Step 7: Write Section 4.1-4.2 (Storage + Dequant/Quant)**
 
-Write sections 4.1 through 4.5 with code citations for every claim:
-- 4.1 Storage: Q4_K_M mixed strategy (corrected), q4_K block structure, KV cache default
+Write with code citations:
+- 4.1 Storage: Q4_K_M mixed strategy (corrected — use `use_more_bits()` heuristic, not simplified version), q4_K block structure, KV cache default
 - 4.2 Dequant/Quant: MMQ weight handling, activation Q8_1 quantization details
-- 4.3 Compute: dotPacked4x8EXT semantics, coopmatMulAdd semantics, scalar ops
-- 4.4 Accumulation: MMQ fp32, FA f32/f16, softmax fp32
-- 4.5 Output: D_TYPE=float, layer-to-layer transfer precision
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit 4.1-4.2**
 
 ```bash
 git add docs/internals/xe2-quantized-compute-audit.md
-git commit -m "docs/internals: xe2 audit section 4 (precision details with code citations)"
+git commit -m "docs/internals: xe2 audit section 4.1-4.2 (storage and dequant/quant precision)"
+```
+
+- [ ] **Step 9: Write Section 4.3-4.5 (Compute + Accumulation + Output)**
+
+Write with code citations:
+- 4.3 Compute: dotPacked4x8EXT semantics, coopmatMulAdd semantics, scalar ops (verified in Step 5)
+- 4.4 Accumulation: MMQ fp32, FA f32/f16, softmax fp32
+- 4.5 Output: D_TYPE=float, layer-to-layer transfer precision
+
+- [ ] **Step 10: Commit 4.3-4.5**
+
+```bash
+git add docs/internals/xe2-quantized-compute-audit.md
+git commit -m "docs/internals: xe2 audit section 4.3-4.5 (compute, accumulation, output precision)"
 ```
 
 ---
@@ -420,28 +440,39 @@ git commit -m "docs/internals: xe2 audit section 4 (precision details with code 
 
 Read `perf_log_run1.txt` or `perf_log_150_300.txt` to count the actual number of transformer layers and identify the operator sequence (GET_ROWS → RMS_NORM → MUL_MAT → ... per layer). Record exact layer count.
 
-- [ ] **Step 2: Verify MUL_MAT_VEC dispatch for decode**
+- [ ] **Step 2: Verify MMVQ shader uses dotPacked4x8EXT**
 
-Read `ggml-vulkan.cpp` lines 6972-6984. Confirm the Intel heuristic for MUL_MAT_VEC: Q4_K uses MMVQ when k≥2048. Determine if MMVQ on Xe2 uses `dotPacked4x8EXT` (and thus potentially XMX) or scalar.
+Read `mul_mat_vecq_funcs.glsl` (full path: `ml/backend/ggml/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl`). Confirm:
+- Q4_K's `mmvq_dot_product` uses `dotPacked4x8EXT` (expected around lines 280-320)
+- Q6_K's `mmvq_dot_product` also uses `dotPacked4x8EXT` (expected around lines 340-379)
+- This means decode MUL_MAT_VEC also uses integer dot products, potentially mapping to XMX
 
-- [ ] **Step 3: Verify FA decode scalar fallback threshold**
+- [ ] **Step 3: Verify MUL_MAT_VEC dispatch and MMVQ pipeline selection**
+
+Read `ggml-vulkan.cpp` lines 6972-6984. Confirm:
+- The Intel heuristic for MUL_MAT_VEC: Q4_K uses MMVQ when k≥2048
+- Whether MMVQ pipeline selection also requires `integer_dot_product=true` (search for MMVQ pipeline creation)
+- If `integer_dot_product` is required for MMVQ, then decode matmul on Xe2 also uses `dotPacked4x8EXT` → XMX int8
+- If NOT required, MMVQ may use a different scalar path — verify which
+
+- [ ] **Step 4: Verify FA decode scalar fallback threshold**
 
 Read `ggml-vulkan.cpp` lines 8072-8073 and `flash_attn_cm1.comp` for the minimum row count. Confirm n=1 falls back to scalar.
 
-- [ ] **Step 4: Write Section 3.1 (Prefill) with path/XMX annotations**
+- [ ] **Step 5: Write Section 3.1 (Prefill) with path/XMX annotations**
 
 Write the prefill walkthrough listing each operator in sequence:
 - Operator name, quant type, path (§2.x reference), XMX participation
 - Use the Mermaid Prefill vs Decode comparison flow diagram
 
-- [ ] **Step 5: Write Section 3.2 (Decode) highlighting key differences**
+- [ ] **Step 6: Write Section 3.2 (Decode) highlighting key differences**
 
 Write 3-4 key differences from prefill:
-- MUL_MAT → MUL_MAT_VEC (with XMX status)
+- MUL_MAT → MUL_MAT_VEC (with MMVQ XMX status from Steps 2-3)
 - FA coopmat1 → scalar (no XMX)
 - Compute-bound → memory-bound
 
-- [ ] **Step 6: Add Mermaid Prefill vs Decode flow diagram**
+- [ ] **Step 7: Add Mermaid Prefill vs Decode flow diagram**
 
 ```mermaid
 graph TD
@@ -455,7 +486,7 @@ graph TD
     D_MV --> D_FA["FLASH_ATTN_EXT<br/>Scalar → 无 XMX ❌"]:::cpp
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add docs/internals/xe2-quantized-compute-audit.md
@@ -525,23 +556,48 @@ Add the four known uncertainties from the spec:
 3. Decode MUL_MAT_VEC XMX mapping — unclear if driver uses XMX at n=1
 4. `GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT` — build-dependent
 
-Plus any additional uncertainties discovered during Tasks 1-8.
+Plus any additional uncertainties discovered during Tasks 1-8 (e.g., coopmat2 vs coopmat1 for Xe2 dequant path if unresolved).
 
-- [ ] **Step 2: Scan entire report for unverified claims**
+- [ ] **Step 2: Write "代码引用索引" section (spec §5)**
+
+Add a reference table listing all source files cited in the report, with relative paths and one-line descriptions. Use the table from the spec as a starting point, but update based on actual files referenced during writing.
+
+- [ ] **Step 3: Write "不包含的内容" section (spec §6)**
+
+Add the exclusion list from the spec:
+- 性能优化建议或行动提案（纯现状审计）
+- 非 Vulkan 后端（CUDA、Metal、CPU）的分析
+- 非 Q4_K_M 格式的详细分析
+- Xe2 以外硬件的实测数据
+- 模型质量/准确性评估（只关注计算精度，不关注推理质量）
+
+- [ ] **Step 4: Evaluate optional Mermaid diagrams**
+
+The spec §3 lists two optional diagrams:
+- 路径判定决策树 (§2.4) — if §2.4 content is complex enough to benefit from a diagram, add it
+- Q4_K block 内存布局示意图 (§4) — if §4.1 block structure description is hard to follow as prose, add it
+
+Decide based on the written content. Skip if the prose is clear enough; add if it would materially help the reader.
+
+- [ ] **Step 5: Update spec §4.1 with corrected Q4_K_M strategy**
+
+The spec states "大部分层 q4_K，FFN down + Output Head 用 q6_K" which is inaccurate. Update `docs/superpowers/specs/2026-04-08-xe2-quantized-compute-audit.md` §4.1 to reflect the actual `use_more_bits()` heuristic discovered during planning.
+
+- [ ] **Step 6: Scan entire report for unverified claims**
 
 Read the entire report end-to-end. For every technical assertion, check that it has a `(source: file:line)` citation. Flag any claims that were written without verification.
 
-- [ ] **Step 3: Check Mermaid diagrams render correctly**
+- [ ] **Step 7: Check Mermaid diagrams render correctly**
 
 Review all Mermaid diagram syntax for correctness. Ensure color conventions are consistent (orange for C++/shader code, green for Go code if any). Verify legends are present.
 
-- [ ] **Step 4: Verify internal cross-references**
+- [ ] **Step 8: Verify internal cross-references**
 
 Check that Section 3's `§2.x` references point to the correct sub-sections. Check that the summary table (Section 1) is consistent with the detailed sections.
 
-- [ ] **Step 5: Commit final report**
+- [ ] **Step 9: Commit final report**
 
 ```bash
-git add docs/internals/xe2-quantized-compute-audit.md
-git commit -m "docs/internals: xe2 quantized compute audit — final review and uncertainties"
+git add docs/internals/xe2-quantized-compute-audit.md docs/superpowers/specs/2026-04-08-xe2-quantized-compute-audit.md
+git commit -m "docs/internals: xe2 quantized compute audit — final review, uncertainties, and spec correction"
 ```
