@@ -13,7 +13,7 @@
 ## 目录
 
 - [Section 0: 前置概念 — W4A16 与量化计算范式](#section-0-前置概念--w4a16-与量化计算范式)
-- Section 1: 总结表 (TODO)
+- [Section 1: 总结表](#section-1-总结表)
 - Section 2: 计算路径详解 (TODO)
   - 2.1 MMQ 路径
   - 2.2 Dequant+F16 Coopmat 路径
@@ -62,6 +62,33 @@ graph TD
 ```
 
 这两条路径在性能特征上有本质差异：Dequant+F16 利用 XMX fp16 吞吐但需要反量化开销和更多 shared memory；MMQ 利用整数 dot product 单元，避免反量化但引入了激活量化开销和额外的精度损失（fp32→int8 round）。后续章节将详细分析每条路径在 Xe2 上的具体 shader 实现与硬件映射。
+
+---
+
+## Section 1: 总结表
+
+下表列出 Q4_K_M 模型在 Intel Xe2 ggml Vulkan 后端推理时，**每个主要算子**的权重精度、计算路径、计算/累加精度、XMX 参与情况，以及 Prefill 与 Decode 之间的差异。所有单元格均引用后续章节中的已验证事实。
+
+| 算子 | 权重存储精度 | 计算路径 | 计算精度(输入端) | 累加精度 | XMX 参与 | Prefill vs Decode 差异 |
+|------|-------------|----------|-----------------|----------|---------|----------------------|
+| **Embedding lookup** (GET_ROWS) | — (token index → embedding 查表) | 标量 `get_rows.comp` (§4.3.4) | fp32 (`dequantize()` → `vec2`) | fp32 | ❌ 无 | 无差异 |
+| **RMS Norm + RoPE** | — (norm weight fp32, 无 RoPE 权重) | 标量 `norm.comp` / `rope_funcs.glsl` (§4.3.4) | fp32 全程 | fp32 | ❌ 无 | 无差异 |
+| **QKV 投影** (MUL_MAT Q5_K) | Q5_K (5.5 bpw) | Prefill: MMQ `mul_mmq.comp` (§2.1); Decode: MMVQ `mul_mat_vecq.comp` (§3.2.1) | 权重 int5→int8, 激活 fp32→int8 (Q8_1); `dotPacked4x8EXT` int8×int8 | fp32 (`ACC_TYPE=float`, §4.4) | ⚠️ DP4A 或 DPAS int8（待确认, §2.1.4） | Prefill: MUL_MAT MMQ; Decode: MUL_MAT_VEC MMVQ（均用 `dotPacked4x8EXT`） |
+| **Flash Attention** (FLASH_ATTN_EXT) | — (Q/K/V 来自 fp32 buffer 和 f16 KV cache) | Prefill (N≥16): coopmat1 `flash_attn_cm1.comp` (§2.3); Decode (N=1): scalar `flash_attn.comp` (§2.3.2) | QK^T: f16×f16; Softmax: fp32; PV: fp32 | QK^T: f32 或 f16 (§4.4); Softmax: fp32（始终）; PV: f32 或 f16 | Prefill: ✅ QK^T via XMX fp16 coopmat; PV: ❌ 标量 ALU; Decode: ❌ 全标量 | **关键差异**: Prefill QK^T 走 XMX fp16 coopmat1; Decode 全部降级为 scalar shader (§2.3.2) |
+| **Attention Output 投影** (MUL_MAT Q4_K) | Q4_K (4.5 bpw) | Prefill: MMQ (§2.1); Decode: MMVQ (§3.2.1) | 权重 int4→int8, 激活 fp32→int8; `dotPacked4x8EXT` int8×int8 | fp32 (§4.4) | ⚠️ DP4A 或 DPAS int8（待确认） | Prefill: MUL_MAT MMQ; Decode: MUL_MAT_VEC MMVQ |
+| **残差加法** (ADD) | — | 标量 `add.comp` (§4.3.4) | fp32 (`FLOAT_TYPE` 中间变量) | fp32 | ❌ 无 | 无差异 |
+| **FFN gate/up 投影** (MUL_MAT Q4_K) | Q4_K (4.5 bpw) | Prefill: MMQ (§2.1); Decode: MMVQ (§3.2.1) | 同 Attention Output | fp32 (§4.4) | ⚠️ DP4A 或 DPAS int8（待确认） | Prefill: MUL_MAT MMQ; Decode: MUL_MAT_VEC MMVQ |
+| **SwiGLU 激活** (GLU) | — | 标量 `swiglu.comp` + `glu_main.glsl` (§4.3.4) | fp32 全程 | fp32 | ❌ 无 | 无差异 |
+| **FFN down 投影** (MUL_MAT Q4_K/Q6_K) | Q4_K 或 Q6_K（取决于层位置, §4.1.1 `use_more_bits()`） | Prefill: MMQ（Q4_K 和 Q6_K 均走 MMQ, §2.1.3）; Decode: Q4_K→MMVQ, **Q6_K→dequant f32 标量**（§3.2.1, Q6_K 被全局排除于 MMVQ） | Prefill 同上; Decode Q6_K: 权重反量化→fp32, 无整数 dot | fp32 (§4.4) | Prefill: ⚠️ DP4A/DPAS int8; Decode Q4_K: ⚠️ 同上; **Decode Q6_K: ❌ 无 XMX** | ⚠️ **Q6_K 层 Decode 退化**：Prefill 走 MMQ（整数 dot），Decode 无 MMVQ fallback 到标量 dequant (source: `ggml-vulkan.cpp:6934`) |
+| **Output Head** (MUL_MAT/MUL_MAT_VEC) | f16 或 Q6_K（§4.1.1, 实际取决于模型） | f16: dequant pipeline; Q6_K: Prefill→MMQ, Decode→dequant f32 标量 | f16 路径: f16×f16 或 f16→fp32; Q6_K 路径: 同 FFN down | fp32 (§4.5.1, `D_TYPE=float`) | f16: 取决于路径; Q6_K Prefill: ⚠️ 整数 dot; Q6_K Decode: ❌ 无 | 同 FFN down Q6_K 差异 |
+
+### 阅读指引
+
+**MMQ 主导所有 matmul**。在 Xe2 的默认配置下，Q4_K、Q5_K、Q6_K 的 MUL_MAT（prefill batch matmul）全部走 MMQ 路径——权重保持在整数域（int4→int8 容器），激活被运行时量化为 int8 (Q8_1)，核心计算通过 `dotPacked4x8EXT`（`OpSDotKHR`）执行 int8×int8 dot product 并以 fp32 累加。Dequant+F16 coopmat 路径（Section 2.2）虽然可用，但优先级低于 MMQ，仅在通过 `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1` 显式禁用 MMQ 时才生效。这意味着 **Xe2 上的 Q4_K_M matmul 默认不使用 XMX fp16 管线**，而是走整数加速路径（DP4A 或 DPAS int8，具体硬件映射待确认）。
+
+**Flash Attention 在 Prefill 和 Decode 之间存在质的差异**。Prefill (N≥16) 时 QK^T 通过 `coopMatMulAdd` f16×f16 映射到 XMX fp16 DPAS，但 PV 乘法始终是标量 ALU；Decode (N=1) 时整个 FA 降级为 `flash_attn.comp` scalar shader，全部在 Vector Engine ALU 以 fp32 执行，完全不经过 XMX。这一差异源于 coopmat1 FA 的最小 tile 行数 Br=16 限制（Section 2.3.2）。
+
+**Q6_K 的 Decode 路径是一个值得关注的性能缺口**。Prefill 时 Q6_K 与 Q4_K 一样走 MMQ（整数 dot product），但 Decode 时 Q6_K 被全局排除于 MMVQ（原因是 2-byte alignment 性能问题，source: `ggml-vulkan.cpp:6933-6935`），fallback 到标量 dequant f32 路径。这意味着 `ffn_down`（Q6_K 层）、`attn_v`（部分层 Q6_K）和 output head（若为 Q6_K）在 Decode 时既不使用整数 dot product 也不使用 XMX，完全靠标量 ALU 完成矩阵-向量乘法。
 
 ---
 
