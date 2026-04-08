@@ -748,3 +748,139 @@ graph LR
 | **与 matmul 的关系** | 完全独立，不涉及 GGUF 量化权重 | 同左 |
 | **Xe2 coopmat 版本** | KHR coopmat1（非 NV coopmat2） | N/A |
 | **Coopmat 尺寸要求** | `coopmat_support_16x16x16_f32acc` 或 `_f16acc` ⚠️ 待确认 | N/A |
+
+### 2.4 运行时路径确认
+
+本节提供三种方法，帮助验证 Q4_K_M 模型在 Xe2 上实际走了哪条计算路径。
+
+#### 2.4.1 方法一：启动日志字段检查
+
+Ollama/llama.cpp 的 Vulkan 后端在设备初始化时输出一行诊断日志，包含两个关键字段：
+
+```
+ggml_vulkan: 0 = Intel(R) Arc(TM) ... | uma: 1 | fp16: 1 | bf16: 0 | warp size: 32 | shared memory: 65536 | int dot: 1 | matrix cores: KHR_coopmat
+```
+(source: `ggml-vulkan.cpp:5112-5114`)
+
+**关键字段解读**：
+
+| 字段 | 变量来源 | 含义 | Xe2 预期值 |
+|------|----------|------|-----------|
+| `int dot: N` | `integer_dot_product`（检查 `VK_KHR_shader_integer_dot_product` 扩展 + `integerDotProduct4x8BitPackedSignedAccelerated`）| 1 = MMQ 路径可用 | `1` |
+| `matrix cores: X` | `coopmat2_support ? "NV_coopmat2" : coopmat_support ? "KHR_coopmat" : "none"` (source: `ggml-vulkan.cpp:5109`) | Xe2 应报告 `KHR_coopmat`（非 NV_coopmat2） | `KHR_coopmat` |
+
+**路径推断逻辑**：
+
+- `int dot: 1` + `matrix cores: KHR_coopmat` → Q4_K matmul 走 **MMQ 路径**（优先级最高），Flash Attention prefill 走 **coopmat1 路径**
+- `int dot: 0` + `matrix cores: KHR_coopmat` → Q4_K matmul 走 **Dequant+F16 coopmat1 路径**
+- `int dot: 0` + `matrix cores: none` → Q4_K matmul 走**标量/SIMD fallback**
+
+> **注意**：此日志级别为 `GGML_LOG_DEBUG`，需确保日志级别允许 debug 输出。Ollama 默认会转发 llama.cpp 的 debug 日志到 stderr。
+
+#### 2.4.2 方法二：环境变量强制路径切换
+
+通过 `GGML_VK_DISABLE_*` 环境变量可以禁用特定功能，强制 fallback 到下一优先级路径。这对 A/B 性能对比和路径确认非常有用。
+
+**与计算路径直接相关的环境变量**：
+
+| 环境变量 | 检查位置 | 效果 |
+|----------|----------|------|
+| `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT` | 扩展枚举循环 (source: `ggml-vulkan.cpp:4328`) | 禁用 MMQ 路径 → Q4_K matmul fallback 到 Dequant+F16 coopmat1 |
+| `GGML_VK_DISABLE_COOPMAT` | 扩展枚举循环 (source: `ggml-vulkan.cpp:4315`) | 禁用 KHR coopmat → matmul fallback 到标量，FA prefill fallback 到 scalar shader |
+| `GGML_VK_DISABLE_COOPMAT2` | 扩展枚举循环 (source: `ggml-vulkan.cpp:4323`) | 禁用 NV coopmat2（对 Xe2 无实际影响，Xe2 本就不支持） |
+| `GGML_VK_DISABLE_BFLOAT16` | 扩展枚举循环 (source: `ggml-vulkan.cpp:4333`) | 禁用 bf16 支持（与 Q4_K 无关） |
+| `GGML_VK_DISABLE_F16` | 设备选择逻辑 (source: `ggml-vulkan.cpp:4470, 5016`) | 强制禁用 fp16 计算支持 |
+
+**其他调试用环境变量**：
+
+| 环境变量 | 效果 |
+|----------|------|
+| `GGML_VK_DISABLE_MMVQ` | 禁用 matmul-vec quantized 路径 (source: `ggml-vulkan.cpp:4951`) |
+| `GGML_VK_DISABLE_FUSION` | 禁用算子融合 (source: `ggml-vulkan.cpp:4942`) |
+| `GGML_VK_DISABLE_ASYNC` | 禁用异步传输 (source: `ggml-vulkan.cpp:4403`) |
+| `GGML_VK_DISABLE_MULTI_ADD` | 禁用多缓冲区批量添加 (source: `ggml-vulkan.cpp:4627`) |
+| `GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM` | 禁用 host-visible 显存 (source: `ggml-vulkan.cpp:4277`) |
+| `GGML_VK_DISABLE_GRAPH_OPTIMIZE` | 禁用计算图优化 (source: `ggml-vulkan.cpp:4283`) |
+
+**推荐对比实验**：
+
+```bash
+# 基线：MMQ 路径（默认）
+OLLAMA_FLASH_ATTENTION=1 ollama run <model>
+
+# 实验 A：禁用 MMQ → Dequant+F16 coopmat1 路径
+GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1 OLLAMA_FLASH_ATTENTION=1 ollama run <model>
+
+# 实验 B：禁用 MMQ + coopmat → 全标量 fallback
+GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1 GGML_VK_DISABLE_COOPMAT=1 OLLAMA_FLASH_ATTENTION=1 ollama run <model>
+```
+
+每次切换后检查启动日志中的 `int dot` 和 `matrix cores` 字段，确认路径变更生效。
+
+#### 2.4.3 方法三：Debug 构建 Pipeline 名称追踪
+
+编译时定义 `GGML_VULKAN_DEBUG` 宏，可启用每次 pipeline dispatch 的详细日志。
+
+**启用方式**：在编译 `ggml-vulkan.cpp` 时添加 `-DGGML_VULKAN_DEBUG`。此宏控制 `VK_LOG_DEBUG` 宏的行为：
+
+```cpp
+#ifdef GGML_VULKAN_DEBUG
+#define VK_LOG_DEBUG(msg) std::cerr << msg << std::endl
+#else
+#define VK_LOG_DEBUG(msg) ((void) 0)
+#endif
+```
+(source: `ggml-vulkan.cpp:111-115`)
+
+启用后，`ggml_vk_dispatch_pipeline` 函数会在每次 dispatch 时输出 pipeline 名称：
+
+```cpp
+VK_LOG_DEBUG("ggml_vk_dispatch_pipeline(" << pipeline->name << ", {" ...);
+```
+(source: `ggml-vulkan.cpp:5875`)
+
+**Pipeline 名称模式**（用于识别计算路径）：
+
+| 路径 | Pipeline 名称模式 | 示例 |
+|------|-------------------|------|
+| **MMQ (Q4_K)** | `matmul_q4_k_q8_1_{l,m,s}` | `matmul_q4_k_q8_1_l` |
+| **Dequant+F16 coopmat1** | `matmul_q4_k_f32_*_cm1_{l,m,s}` | `matmul_q4_k_f32_cm1_l` |
+| **Dequant+F16 标量** | `matmul_q4_k_f32_{l,m,s}` | `matmul_q4_k_f32_l` |
+| **FA coopmat1 (f32acc)** | `flash_attn_f32_f16_[aligned_]f32acc_f16_cm1` | `flash_attn_f32_f16_aligned_f32acc_f16_cm1` |
+| **FA coopmat1 (f16acc)** | `flash_attn_f32_f16_[aligned_]f16acc_f16_cm1` | `flash_attn_f32_f16_aligned_f16acc_f16_cm1` |
+| **FA scalar** | `flash_attn_f32_f16_[aligned_]f{32,16}acc_f16` | `flash_attn_f32_f16_f32acc_f16` |
+| **激活量化** | `quantize_q8_1[_subgroup][_x4]` | `quantize_q8_1_x4_subgroup` |
+
+**命名规则解析**（以 matmul 为例）：
+
+Shader 名称由 `vulkan-shaders-gen.cpp:408` 的 `string_to_spv` 函数拼接：
+```
+name = base + (f16acc ? "_f16acc" : "") + (coopmat ? "_cm1" : "") + (coopmat2 ? "_cm2" : (fp16 ? "" : "_fp32"))
+```
+(source: `vulkan-shaders-gen.cpp:408`)
+
+- `_cm1` 后缀 → KHR coopmat1 路径（Xe2 的 Dequant+F16 和 FA 使用此后缀）
+- `_cm2` 后缀 → NV coopmat2 路径（NVIDIA 专有，Xe2 不使用）
+- 无 `_cm` 后缀 → 标量/SIMD 路径或 MMQ 路径
+- `_q8_1` 后缀 → MMQ 路径（激活被量化为 Q8_1）
+- `_f16acc` 后缀 → f16 累加器变体
+- `_{l,m,s}` 后缀 → 矩阵尺寸变体（large/medium/small），由 `CREATE_MMQ` / `CREATE_MM` 宏追加 (source: `ggml-vulkan.cpp:3240-3247`)
+
+**验证示例**：在 debug 构建中运行 Q4_K_M 模型的 prefill，stderr 中应出现：
+1. `matmul_q4_k_q8_1_*` — 确认 matmul 走 MMQ 路径
+2. `quantize_q8_1_*` — 确认激活量化 shader 被调度（MMQ 前置步骤）
+3. `flash_attn_f32_f16_*_cm1` — 确认 FA prefill 走 coopmat1 路径
+
+若 decode 阶段（单 token），FA pipeline 名称应**不含** `_cm1` 后缀（fallback 到 scalar shader）。
+
+#### 2.4.4 确认清单
+
+| # | 检查项 | 预期结果 | 确认方法 |
+|---|--------|----------|----------|
+| 1 | 启动日志 `int dot` | `1` | 查看 stderr |
+| 2 | 启动日志 `matrix cores` | `KHR_coopmat` | 查看 stderr |
+| 3 | Matmul pipeline 名称 | 含 `_q8_1`（MMQ） | debug 构建 |
+| 4 | FA prefill pipeline 名称 | 含 `_cm1`（coopmat1） | debug 构建 |
+| 5 | FA decode pipeline 名称 | 不含 `_cm1`（scalar） | debug 构建 |
+| 6 | 禁用 MMQ 后 matmul pipeline | 含 `_cm1`（coopmat1） | `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1` + debug 构建 |
+| 7 | 禁用 MMQ+coopmat 后 matmul pipeline | 不含 `_cm1` 也不含 `_q8_1` | 两个 DISABLE 同时设置 + debug 构建 |
