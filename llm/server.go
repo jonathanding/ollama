@@ -940,6 +940,20 @@ func (s *llmServer) createLayout(systemInfo ml.SystemInfo, systemGPUs []ml.Devic
 
 func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, requireFull bool, backoff float32) (ml.GPULayersList, []uint64) {
 	gpus := append(make([]ml.DeviceInfo, 0, len(systemGPUs)), systemGPUs...)
+
+	// When OLLAMA_IGPU_OFFLOAD=1, exclude integrated GPUs from the ByLibrary
+	// winner-takes-all competition. iGPU will be loaded into the runner via
+	// library path injection and used only for op_offload of CPU-overflow layers.
+	if envconfig.IGPUOffload() {
+		filtered := gpus[:0]
+		for _, g := range gpus {
+			if !g.Integrated {
+				filtered = append(filtered, g)
+			}
+		}
+		gpus = filtered
+	}
+
 	sort.Sort(sort.Reverse(ml.ByFreeMemory(gpus)))
 
 	layers := make([]uint64, len(memory.CPU.Weights))
