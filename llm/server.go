@@ -931,6 +931,42 @@ func (s *llmServer) createLayout(systemInfo ml.SystemInfo, systemGPUs []ml.Devic
 		}}
 	}
 	gpuLayers, layers := s.buildLayout(systemGPUs, memory, requireFull, backoff)
+
+	// Phase 2: When OLLAMA_IGPU_OFFLOAD=1 and CUDA wins the ByLibrary competition
+	// but cannot fit all layers, assign the CPU-overflow layers explicitly to the
+	// iGPU instead of running them on CPU. On UMA hardware (Intel Arc, Arrow Lake),
+	// Vulkan allocates weights in eHostVisible+eDeviceLocal DDR5 — the same physical
+	// memory, no PCIe transfer. This avoids the per-inference weight-copy overhead
+	// that op_offload alone incurs (the ggml scheduler copies weights every call).
+	if envconfig.IGPUOffload() && gpuLayers.Sum() < len(layers) {
+		for _, dev := range systemGPUs {
+			if !dev.Integrated {
+				continue
+			}
+			assignedSet := make(map[int]bool, gpuLayers.Sum())
+			for _, gl := range gpuLayers {
+				for _, l := range gl.Layers {
+					assignedSet[l] = true
+				}
+			}
+			var overflowLayers []int
+			for i := range layers {
+				if !assignedSet[i] {
+					overflowLayers = append(overflowLayers, i)
+				}
+			}
+			if len(overflowLayers) > 0 {
+				gpuLayers = append(gpuLayers, ml.GPULayers{
+					DeviceID: ml.DeviceID{ID: dev.ID, Library: dev.Library},
+					Layers:   overflowLayers,
+				})
+				slog.Debug("igpu offload: assigning overflow layers to iGPU",
+					"device", dev.Description, "count", len(overflowLayers), "id", dev.ID)
+			}
+			break // only use the first integrated GPU
+		}
+	}
+
 	err := s.verifyLayout(systemInfo, systemGPUs, memory, requireFull, gpuLayers, layers)
 	if err != nil {
 		return nil, err
