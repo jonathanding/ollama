@@ -1832,6 +1832,15 @@ func Serve(ln net.Listener) error {
 
 	var totalVRAM uint64
 	for _, gpu := range gpus {
+		// When OLLAMA_IGPU_OFFLOAD=1, exclude iGPU devices from the VRAM tier
+		// calculation. Intel Arc iGPU reports its UMA allocation (~72 GiB of
+		// shared DDR5) as TotalMemory, which would push totalVRAM over the 47 GiB
+		// threshold and inflate the default context to 262144 — reducing the number
+		// of CUDA layers assigned. The iGPU is used only for op_offload, not for
+		// KV-cache allocation, so its memory should not count toward this tier.
+		if envconfig.IGPUOffload() && gpu.Integrated {
+			continue
+		}
 		totalVRAM += gpu.TotalMemory - envconfig.GpuOverhead()
 	}
 

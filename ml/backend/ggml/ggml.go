@@ -357,7 +357,27 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 	// create backends and buffer types used for the compute graph scheduler
 	var schedBackends []C.ggml_backend_t
 	var schedBufts []C.ggml_backend_buffer_type_t
-	for _, d := range append(gpus, append(accels, cpus...)...) {
+
+	// When OLLAMA_IGPU_OFFLOAD=1, put iGPU devices before other GPUs in the scheduler.
+	// ggml's op_offload scans backends from index 0 and picks the first that returns
+	// offload_op=true. CUDA's offload_op returns true for any batch>=32 matmul, so it
+	// would intercept all CPU-overflow ops before iGPU gets a chance. Placing iGPU at
+	// index 0 ensures CPU-layer matmuls are routed to iGPU; CUDA-layer matmuls still go
+	// to CUDA via the normal weight-buffer routing path (unaffected by insertion order).
+	schedGPUs := gpus
+	if envconfig.IGPUOffload() {
+		var igpuDevs, otherGPUs []C.ggml_backend_dev_t
+		for _, d := range gpus {
+			if C.ggml_backend_dev_type(d) == C.GGML_BACKEND_DEVICE_TYPE_IGPU {
+				igpuDevs = append(igpuDevs, d)
+			} else {
+				otherGPUs = append(otherGPUs, d)
+			}
+		}
+		schedGPUs = append(igpuDevs, otherGPUs...)
+	}
+
+	for _, d := range append(schedGPUs, append(accels, cpus...)...) {
 		b := backends[d]
 		bt := C.ggml_backend_get_default_buffer_type(b)
 
