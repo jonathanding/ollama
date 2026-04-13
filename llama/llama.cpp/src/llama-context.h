@@ -46,7 +46,6 @@ struct llama_context {
     const llama_cparams & get_cparams() const;
 
     ggml_backend_sched_t get_sched() const;
-    void set_eval_callback(ggml_backend_sched_eval_callback cb, void * user_data);
 
     uint32_t n_ctx()     const;
     uint32_t n_ctx_seq() const;

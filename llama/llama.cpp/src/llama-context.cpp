@@ -57,9 +57,6 @@ llama_context::llama_context(
                                hparams.n_ctx_orig_yarn != 0 ? hparams.n_ctx_orig_yarn :
                                                               hparams.n_ctx_train;
 
-    cparams.cb_eval           = params.cb_eval;
-    cparams.cb_eval_user_data = params.cb_eval_user_data;
-
     auto rope_scaling_type = params.rope_scaling_type;
     if (rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
         rope_scaling_type = hparams.rope_scaling_type_train;
@@ -828,7 +825,6 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
-        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
         //const auto t_start_us = ggml_time_us();
 
@@ -2380,8 +2376,6 @@ llama_context_params llama_context_default_params() {
         /*.yarn_beta_slow              =*/ -1.0f,
         /*.yarn_orig_ctx               =*/ 0,
         /*.defrag_thold                =*/ -1.0f,
-        /*.cb_eval                     =*/ nullptr,
-        /*.cb_eval_user_data           =*/ nullptr,
         /*.type_k                      =*/ GGML_TYPE_F16,
         /*.type_v                      =*/ GGML_TYPE_F16,
         /*.abort_callback              =*/ nullptr,
@@ -2526,14 +2520,33 @@ void llama_set_abort_callback(llama_context * ctx, bool (*abort_callback)(void *
     ctx->set_abort_callback(abort_callback, abort_callback_data);
 }
 
-void llama_context::set_eval_callback(ggml_backend_sched_eval_callback cb, void * user_data) {
-    cparams.cb_eval = cb;
-    cparams.cb_eval_user_data = user_data;
-    ggml_backend_sched_set_eval_callback(sched.get(), cb, user_data);
+void llama_context_enable_timing(struct llama_context * ctx, bool enabled) {
+    ggml_backend_sched_set_timing(ctx->get_sched(), enabled);
 }
 
-void llama_context_set_eval_callback(struct llama_context * ctx, ggml_backend_sched_eval_callback callback, void * user_data) {
-    ctx->set_eval_callback(callback, user_data);
+int llama_context_get_n_splits(struct llama_context * ctx) {
+    return ggml_backend_sched_get_n_splits(ctx->get_sched());
+}
+
+int llama_context_get_split_start(struct llama_context * ctx, int split_id) {
+    return ggml_backend_sched_get_split_start(ctx->get_sched(), split_id);
+}
+
+int llama_context_get_split_n_nodes(struct llama_context * ctx, int split_id) {
+    return ggml_backend_sched_get_split_n_nodes(ctx->get_sched(), split_id);
+}
+
+int llama_context_get_split_backend_id(struct llama_context * ctx, int split_id) {
+    return ggml_backend_sched_get_split_backend_id(ctx->get_sched(), split_id);
+}
+
+int llama_context_get_split_timing(struct llama_context * ctx, int split_id,
+                                    uint64_t * out, int capacity) {
+    return ggml_backend_sched_get_split_timing(ctx->get_sched(), split_id, out, capacity);
+}
+
+struct ggml_cgraph * llama_context_get_graph(struct llama_context * ctx) {
+    return ggml_backend_sched_get_graph(ctx->get_sched());
 }
 
 void llama_set_embeddings(llama_context * ctx, bool embeddings) {

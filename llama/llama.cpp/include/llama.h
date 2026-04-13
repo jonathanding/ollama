@@ -341,9 +341,6 @@ extern "C" {
         uint32_t yarn_orig_ctx;    // YaRN original context size
         float    defrag_thold;     // [DEPRECATED] defragment the KV cache if holes/size > thold, <= 0 disabled (default)
 
-        ggml_backend_sched_eval_callback cb_eval;
-        void * cb_eval_user_data;
-
         enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
         enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
 
@@ -942,10 +939,15 @@ extern "C" {
     // Set abort callback
     LLAMA_API void llama_set_abort_callback(struct llama_context * ctx, ggml_abort_callback abort_callback, void * abort_callback_data);
 
-    // Set per-node eval callback for inference profiling.
-    // The callback fires before (ask=true) and after (ask=false) each GGML node is dispatched.
-    // Pass NULL to disable. Zero overhead when not set.
-    LLAMA_API void llama_context_set_eval_callback(struct llama_context * ctx, ggml_backend_sched_eval_callback callback, void * user_data);
+    // Native per-node timing (replaces eval callback)
+    LLAMA_API void llama_context_enable_timing(struct llama_context * ctx, bool enabled);
+    LLAMA_API int  llama_context_get_n_splits(struct llama_context * ctx);
+    LLAMA_API int  llama_context_get_split_start(struct llama_context * ctx, int split_id);
+    LLAMA_API int  llama_context_get_split_n_nodes(struct llama_context * ctx, int split_id);
+    LLAMA_API int  llama_context_get_split_backend_id(struct llama_context * ctx, int split_id);
+    LLAMA_API int  llama_context_get_split_timing(struct llama_context * ctx, int split_id,
+                                                   uint64_t * out, int capacity);
+    LLAMA_API struct ggml_cgraph * llama_context_get_graph(struct llama_context * ctx);
 
     // Wait until all computations are finished
     // This is automatically done when using one of the functions below to obtain the computation results
