@@ -105,6 +105,10 @@ struct ggml_backend_cpu_context {
 
     ggml_abort_callback abort_callback;
     void *              abort_callback_data;
+
+    // Per-node timing (populated when backend->timing_enabled)
+    uint64_t *          node_timing_ns;
+    int                 timing_capacity;
 };
 
 static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
@@ -116,6 +120,7 @@ static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
 static void ggml_backend_cpu_free(ggml_backend_t backend) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
     delete[] cpu_ctx->work_data;
+    delete[] cpu_ctx->node_timing_ns;
     delete cpu_ctx;
     delete backend;
 }
@@ -167,6 +172,13 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph, int batch_size) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
+    // Ensure timing array capacity
+    if (backend->timing_enabled && cgraph->n_nodes > cpu_ctx->timing_capacity) {
+        delete[] cpu_ctx->node_timing_ns;
+        cpu_ctx->node_timing_ns = new uint64_t[cgraph->n_nodes]();
+        cpu_ctx->timing_capacity = cgraph->n_nodes;
+    }
+
     struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
 
     if (cpu_ctx->work_size < cplan.work_size) {
@@ -183,9 +195,30 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
     cplan.abort_callback      = cpu_ctx->abort_callback;
     cplan.abort_callback_data = cpu_ctx->abort_callback_data;
 
+    // Pass timing array to the compute thread via extern
+    extern "C" void ggml_cpu_set_timing_state(uint64_t * timing_ns);
+    if (backend->timing_enabled) {
+        memset(cpu_ctx->node_timing_ns, 0, cgraph->n_nodes * sizeof(uint64_t));
+        ggml_cpu_set_timing_state(cpu_ctx->node_timing_ns);
+    } else {
+        ggml_cpu_set_timing_state(NULL);
+    }
+
     return ggml_graph_compute(cgraph, &cplan);
 
     GGML_UNUSED(batch_size);
+}
+
+// Called by ggml_backend_sched_get_split_timing via name dispatch
+int ggml_cpu_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity) {
+    struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
+    if (!cpu_ctx->node_timing_ns) {
+        memset(timing_out, 0, capacity * sizeof(uint64_t));
+        return 0;
+    }
+    int count = capacity < cpu_ctx->timing_capacity ? capacity : cpu_ctx->timing_capacity;
+    memcpy(timing_out, cpu_ctx->node_timing_ns, count * sizeof(uint64_t));
+    return count;
 }
 
 static const struct ggml_backend_i ggml_backend_cpu_i = {
@@ -225,6 +258,8 @@ ggml_backend_t ggml_backend_cpu_init(void) {
     ctx->work_size           = 0;
     ctx->abort_callback      = NULL;
     ctx->abort_callback_data = NULL;
+    ctx->node_timing_ns      = nullptr;
+    ctx->timing_capacity     = 0;
 
     ggml_backend_t cpu_backend = new ggml_backend {
         /* .guid    = */ ggml_backend_cpu_guid(),
