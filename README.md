@@ -129,28 +129,22 @@ Fields: `pass` = batch index, `seq` = operator sequence number within the pass, 
 
 | File | Role |
 |------|------|
-| `llama/llama.cpp/include/llama.h` | C API declaration: `llama_context_set_eval_callback` |
-| `llama/llama.cpp/src/llama-context.cpp` | Implementation via `ctx->get_sched()` |
-| `llama/profiler_bridge.go` | CGO bridge: `GoProfilerCallback` (exported), static C bridge, `extractTensorInfo` |
-| `llama/llama.go` | `Context.profilerHandle` field |
-| `llm/profiler/profiler.go` | `TraceCollector` interface (pure Go, no CGO), `TensorInfo`, `OpEvent`, `New()` |
-| `llm/profiler/noop.go` | `NoopCollector` — zero overhead when disabled |
-| `llm/profiler/jsonl.go` | `JSONLTraceBuffer` — in-memory collection, async flush |
+| `llm/profiler/profiler.go` | `TraceWriter` interface (pull model), `OpEvent`, `NewWriter()` factory |
+| `llm/profiler/noop.go` | `NoopWriter` — zero overhead when disabled |
+| `llm/profiler/jsonl.go` | `JSONLWriter` — batch WriteOps, async Flush |
+| `ml/backend/ggml/timing_bridge.go` | CGO bridge: EnableTiming + CollectTiming (OllamaRunner) |
+| `llama/timing_bridge.go` | CGO bridge: EnableTiming + CollectTiming (LlamaRunner) |
 | `envconfig/config.go` | `OLLAMA_TRACE_DIR` env var |
-| `runner/llamarunner/runner.go` | Hooks into `loadModel`, `processBatch`, `completion` |
+| `runner/ollamarunner/runner.go` | Hooks: EnableTiming, CollectTiming after sync, Flush on completion |
+| `runner/llamarunner/runner.go` | Hooks: EnableTiming, CollectTiming after sync, Flush on completion |
 
 ### Performance impact
 
-When tracing is enabled, the GGML scheduler switches from **full-graph dispatch** to **per-node dispatch** with a forced `synchronize` after every node:
+When tracing is enabled (`OLLAMA_TRACE_DIR` set), backend-native timing is activated:
+- **Vulkan:** async `vkCmdWriteTimestamp` inserted into command buffer (no GPU stall)
+- **CPU:** `clock_gettime` barrier-to-barrier timing on thread 0
 
-```
-Normal:   CPU submits entire graph → GPU pipelines all kernels → done
-Tracing:  for each node: submit → GPU execute → sync → callback → next node
-```
-
-**GPU (CUDA/Vulkan):** Expect **2x+ slowdown** for models with 500+ nodes. GPU kernel overlap and memory transfer pipelining are completely lost. Each node runs in isolation.
-
-**CPU:** Each node becomes a separate `graph_compute` call (503 calls instead of 1), each creating/destroying a threadpool. Multi-threading **within** each call works normally — per-op compute times are accurate. The overhead is threadpool management between ops.
+Overhead: <5% (no forced synchronization between nodes).
 
 ### How to interpret the data
 

@@ -99,22 +99,13 @@ index 1459d16dd..498186a7c 100644
                          SET_CAUSE(tensor, "1.off");
 @@ -1577,7 +1579,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
          }
- 
-         if (!sched->callback_eval) {
+
+         {
 -            enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
 +            enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph, sched->batch_size);
              if (ec != GGML_STATUS_SUCCESS) {
                  return ec;
              }
-@@ -1599,7 +1601,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
- 
-                 struct ggml_cgraph gv = ggml_graph_view(&split->graph, j0, j1 + 1);
- 
--                enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv);
-+                enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv, sched->batch_size);
-                 if (ec != GGML_STATUS_SUCCESS) {
-                     return ec;
-                 }
 @@ -1689,6 +1691,7 @@ ggml_backend_sched_t ggml_backend_sched_new(
  
      sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
@@ -169,8 +160,9 @@ index f4713a421..92ba577a5 100644
  
      struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
 @@ -184,6 +184,8 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
-     cplan.abort_callback_data = cpu_ctx->abort_callback_data;
- 
+         ggml_cpu_set_timing_state(NULL);
+     }
+
      return ggml_graph_compute(cgraph, &cplan);
 +
 +    GGML_UNUSED(batch_size);

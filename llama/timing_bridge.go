@@ -1,6 +1,7 @@
 package llama
 
 /*
+#include "ggml.h"
 #include "llama.h"
 #include "ggml-backend.h"
 
@@ -52,11 +53,10 @@ func (c *Context) CollectTiming(passStartTime time.Time) []profiler.OpEvent {
 			}
 
 			nodeIdx := iStart + j
-			if C.int(nodeIdx) >= graph.n_nodes {
+			if nodeIdx >= int(C.ggml_graph_n_nodes(graph)) {
 				continue
 			}
-			nodes := unsafe.Slice(graph.nodes, graph.n_nodes)
-			node := nodes[nodeIdx]
+			node := C.ggml_graph_node(graph, C.int(nodeIdx))
 
 			var info C.struct_ggml_node_info
 			C.ggml_node_get_info(node, &info)

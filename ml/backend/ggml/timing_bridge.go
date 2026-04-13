@@ -1,6 +1,7 @@
 package ggml
 
 /*
+#include "ggml.h"
 #include "ggml-backend.h"
 
 extern void ggml_node_get_info(struct ggml_tensor * node, struct ggml_node_info * out);
@@ -56,11 +57,10 @@ func (b *Backend) CollectTiming(passStartTime time.Time) []profiler.OpEvent {
 
 			// Get the node from the scheduler's graph copy via split offset
 			nodeIdx := iStart + j
-			if C.int(nodeIdx) >= graph.n_nodes {
+			if nodeIdx >= int(C.ggml_graph_n_nodes(graph)) {
 				continue
 			}
-			nodes := unsafe.Slice(graph.nodes, graph.n_nodes)
-			node := nodes[nodeIdx]
+			node := C.ggml_graph_node(graph, C.int(nodeIdx))
 
 			var info C.struct_ggml_node_info
 			C.ggml_node_get_info(node, &info)

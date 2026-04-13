@@ -186,72 +186,56 @@ ggml_graph_print(gf);  // gf 是 struct ggml_cgraph *
 
 ---
 
-## ggml 层：per-node eval 回调
+## ggml 层：native per-node timing
 
-这是**不修改核心代码**情况下获取 per-node 信息的唯一运行时接口。
+后端原生计时 API，无需 eval callback，不破坏 GPU 流水线。
+
+### 机制
+
+通过 `ggml_backend_sched_set_timing(sched, true)` 启用后，各后端在 graph compute 时内部记录 per-node 耗时：
+
+- **CPU:** 在 thread 0 用 `clock_gettime` 记录每个 node 的 barrier-to-barrier 时间
+- **Vulkan:** 在 command buffer 中插入异步 `vkCmdWriteTimestamp`，无 GPU stall
+
+graph compute 完成后，通过 `ggml_backend_sched_get_split_timing()` 读取每个 split 的 per-node 时间。
 
 ### API
 
 ```c
 // ggml-backend.h
-typedef bool (*ggml_backend_sched_eval_callback)(
-    struct ggml_tensor * t,   // 当前节点
-    bool ask,                  // true=询问是否要计时，false=节点执行完毕
-    void * user_data
-);
-
-ggml_backend_sched_set_eval_callback(sched, callback, user_data);
+void ggml_backend_sched_set_timing(ggml_backend_sched_t sched, bool enabled);
+int  ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched);
+int  ggml_backend_sched_get_split_n_nodes(ggml_backend_sched_t sched, int split_idx);
+int  ggml_backend_sched_get_split_start(ggml_backend_sched_t sched, int split_idx);
+int  ggml_backend_sched_get_split_timing(ggml_backend_sched_t sched, int split_idx,
+                                          uint64_t * timing_out, int capacity);
 ```
 
-### 用法（llama.cpp 层）
+### Go 层集成
 
-通过 `llama_context_params.cb_eval` 设置：
+Ollama 通过 `OLLAMA_TRACE_DIR` 环境变量启用 tracing。两个 runner 都使用 pull 模式：
 
-```c
-llama_context_params cparams = llama_context_default_params();
-cparams.cb_eval = [](struct ggml_tensor * t, bool ask, void * user_data) -> bool {
-    if (ask) {
-        return true; // 对所有节点计时
-    }
-    // 节点执行完毕，此时可记录时间
-    // 注意：此时从 GPU 同步回 CPU 会引入 overhead
-    fprintf(stderr, "node: %-20s shape=[%lld,%lld,%lld,%lld]\n",
-            t->name, t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
-    return true;
-};
-cparams.cb_eval_user_data = nullptr;
-```
+1. `EnableTiming(true)` — 启用后端计时
+2. 每次 `graph_compute` + `synchronize` 后调用 `CollectTiming(passStartTime)`
+3. 返回的 `[]profiler.OpEvent` 写入 `TraceWriter`
+4. 请求完成时 `Flush()` 写入 JSONL 文件
 
-**Ollama 当前状态：** Ollama 的 LlamaRunner 通过 `OLLAMA_TRACE_DIR` 启用此回调，生成 JSONL trace 文件。OllamaRunner 有基础 pass 级别 tracing。
+### 性能影响
 
-### GPU 性能影响（重要）
-
-当 eval callback 被设置时，scheduler 的行为发生根本性改变：
-
-| | 无 callback（正常） | 有 callback（tracing） |
+| | 无 timing（正常） | 有 timing |
 |---|---|---|
-| **dispatch 方式** | 一次提交整个 graph | 逐 node 提交 |
-| **GPU 同步** | 仅在 graph 结束时 | 每个 node 后强制 `synchronize` |
-| **GPU 流水线** | kernel 之间可 overlap | 完全串行，无 overlap |
-| **推理速度** | 正常 | GPU 模型慢 2x+（500 node × ~50µs sync） |
-| **CPU 影响** | 1 次 graph_compute | 503 次 graph_compute，每次创建/销毁线程池 |
-| **CPU 多线程** | 正常 | 每次 graph_compute 内部多线程正常工作，per-op 计算时间准确 |
-
-### 数据解读指南
-
-eval callback 测到的 per-op 时间是**每个 op 在隔离执行下的耗时**（GPU 上没有其他 kernel 并行）。
-
-- **有效用途：** 相对排序（找最慢的 op）、模型结构分析（DAG/shape/dtype）、跨模型比较
-- **无效用途：** 绝对耗时占比分析（`sum(per_op) > 实际总时间`，因为正常执行中小 op 与大 op 并行）
-- **准确性：** 大 op（如 `MUL_MAT`）的测量值接近真实值；小 op 因 sync 开销被放大
+| **dispatch 方式** | 整个 graph 一次提交 | 整个 graph 一次提交（不变） |
+| **GPU 同步** | 仅在 graph 结束时 | 仅在 graph 结束时（不变） |
+| **GPU 流水线** | kernel overlap 正常 | kernel overlap 正常（不变） |
+| **开销** | 无 | <5%（异步 timestamp / barrier 计时） |
 
 ### 工具对比与推荐工作流
 
 | | Ollama Trace | GGML_VK_PERF_LOGGER | Nsight Systems |
 |---|---|---|---|
 | **信息粒度** | 每个 op 实例（tensor name, shape, DAG） | 按 op 类型汇总平均 | 每个 CUDA kernel |
-| **GPU 时间准确性** | ⚠️ 近似（强制同步） | ✅ 准确（GPU timestamp） | ✅ 准确（驱动层） |
-| **影响执行** | ⚠️ 破坏 GPU 流水线 | ✅ 不影响 | ✅ 不影响 |
+| **GPU 时间准确性** | ✅ Vulkan: 准确（async timestamp）; CPU: 准确 | ✅ 准确（GPU timestamp） | ✅ 准确（驱动层） |
+| **影响执行** | ✅ <5% 开销 | ✅ 不影响 | ✅ 不影响 |
 | **适用 backend** | 所有 | 仅 Vulkan | 仅 CUDA |
 
 **注意：** `GGML_VK_PERF_LOGGER` 把所有同类 op 混在一起算平均（如 32 个不同大小的 `MUL_MAT` → 一个平均值），丢失了每个具体 op 的 tensor name、shape 等上下文。

@@ -169,6 +169,9 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
     GGML_UNUSED(backend);
 }
 
+// Defined in ggml-cpu.c — sets the per-thread timing pointer
+extern "C" void ggml_cpu_set_timing_state(uint64_t * timing_ns);
+
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph, int batch_size) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
@@ -195,8 +198,7 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
     cplan.abort_callback      = cpu_ctx->abort_callback;
     cplan.abort_callback_data = cpu_ctx->abort_callback_data;
 
-    // Pass timing array to the compute thread via extern
-    extern "C" void ggml_cpu_set_timing_state(uint64_t * timing_ns);
+    // Pass timing array to the compute thread
     if (backend->timing_enabled) {
         memset(cpu_ctx->node_timing_ns, 0, cgraph->n_nodes * sizeof(uint64_t));
         ggml_cpu_set_timing_state(cpu_ctx->node_timing_ns);
