@@ -21,7 +21,6 @@ import (
 	"maps"
 	"os"
 	"runtime"
-	"runtime/cgo"
 	"slices"
 	"strconv"
 	"strings"
@@ -117,9 +116,6 @@ type Backend struct {
 
 	// weightBuffers are the GGML contexts and buffers for allocating weights
 	weightBuffers map[*C.struct_ggml_context]C.ggml_backend_buffer_t
-
-	// profilerHandle holds the cgo.Handle for the profiler eval callback
-	profilerHandle cgo.Handle
 }
 
 var once sync.Once
@@ -459,11 +455,6 @@ func init() {
 func (b *Backend) Close() {
 	if b == nil {
 		return
-	}
-
-	if b.profilerHandle != 0 {
-		b.profilerHandle.Delete()
-		b.profilerHandle = 0
 	}
 
 	for ctx, b := range b.weightBuffers {

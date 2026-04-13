@@ -387,8 +387,8 @@ type Server struct {
 	// of non-text data
 	multimodalHash maphash.Hash
 
-	// prof collects per-operator trace data when OLLAMA_TRACE_DIR is set
-	prof profiler.TraceCollector
+	// traceWriter writes per-operator trace data when OLLAMA_TRACE_DIR is set
+	traceWriter profiler.TraceWriter
 }
 
 func (s *Server) allNil() bool {
@@ -439,7 +439,7 @@ func (s *Server) removeSequence(seqIndex int, reason llm.DoneReason) {
 	s.seqs[seqIndex] = nil
 	s.seqsSem.Release(1)
 
-	s.prof.Flush(fmt.Sprintf("seq%d", seqIndex), s.modelPath)
+	s.traceWriter.Flush(fmt.Sprintf("seq%d", seqIndex), s.modelPath)
 }
 
 // track batch state between forwardBatch, computeBatch and predictForwardBatch
@@ -719,16 +719,25 @@ func (s *Server) computeBatch(activeBatch batchState) {
 	s.mu.Unlock()
 
 	activeBatch.batch.Inputs.FromInts(batchInputs)
-	s.prof.RecordPassStart(activeBatch.id, len(batchInputs))
-	activeBatch.ctx.ComputeWithNotify(
-		func() {
-			logutil.Trace("computeBatch: signaling computeStartedCh", "batchID", activeBatch.id)
-			activeBatch.computeStartedCh <- struct{}{}
-		},
-		activeBatch.modelOutput)
-	s.prof.RecordPassEnd(activeBatch.id, 0)
+	passStart := time.Now()
+	s.traceWriter.WritePassStart(activeBatch.id, len(batchInputs))
+	cb := func() {
+		logutil.Trace("computeBatch: signaling computeStartedCh", "batchID", activeBatch.id)
+		activeBatch.computeStartedCh <- struct{}{}
+	}
+	activeBatch.ctx.ComputeWithNotify(cb, activeBatch.modelOutput)
+	outputs := activeBatch.modelOutput.Floats() // sync happens here
+	s.traceWriter.WritePassEnd(activeBatch.id)
 
-	outputs := activeBatch.modelOutput.Floats()
+	// Pull timing after sync
+	if ct, ok := s.model.Backend().(interface {
+		CollectTiming(time.Time) []profiler.OpEvent
+	}); ok {
+		if events := ct.CollectTiming(passStart); len(events) > 0 {
+			s.traceWriter.WriteOps(events)
+		}
+	}
+
 	t := time.Now()
 
 	logutil.Trace("computeBatch: logits ready", "batchID", activeBatch.id)
@@ -1247,8 +1256,8 @@ func (s *Server) allocModel(
 
 // closeModel frees all memory associated with a model
 func (s *Server) closeModel() {
-	if s.prof != nil {
-		s.prof.Close()
+	if s.traceWriter != nil {
+		s.traceWriter.Close()
 	}
 	s.cache.Close()
 	s.cache = nil
@@ -1269,12 +1278,11 @@ func (s *Server) loadModel() {
 		panic(fmt.Errorf("failed to load model: %v", err))
 	}
 
-	s.prof = profiler.New(envconfig.TraceDir())
-	type evalCallbackSetter interface {
-		SetEvalCallback(profiler.TraceCollector)
-	}
-	if ecs, ok := s.model.Backend().(evalCallbackSetter); ok {
-		ecs.SetEvalCallback(s.prof)
+	s.traceWriter = profiler.NewWriter(envconfig.TraceDir())
+	if _, ok := s.traceWriter.(*profiler.JSONLWriter); ok {
+		if tb, ok := s.model.Backend().(interface{ EnableTiming(bool) }); ok {
+			tb.EnableTiming(true)
+		}
 	}
 
 	s.status = llm.ServerStatusReady
