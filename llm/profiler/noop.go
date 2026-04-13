@@ -1,12 +1,10 @@
 package profiler
 
-// NoopCollector implements TraceCollector with zero overhead.
-// Used when OLLAMA_TRACE_DIR is not set.
-type NoopCollector struct{}
+// NoopWriter implements TraceWriter with zero overhead.
+type NoopWriter struct{}
 
-func (n *NoopCollector) RecordTensorStart(_ uintptr, _ int64)             {}
-func (n *NoopCollector) RecordTensorEnd(_ uintptr, _ TensorInfo, _ int64) {}
-func (n *NoopCollector) RecordPassStart(_ int, _ int)                      {}
-func (n *NoopCollector) RecordPassEnd(_ int, _ int)                        {}
-func (n *NoopCollector) Flush(_ string, _ string) error                    { return nil }
-func (n *NoopCollector) Close() error                                       { return nil }
+func (n *NoopWriter) WriteOps(_ []OpEvent)           {}
+func (n *NoopWriter) WritePassStart(_ int, _ int)    {}
+func (n *NoopWriter) WritePassEnd(_ int)             {}
+func (n *NoopWriter) Flush(_ string, _ string) error { return nil }
+func (n *NoopWriter) Close() error                   { return nil }
