@@ -1060,7 +1060,7 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 			slog.Info("moe split: layer budget",
 				"moe_gpu_layers", moeGPUCount,
 				"moe_cpu_layers", len(moeSize)-moeGPUCount,
-				"source", source)
+				"cfg", source)
 
 			for i := range layers {
 				loc := "cpu"
