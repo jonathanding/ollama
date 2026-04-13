@@ -986,9 +986,13 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 	moeSize := make([]uint64, len(layers))
 	for i := range moeSize {
 		for j := range memory.GPUs {
-			moeSize[i] += memory.GPUs[j].MoEWeights[i]
+			if memory.GPUs[j].MoEWeights != nil {
+				moeSize[i] += memory.GPUs[j].MoEWeights[i]
+			}
 		}
-		moeSize[i] += memory.CPU.MoEWeights[i]
+		if memory.CPU.MoEWeights != nil {
+			moeSize[i] += memory.CPU.MoEWeights[i]
+		}
 	}
 
 	isMoEModel := slices.ContainsFunc(moeSize, func(s uint64) bool { return s > 0 })
@@ -1083,11 +1087,7 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 			adjustedGPUs := make([]ml.DeviceInfo, len(gpus))
 			copy(adjustedGPUs, gpus)
 			for i := range adjustedGPUs {
-				if adjustedGPUs[i].FreeMemory > totalDenseOverhead {
-					adjustedGPUs[i].FreeMemory -= totalDenseOverhead
-				} else {
-					adjustedGPUs[i].FreeMemory = 0
-				}
+				// Apply same overhead formula as availableVRAM estimate: backoff + fixed overheads
 				var graphOverhead uint64
 				for _, gm := range memory.GPUs {
 					if gm.DeviceID == adjustedGPUs[i].DeviceID {
@@ -1098,6 +1098,12 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 				reserved := uint64(float32(adjustedGPUs[i].FreeMemory)*backoff) + adjustedGPUs[i].MinimumMemory() + envconfig.GpuOverhead() + graphOverhead
 				if adjustedGPUs[i].FreeMemory > reserved {
 					adjustedGPUs[i].FreeMemory -= reserved
+				} else {
+					adjustedGPUs[i].FreeMemory = 0
+				}
+				// Then subtract dense overhead (pre-allocated for all layers)
+				if adjustedGPUs[i].FreeMemory > totalDenseOverhead {
+					adjustedGPUs[i].FreeMemory -= totalDenseOverhead
 				} else {
 					adjustedGPUs[i].FreeMemory = 0
 				}
