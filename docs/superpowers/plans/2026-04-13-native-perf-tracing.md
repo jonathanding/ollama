@@ -440,6 +440,9 @@ In `ml/backend/ggml/ggml/include/ggml-backend.h`, after the `ggml_backend_sched_
                       ggml_backend_sched_t sched, int split_id,
                       uint64_t * timing_out, int capacity);
 
+    // Access the scheduler's internal graph copy (valid between graph_compute and next graph_compute)
+    GGML_API struct ggml_cgraph * ggml_backend_sched_get_graph(ggml_backend_sched_t sched);
+
     // Node metadata extraction
     struct ggml_node_info {
         const char * op_name;
@@ -581,6 +584,10 @@ int ggml_backend_sched_get_split_timing(
     return 0;
 }
 
+struct ggml_cgraph * ggml_backend_sched_get_graph(ggml_backend_sched_t sched) {
+    return &sched->graph;
+}
+
 void ggml_node_get_info(struct ggml_tensor * node, struct ggml_node_info * out) {
     out->op_name     = ggml_op_name(node->op);
     out->tensor_name = node->name;
@@ -646,6 +653,15 @@ struct ggml_backend_cpu_context {
     int                 timing_capacity;
 };
 ```
+
+Also add initialization in `ggml_backend_cpu_init()` (line 213). After the existing field assignments (lines 222-227), add:
+
+```c
+    ctx->node_timing_ns      = nullptr;
+    ctx->timing_capacity     = 0;
+```
+
+This prevents undefined behavior from `delete[]` on an uninitialized pointer if timing is never enabled.
 
 - [ ] **Step 2: Add cleanup in ggml_backend_cpu_free**
 
@@ -855,23 +871,25 @@ to:
 
 This means when both are enabled, native timing takes precedence (async). The perf logger's stderr output will be disabled in that case. If only `vk_perf_logger_enabled`, behavior is unchanged.
 
-If only `backend->timing_enabled` (not perf_logger), we need to ensure the command buffer is still properly ended and submitted. Add after the modified perf_logger block:
+When `backend->timing_enabled` is true (whether or not perf_logger is also enabled), we need to ensure the command buffer is properly ended/submitted and `timing_query_count` is recorded. Add after the modified perf_logger block:
 
 ```c
-    if (backend->timing_enabled && !vk_perf_logger_enabled) {
-        // Ensure any pending compute context is submitted (timestamps included in command buffer)
+    if (backend->timing_enabled) {
+        // Native timing: async submit of final compute context.
+        // When both perf_logger and timing are enabled, native timing takes precedence
+        // (perf_logger's synchronous read is skipped above to avoid GPU stall).
+        //
+        // IMPORTANT: do NOT pass ctx->device->fence here — synchronize() will use that
+        // fence via an empty submit. Passing it here would cause double-use of an
+        // unsignaled fence (Vulkan validation error).
         if (!ctx->compute_ctx.expired()) {
             compute_ctx = ctx->compute_ctx.lock();
             ggml_vk_ctx_end(compute_ctx);
-            ggml_vk_submit(compute_ctx, ctx->device->fence);
+            ggml_vk_submit(compute_ctx, {});
+            ctx->submit_pending = true;
         }
-        ctx->timing_query_count = ctx->query_idx;
-    }
-```
+        // else: all work was already submitted via periodic batches (submit_pending already true)
 
-Also store timing_query_count in the perf_logger path too:
-```c
-    if (need_timestamps) {
         ctx->timing_query_count = ctx->query_idx;
     }
 ```
@@ -1039,6 +1057,14 @@ func (b *Backend) EnableTiming(enabled bool) {
 // CollectTiming reads per-node timing data from all splits after sync.
 // Must be called after synchronize and before next graph_compute.
 func (b *Backend) CollectTiming(passStartTime time.Time) []profiler.OpEvent {
+	// Get the scheduler's internal graph copy — valid between graph_compute and next graph_compute.
+	// This is a struct member on the sched (not a heap pointer), so its lifetime = sched lifetime.
+	// No dangling pointer risk, unlike storing a Context graph pointer on the Backend.
+	graph := C.ggml_backend_sched_get_graph(b.sched)
+	if graph == nil {
+		return nil
+	}
+
 	nSplits := int(C.ggml_backend_sched_get_n_splits(b.sched))
 	var events []profiler.OpEvent
 
@@ -1063,11 +1089,13 @@ func (b *Backend) CollectTiming(passStartTime time.Time) []profiler.OpEvent {
 				continue
 			}
 
-			// Get the node from the full graph via split offset
-			node := b.lastGraphNodeAt(iStart + j)
-			if node == nil {
+			// Get the node from the scheduler's graph copy via split offset
+			nodeIdx := iStart + j
+			if C.int(nodeIdx) >= graph.n_nodes {
 				continue
 			}
+			nodes := unsafe.Slice(graph.nodes, graph.n_nodes)
+			node := nodes[nodeIdx]
 
 			var info C.struct_ggml_node_info
 			C.ggml_node_get_info(node, &info)
@@ -1107,20 +1135,7 @@ func (b *Backend) CollectTiming(passStartTime time.Time) []profiler.OpEvent {
 
 	return events
 }
-
-// graphNodeAt returns the tensor node at the given index in the last computed graph.
-func (b *Backend) graphNodeAt(idx int) *C.struct_ggml_tensor {
-	// b.lastGraph is the ggml_cgraph from the last ComputeWithNotify call.
-	// Access: b.lastGraph.nodes[idx]
-	if b.lastGraph == nil || C.int(idx) >= b.lastGraph.n_nodes {
-		return nil
-	}
-	nodes := unsafe.Slice(b.lastGraph.nodes, b.lastGraph.n_nodes)
-	return nodes[idx]
-}
 ```
-
-Note: The `b.lastGraph` field needs to be set during `ComputeWithNotify` — see Task 8 for the modification to `ggml.go`.
 
 - [ ] **Step 3: Commit**
 
@@ -1265,29 +1280,10 @@ git commit -m "llama: add timing CGO bridge for LlamaRunner"
 
 In `ml/backend/ggml/ggml.go`:
 
-Remove the `profilerHandle cgo.Handle` field (line 122) from the `Backend` struct.
+1. Remove the `profilerHandle cgo.Handle` field (line 122) from the `Backend` struct.
+2. Remove the profilerHandle cleanup in `Close()` (line 464). Search for `profilerHandle` in Close and delete those lines.
 
-Remove the profilerHandle cleanup in `Close()` (line 464). Search for `profilerHandle` in Close and delete those lines.
-
-Add a `graph` field to expose the last-computed graph for timing collection. In the `Context` struct (find it near `ComputeWithNotify`), ensure the `ggml_cgraph*` is accessible. The simplest approach: store `b.lastGraph = c.graph` on the Backend after compute. Check if there's already a suitable field.
-
-Actually, the graph is on the `Context`, not the `Backend`. The timing bridge needs the graph. The cleanest way: have `CollectTiming` accept the graph from `ComputeWithNotify`'s context. Modify the `CollectTiming` signature to not need a stored graph — instead, the runner passes it.
-
-Alternative: Store the last graph pointer on Backend:
-
-```go
-type Backend struct {
-    // ... existing fields ...
-    lastGraph *C.struct_ggml_cgraph  // set by ComputeWithNotify for timing collection
-}
-```
-
-In `ComputeWithNotify`, after `graph_compute_async`, store:
-```go
-c.b.lastGraph = c.graph
-```
-
-Then `graphNodeAt` in `timing_bridge.go` uses `b.lastGraph`.
+No new fields are needed on Backend or Context. The timing bridge uses `ggml_backend_sched_get_graph()` (added in Task 2) to access the scheduler's internal graph copy, which has the same lifetime as the sched itself — no dangling pointer risk.
 
 - [ ] **Step 2: Remove old profiler code from ollamarunner**
 
@@ -1503,18 +1499,51 @@ grep -r "cb_eval\|callback_eval\|set_eval_callback" llama/llama.cpp/
 
 Remove all remaining references.
 
-- [ ] **Step 4: Run profiler package tests**
+- [ ] **Step 4: Update user-facing documentation**
+
+In `README.md`, update the Architecture table (lines 128-141) to reflect the new timing API:
+
+```markdown
+### Architecture
+
+| File | Role |
+|------|------|
+| `llm/profiler/profiler.go` | `TraceWriter` interface (pull model), `OpEvent`, `NewWriter()` factory |
+| `llm/profiler/noop.go` | `NoopWriter` — zero overhead when disabled |
+| `llm/profiler/jsonl.go` | `JSONLWriter` — batch WriteOps, async Flush |
+| `ml/backend/ggml/timing_bridge.go` | CGO bridge: EnableTiming + CollectTiming (OllamaRunner) |
+| `llama/timing_bridge.go` | CGO bridge: EnableTiming + CollectTiming (LlamaRunner) |
+| `envconfig/config.go` | `OLLAMA_TRACE_DIR` env var |
+| `runner/ollamarunner/runner.go` | Hooks: EnableTiming, CollectTiming after sync, Flush on completion |
+| `runner/llamarunner/runner.go` | Hooks: EnableTiming, CollectTiming after sync, Flush on completion |
+```
+
+Also update the "Performance impact" section (lines 142-149) — replace the per-node sync description:
+
+```markdown
+### Performance impact
+
+When tracing is enabled (`OLLAMA_TRACE_DIR` set), backend-native timing is activated:
+- **Vulkan:** async `vkCmdWriteTimestamp` inserted into command buffer (no GPU stall)
+- **CPU:** `clock_gettime` barrier-to-barrier timing on thread 0
+
+Overhead: <5% (no forced synchronization between nodes).
+```
+
+In `docs/debugging-and-profiling.md`, update the "ggml 层" section (lines 195-246) to describe the new native timing mechanism instead of the old eval callback.
+
+- [ ] **Step 5: Run profiler package tests**
 
 ```bash
 go test ./llm/profiler/ -v
 ```
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add -A
-git commit -m "cleanup: remove all eval callback remnants, regenerate patch"
+git commit -m "cleanup: remove all eval callback remnants, update docs, regenerate patch"
 ```
 
 ---
