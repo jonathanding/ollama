@@ -140,6 +140,7 @@ extern "C" {
         struct ggml_backend_i iface;
         ggml_backend_dev_t device;
         void * context;
+        bool timing_enabled;
     };
 
     struct ggml_backend_event {

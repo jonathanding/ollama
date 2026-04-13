@@ -301,15 +301,6 @@ extern "C" {
 
     typedef struct ggml_backend_sched * ggml_backend_sched_t;
 
-    // Evaluation callback for each node in the graph (set with ggml_backend_sched_set_eval_callback)
-    // when ask == true, the scheduler wants to know if the user wants to observe this node
-    // this allows the scheduler to batch nodes together in order to evaluate them in a single call
-    //
-    // when ask == false, the scheduler is passing the node tensor to the user for observation
-    // if the user returns false, the scheduler will cancel the graph compute
-    //
-    typedef bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data);
-
     // Initialize a backend scheduler, backends with low index are given priority over backends with high index
     GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
     GGML_API ggml_backend_sched_t ggml_backend_sched_new_ext(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload, bool alloc_buffers);
@@ -350,8 +341,35 @@ extern "C" {
     // The correct way to use this API is to discard the deallocated tensors and create new ones.
     GGML_API void                 ggml_backend_sched_reset(ggml_backend_sched_t sched);
 
-    // Set a callback to be called for each resulting node during graph compute
-    GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
+    // Native per-node timing API
+    GGML_API void ggml_backend_set_timing(ggml_backend_t backend, bool enabled);
+    GGML_API void ggml_backend_sched_set_timing(ggml_backend_sched_t sched, bool enabled);
+
+    // Split query (read-only, valid between graph_compute and next graph_compute)
+    GGML_API int  ggml_backend_sched_get_split_start(ggml_backend_sched_t sched, int split_id);
+    GGML_API int  ggml_backend_sched_get_split_n_nodes(ggml_backend_sched_t sched, int split_id);
+    GGML_API int  ggml_backend_sched_get_split_backend_id(ggml_backend_sched_t sched, int split_id);
+
+    // Read timing data for a split (call after synchronize, before next graph_compute)
+    GGML_API int  ggml_backend_sched_get_split_timing(
+                      ggml_backend_sched_t sched, int split_id,
+                      uint64_t * timing_out, int capacity);
+
+    // Access the scheduler's internal graph copy (valid between graph_compute and next graph_compute)
+    GGML_API struct ggml_cgraph * ggml_backend_sched_get_graph(ggml_backend_sched_t sched);
+
+    // Node metadata extraction
+    struct ggml_node_info {
+        const char * op_name;
+        const char * tensor_name;
+        int64_t      shape[4];
+        const char * dtype_name;
+        const char * backend_name;
+        const char * src_names[GGML_MAX_SRC];
+        int          n_srcs;
+    };
+
+    GGML_API void ggml_node_get_info(struct ggml_tensor * node, struct ggml_node_info * out);
 
     //
     // Utils

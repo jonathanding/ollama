@@ -748,8 +748,7 @@ struct ggml_backend_sched {
 
     struct ggml_context * ctx;
 
-    ggml_backend_sched_eval_callback callback_eval;
-    void * callback_eval_user_data;
+    bool timing_enabled;
 
     char * context_buffer;
     size_t context_buffer_size;
@@ -1613,42 +1612,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
-        if (!sched->callback_eval) {
+        {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph, sched->batch_size);
             if (ec != GGML_STATUS_SUCCESS) {
                 return ec;
-            }
-        } else {
-            // similar to ggml_backend_compare_graph_backend
-            for (int j0 = 0; j0 < split->graph.n_nodes; j0++) {
-                struct ggml_tensor * t = split->graph.nodes[j0];
-
-                // check if the user needs data from this node
-                bool need = sched->callback_eval(t, true, sched->callback_eval_user_data);
-
-                int j1 = j0;
-
-                // determine the range [j0, j1] of nodes that can be computed together
-                while (!need && j1 < split->graph.n_nodes - 1) {
-                    t = split->graph.nodes[++j1];
-                    need = sched->callback_eval(t, true, sched->callback_eval_user_data);
-                }
-
-                struct ggml_cgraph gv = ggml_graph_view(&split->graph, j0, j1 + 1);
-
-                enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv, sched->batch_size);
-                if (ec != GGML_STATUS_SUCCESS) {
-                    return ec;
-                }
-
-                // TODO: pass backend to the callback, then the user can decide if they want to synchronize
-                ggml_backend_synchronize(split_backend);
-
-                if (need && !sched->callback_eval(t, false, sched->callback_eval_user_data)) {
-                    break;
-                }
-
-                j0 = j1;
             }
         }
 
@@ -1894,10 +1861,101 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
     }
 }
 
-void ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data) {
-    GGML_ASSERT(sched);
-    sched->callback_eval = callback;
-    sched->callback_eval_user_data = user_data;
+// --- Native per-node timing API ---
+
+void ggml_backend_set_timing(ggml_backend_t backend, bool enabled) {
+    backend->timing_enabled = enabled;
+}
+
+void ggml_backend_sched_set_timing(ggml_backend_sched_t sched, bool enabled) {
+    sched->timing_enabled = enabled;
+    for (int i = 0; i < sched->n_backends; i++) {
+        ggml_backend_set_timing(sched->backends[i], enabled);
+    }
+}
+
+int ggml_backend_sched_get_split_start(ggml_backend_sched_t sched, int split_id) {
+    GGML_ASSERT(split_id >= 0 && split_id < sched->n_splits);
+    return sched->splits[split_id].i_start;
+}
+
+int ggml_backend_sched_get_split_n_nodes(ggml_backend_sched_t sched, int split_id) {
+    GGML_ASSERT(split_id >= 0 && split_id < sched->n_splits);
+    return sched->splits[split_id].graph.n_nodes;
+}
+
+int ggml_backend_sched_get_split_backend_id(ggml_backend_sched_t sched, int split_id) {
+    GGML_ASSERT(split_id >= 0 && split_id < sched->n_splits);
+    return sched->splits[split_id].backend_id;
+}
+
+int ggml_backend_sched_get_split_timing(
+        ggml_backend_sched_t sched, int split_id,
+        uint64_t * timing_out, int capacity) {
+    GGML_ASSERT(split_id >= 0 && split_id < sched->n_splits);
+    struct ggml_backend_sched_split * split = &sched->splits[split_id];
+    ggml_backend_t backend = sched->backends[split->backend_id];
+
+    if (!backend->timing_enabled) {
+        memset(timing_out, 0, capacity * sizeof(uint64_t));
+        return 0;
+    }
+
+    // Dispatch to backend-specific timing collection.
+    // Each backend stores timing in its own context.
+    // The backend's collect_timing function fills timing_out with per-node
+    // elapsed nanoseconds for nodes in this split's sub-graph.
+    //
+    // For backends that don't support timing (e.g., CUDA), this returns 0
+    // and timing_out is zeroed.
+    int n_nodes = split->graph.n_nodes;
+    int count = n_nodes < capacity ? n_nodes : capacity;
+
+    // Try backend-specific collection via name dispatch
+    const char * name = ggml_backend_name(backend);
+    if (strncmp(name, "Vulkan", 6) == 0) {
+        extern int ggml_vk_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity);
+        return ggml_vk_collect_timing(backend, timing_out, count);
+    }
+    if (strcmp(name, "CPU") == 0) {
+        extern int ggml_cpu_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity);
+        return ggml_cpu_collect_timing(backend, timing_out, count);
+    }
+
+    // Unsupported backend — return zeros
+    memset(timing_out, 0, count * sizeof(uint64_t));
+    return 0;
+}
+
+struct ggml_cgraph * ggml_backend_sched_get_graph(ggml_backend_sched_t sched) {
+    return &sched->graph;
+}
+
+void ggml_node_get_info(struct ggml_tensor * node, struct ggml_node_info * out) {
+    out->op_name     = ggml_op_name(node->op);
+    out->tensor_name = node->name;
+    out->dtype_name  = ggml_type_name(node->type);
+
+    // Backend name from buffer
+    if (node->buffer) {
+        out->backend_name = ggml_backend_buffer_name(node->buffer);
+    } else {
+        out->backend_name = "unknown";
+    }
+
+    for (int i = 0; i < 4; i++) {
+        out->shape[i] = node->ne[i];
+    }
+
+    out->n_srcs = 0;
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        if (node->src[i]) {
+            out->src_names[i] = node->src[i]->name;
+            out->n_srcs = i + 1;
+        } else {
+            out->src_names[i] = NULL;
+        }
+    }
 }
 
 int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {
