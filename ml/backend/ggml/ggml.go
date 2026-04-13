@@ -149,7 +149,7 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 
 	// moeExpertRE matches MoE expert weight tensors within a block.
 	// Pattern mirrors llama.cpp's LAYER_FRACTION_MOE pattern.
-	var moeExpertRE = regexp.MustCompile(`\.ffn_(up|down|gate)_(ch_)?exps$`)
+	var moeExpertRE = regexp.MustCompile(`\.ffn_(up|down|gate)_(ch_)?exps(\.weight)?$`)
 	isMoEExpertTensor := func(name string) bool {
 		return moeExpertRE.MatchString(name)
 	}
@@ -243,6 +243,7 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 				}
 			}
 		}
+
 		return cpuDeviceBufferType
 	}
 
@@ -340,6 +341,11 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 				btDeviceMemory[bt].Weights[layer] += uint64(size)
 				if isMoEExpertTensor(t.source.Name) {
 					btDeviceMemory[bt].MoEWeights[layer] += uint64(size)
+					logutil.Trace("moe split: tracked MoE tensor",
+						"name", t.source.Name,
+						"layer", layer,
+						"size", format.HumanBytes2(uint64(size)),
+						"buffer", C.GoString(C.ggml_backend_buft_name(bt)))
 				}
 			}
 
