@@ -1734,6 +1734,10 @@ struct ggml_backend_vk_context {
     std::vector<ggml_tensor *> query_nodes;
     int32_t num_queries {};
     int32_t query_idx {};
+
+    // Native timing (coexists with perf_logger)
+    std::vector<uint64_t> node_timing_ns;
+    int timing_query_count {};  // number of timestamps inserted this compute
 };
 
 static void * const vk_ptr_base = (void *)(uintptr_t) 0x1000;  // NOLINT
@@ -13152,8 +13156,10 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     bool first_node_in_batch = true; // true if next node will be first node in a batch
     int submit_node_idx = 0; // index to first node in a batch
 
+    bool need_timestamps = vk_perf_logger_enabled || backend->timing_enabled;
+
     vk_context compute_ctx;
-    if (vk_perf_logger_enabled) {
+    if (need_timestamps) {
         // allocate/resize the query pool
         if (ctx->num_queries < cgraph->n_nodes + 1) {
             if (ctx->query_pool) {
@@ -13166,6 +13172,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
             ctx->num_queries = query_create_info.queryCount;
             ctx->query_fusion_names.resize(ctx->num_queries);
             ctx->query_nodes.resize(ctx->num_queries);
+            ctx->node_timing_ns.resize(ctx->num_queries);
         }
 
         ctx->device->device.resetQueryPool(ctx->query_pool, 0, cgraph->n_nodes+1);
@@ -13291,7 +13298,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
         bool enqueued = ggml_vk_build_graph(ctx, cgraph, i, cgraph->nodes[submit_node_idx], submit_node_idx, i + ctx->num_additional_fused_ops >= last_node, almost_ready, submit);
 
-        if (vk_perf_logger_enabled && enqueued) {
+        if (need_timestamps && enqueued) {
             if (ctx->compute_ctx.expired()) {
                 compute_ctx = ggml_vk_create_context(ctx, ctx->compute_cmd_pool);
                 ctx->compute_ctx = compute_ctx;
@@ -13330,7 +13337,10 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
 
     ctx->last_total_mul_mat_bytes = total_mul_mat_bytes;
 
-    if (vk_perf_logger_enabled) {
+    if (vk_perf_logger_enabled && !backend->timing_enabled) {
+        // Perf logger uses synchronous read — only when native timing is NOT enabled
+        // (native timing reads asynchronously after Go-side sync)
+
         // End the command buffer and submit/wait
         GGML_ASSERT(!ctx->compute_ctx.expired());
         compute_ctx = ctx->compute_ctx.lock();
@@ -13352,14 +13362,61 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
         ctx->perf_logger->print_timings();
     }
 
+    if (backend->timing_enabled) {
+        // Native timing: async submit of final compute context.
+        // When both perf_logger and timing are enabled, native timing takes precedence
+        // (perf_logger's synchronous read is skipped above to avoid GPU stall).
+        //
+        // IMPORTANT: do NOT pass ctx->device->fence here — synchronize() will use that
+        // fence via an empty submit. Passing it here would cause double-use of an
+        // unsignaled fence (Vulkan validation error).
+        if (!ctx->compute_ctx.expired()) {
+            compute_ctx = ctx->compute_ctx.lock();
+            ggml_vk_ctx_end(compute_ctx);
+            ggml_vk_submit(compute_ctx, {});
+            ctx->submit_pending = true;
+        }
+        // else: all work was already submitted via periodic batches (submit_pending already true)
+
+        ctx->timing_query_count = ctx->query_idx;
+    }
+
     if (!ctx->device->support_async) {
         ggml_vk_synchronize(ctx);
     }
 
     return GGML_STATUS_SUCCESS;
 
-    UNUSED(backend);
     UNUSED(batch_size);
+}
+
+// Called by ggml_backend_sched_get_split_timing after Go-side sync.
+// At this point, all fences are signaled and query pool results are valid.
+extern "C" int ggml_vk_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity) {
+    ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+
+    if (ctx->timing_query_count < 2 || !ctx->query_pool) {
+        memset(timing_out, 0, capacity * sizeof(uint64_t));
+        return 0;
+    }
+
+    // Read timestamps from query pool (fences already signaled)
+    std::vector<uint64_t> timestamps(ctx->timing_query_count);
+    VK_CHECK(ctx->device->device.getQueryPoolResults(
+        ctx->query_pool, 0, ctx->timing_query_count,
+        ctx->timing_query_count * sizeof(uint64_t),
+        timestamps.data(), sizeof(uint64_t),
+        vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait),
+        "collect_timing getQueryPoolResults");
+
+    double period = ctx->device->properties.limits.timestampPeriod;
+    int count = (ctx->timing_query_count - 1) < capacity ? (ctx->timing_query_count - 1) : capacity;
+
+    for (int i = 0; i < count; i++) {
+        timing_out[i] = (uint64_t)((timestamps[i + 1] - timestamps[i]) * period);
+    }
+
+    return count;
 }
 
 // Sort the graph for improved parallelism.
