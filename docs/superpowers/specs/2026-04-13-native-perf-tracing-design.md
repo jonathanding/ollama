@@ -84,13 +84,42 @@ CUDA or other backends: `get_split_timing()` returns zeros. Go side sees 0 and s
 bool timing_enabled;   // set by Go side
 ```
 
-**Modify `compute_splits()`:** Delete the `if (sched->callback_eval)` branch. The remaining path is unchanged — one `ggml_backend_graph_compute_async()` call per split. Timing data collection happens inside each backend's `graph_compute` implementation, gated on `timing_enabled` propagated through the backend context.
+**Modify `compute_splits()`:** Delete the `if (sched->callback_eval)` branch. The remaining path is unchanged — one `ggml_backend_graph_compute_async()` call per split. Timing data collection happens inside each backend's `graph_compute` implementation, gated on each backend's own `timing_enabled` flag.
+
+#### timing_enabled 传播机制
+
+backends 没有 sched 的反向指针（`ggml_backend` struct 只有 `void* context`，无 sched 字段），因此 `sched->timing_enabled` 无法直接被 backend 读取。解决方案：**每个 backend 维护独立的 `timing_enabled` 标志**，由 sched 统一传播：
+
+```c
+// ggml-backend-impl.h — ggml_backend struct 新增字段
+bool timing_enabled;
+
+// ggml-backend.cpp — 新增函数
+void ggml_backend_set_timing(ggml_backend_t backend, bool enabled) {
+    backend->timing_enabled = enabled;
+}
+
+// ggml_backend_sched_set_timing 传播到所有 backends
+void ggml_backend_sched_set_timing(ggml_backend_sched_t sched, bool enabled) {
+    sched->timing_enabled = enabled;
+    for (int i = 0; i < sched->n_backends; i++) {
+        ggml_backend_set_timing(sched->backends[i], enabled);
+    }
+}
+```
+
+各 backend 的 `graph_compute` 实现通过 `backend->timing_enabled` 判断是否收集 timing 数据。这避免了修改 `graph_compute_async` 的函数签名，也避免了给 backend struct 添加 sched 反向指针。
+
+**注意：** `backend->timing_enabled` 是 per-physical-device 全局的。Go 层的 `backends` map 是 `sync.OnceFunc` 初始化的单例（ggml.go:48-70），所有使用同一物理设备的 `Backend` 实例共享同一 `ggml_backend_t`。在 Ollama 的架构中，同一时刻通常只有一个模型在一个设备上运行，因此不存在冲突。如果未来支持多模型并行推理且需要独立的 timing 开关，需改为 per-sched 标志。
 
 ### 2.2 New Public API (ggml-backend.h)
 
 ```c
-// Enable/disable timing collection
+// Enable/disable timing collection (propagates to all backends)
 void ggml_backend_sched_set_timing(ggml_backend_sched_t sched, bool enabled);
+
+// Per-backend timing flag (called by sched_set_timing, or directly for testing)
+void ggml_backend_set_timing(ggml_backend_t backend, bool enabled);
 
 // Query split structure (read-only, valid after graph_compute)
 int  ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched);
@@ -122,36 +151,90 @@ void ggml_node_get_info(struct ggml_tensor * node, struct ggml_node_info * out);
 
 Existing infrastructure: query pool, `vkCmdWriteTimestamp`, timestamp delta calculation in the perf logger code path.
 
-**Changes (~80 lines in ggml-vulkan.cpp):**
+**关键约束：** 现有的 `GGML_VK_PERF_LOGGER` 实现在 `graph_compute` **内部** 调用 `waitForFences` + `getQueryPoolResults`（ggml-vulkan.cpp:13333-13353），使整个 compute 变成同步的。新的 timing 机制**绝不能**这样做——必须拆分为两步：
 
-- Add `uint64_t * node_timing_ns` array to the Vulkan compute context (alongside existing `query_pool`)
-- After graph completes and timestamps are read back (`getQueryPoolResults`), compute deltas and store per-node: `node_timing_ns[i] = (timestamps[i+1] - timestamps[i]) * timestampPeriod`
-- Gate timestamp query insertion on `timing_enabled` (similar to existing `vk_perf_logger_enabled` check)
-- `GGML_VK_PERF_LOGGER` stderr output remains as independent feature — the two can coexist
+#### 第一步：异步 timestamp 插入（graph_compute 内部）
+
+- 当 `backend->timing_enabled` 为 true 时，在每个 node 的 dispatch 后插入 `vkCmdWriteTimestamp`
+- 复用现有的 query pool 和 `query_nodes[]` 数组
+- **不调用 `waitForFences`**，command buffer 正常提交，GPU 异步执行
+- 这一步在 `ggml_backend_graph_compute_async()` 内完成
+
+#### 第二步：延迟读取（Go-side sync 之后）
+
+- 新增函数 `ggml_vk_collect_timing(backend, uint64_t* timing_out, int capacity)`
+- 由 `ggml_backend_sched_get_split_timing()` 在内部调用（对该 split 的 backend dispatch）
+- 此时 Go 层已经调用了 `ggml_backend_sched_synchronize()`，所有 fences 已 signaled
+- 调用 `getQueryPoolResults` 读回 timestamp 值
+- 计算 delta：`timing_out[i] = (timestamps[i+1] - timestamps[i]) * timestampPeriod`
+- 结果存入调用者分配的 `timing_out` 数组
+
+#### 存储和生命周期
+
+- 在 `ggml_backend_vk_context` struct（ggml-vulkan.cpp:1678）中新增 `std::vector<uint64_t> node_timing_ns`，与现有 `query_pool`、`query_nodes`（std::vector）同级
+- 在第一步 timestamp 插入时，`node_timing_ns.resize(num_queries)` 与 `query_nodes` 同步 resize
+- 在第二步 `ggml_vk_collect_timing()` 中填充 delta 值
+- context 销毁时 `std::vector` 自动释放，无需手动管理
+- timestamp 数据在 `ggml_backend_sched_synchronize()` 后可读，在下一次 `graph_compute` 时被覆写
+
+**Changes (~100 lines in ggml-vulkan.cpp):**
+
+- Gate timestamp query insertion on `backend->timing_enabled`（与现有 `vk_perf_logger_enabled` 检查并行）
+- 新增 `ggml_vk_collect_timing()` 函数：读 query pool + 计算 delta
+- `GGML_VK_PERF_LOGGER` stderr output 保持独立——两者可以共存
 
 ### 2.4 CPU Backend Changes
 
 **Changes (~30 lines in ggml-cpu.c):**
 
-CPU compute is synchronous — `ggml_compute_forward()` blocks until the node is done. Per-node timing is trivial:
+CPU compute 使用线程池实现数据并行：每个 node 由多个线程并行处理同一个 node 的不同数据分片，线程之间通过 `ggml_barrier()` 同步（ggml-cpu.c:2961）。单个线程的 `ggml_compute_forward()` 返回只表示该线程完成了自己的分片，而非整个 node 完成。
+
+因此 timing 必须在 **thread 0 上**、**barrier-to-barrier** 测量，才能捕获整个 node 的实际 wall time：
 
 ```c
-// Inside graph_compute loop
-for (int i = 0; i < cgraph->n_nodes; i++) {
+// Inside ggml_graph_compute_thread() — thread 0 only
+// ggml-cpu.c per-node loop (lines 2940-2963)
+for (int node_n = 0; node_n < cgraph->n_nodes; node_n++) {
+    struct ggml_tensor * node = cgraph->nodes[node_n];
+
     uint64_t t0 = 0;
-    if (timing_enabled) {
+    if (ith == 0 && backend->timing_enabled) {
         t0 = ggml_time_us();
     }
 
-    ggml_compute_forward(node);
+    ggml_compute_forward(&params, node);
 
-    if (timing_enabled) {
-        cpu_ctx->node_timing_ns[i] = (ggml_time_us() - t0) * 1000;
+    ggml_barrier(state->threadpool);  // 所有线程完成此 node
+
+    if (ith == 0 && backend->timing_enabled) {
+        cpu_ctx->node_timing_ns[node_n] = (ggml_time_us() - t0) * 1000;
     }
 }
 ```
 
-Overhead: ~20ns per `ggml_time_us()` call. No synchronization points added, no thread pool disruption.
+**关键点：**
+- `ggml_barrier()` 已存在于每个 node 之间（line 2961），不是新增的同步点
+- 只有 thread 0 执行 timing 代码，其他线程零额外开销
+- `t0` 在 barrier 之前采样（包含 thread 0 自身的 compute 时间），`t_end` 在 barrier 之后采样（所有线程都完成）
+- 测量的是 node 级 wall time（barrier-to-barrier），精确反映该 node 占用 CPU 线程池的实际时间
+
+#### 存储
+
+在 `ggml_backend_cpu_context` struct（ggml-cpu.cpp:99-108）中新增两个字段：
+
+```c
+struct ggml_backend_cpu_context {
+    // ... existing fields ...
+    uint64_t * node_timing_ns;   // per-node timing array, NULL when timing disabled
+    int        timing_capacity;  // allocated capacity (number of nodes)
+};
+```
+
+- 在 `graph_compute` 开头，若 `backend->timing_enabled`，检查 capacity 并按需 realloc：`if (cgraph->n_nodes > cpu_ctx->timing_capacity) { ... }`
+- `ggml_backend_cpu_free()`（line 116）中释放：`delete[] cpu_ctx->node_timing_ns;`
+- timing 未启用时两个字段保持为 NULL/0，零开销
+
+Overhead: ~20ns per `ggml_time_us()` call (thread 0 only). 不添加任何新的同步点，不改变线程池行为。
 
 ### 2.5 llama.cpp API Wrappers
 
@@ -272,7 +355,14 @@ for i := range events {
 }
 ```
 
-For Vulkan with pipeline overlap, consecutive t_start/t_end bars represent a linearized approximation. The relative proportions are accurate (GPU timestamps are precise), and `sum(elapsed)` equals actual GPU compute time. Timeline visualization displays correctly.
+对于 CPU backend，节点严格顺序执行（barrier 保证），linearization 完全准确。
+
+对于 Vulkan backend，GPU 存在 pipeline overlap（节点 A 和 B 可能部分并行执行）。`vkCmdWriteTimestamp`（`VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT`）记录的是序列化的完成时间点，delta[i] = timestamp[i+1] - timestamp[i] 反映的是两个完成点之间的 wall time 间隔，而非单个 kernel 的独立执行时间。因此：
+
+- `sum(elapsed)` = 整个序列的 GPU wall time（首节点开始到末节点完成），**不是** kernel 独立执行时间之和
+- 个别节点的 delta 是近似值：pipeline overlap 下，后续节点的 delta 可能小于其实际执行时间（因为部分执行与前一节点重叠）
+- **相对比例仍然准确**：delta 较大的节点确实是瓶颈，timeline 可视化正确反映热点分布
+- 这与旧的 eval callback 机制行为一致（旧机制强制同步，消除了 overlap，反而使 delta 失真为非 pipeline 状态下的时间）
 
 ### 3.3 CGO Bridge Files
 
@@ -459,6 +549,7 @@ s.traceWriter.Flush(requestID, s.modelPath)
 | `ggml-cpu.c` | Add per-node clock_gettime wrapper (~30 lines) |
 | `llama.h` | Add `llama_context_*_timing` wrapper declarations |
 | `llama-context.cpp` | Implement wrappers (~7 one-line delegations) |
+| `llama/patches/0018-ggml-Add-batch-size-hint.patch` | 重新生成 — 当前 line 103 引用 `sched->callback_eval`，删除 callback 后 patch 会失败 |
 
 ### 5.5 Testing Strategy
 
@@ -509,7 +600,8 @@ s.traceWriter.Flush(requestID, s.modelPath)
 |------|------------|
 | Upstream ggml merge conflicts (sched struct change) | Changes are minimal (1 bool field + delete 2 fields). Split API functions are additive. |
 | Vulkan timestamp accuracy on some GPUs | `timestampPeriod` is spec-mandated. Fall back to wall-clock if `timestampValidBits == 0`. |
-| Graph node pointers invalid after sched_reset | CollectTiming is called before sched_reset in the Go flow. Verified in both runner paths. |
+| Graph node pointers invalid after next compute | CollectTiming is called after sync but before the next `graph_compute` (which calls `split_graph` → overwrites splits). `sched_reset()` 本身不清除 splits（已验证：只重置 hash_set 和 flags），数据安全。 |
+| CGO 调用开销（~150ns/call × 500 nodes）| 当前设计每个 node 一次 `ggml_node_get_info` CGO 调用。若成为瓶颈，可改为 batch API：`ggml_backend_sched_get_split_timing_batch()` 一次返回整个 split 的 timing + metadata，将 500 次 CGO 调用降为 ~10 次（每 split 一次）。Phase 1 先用简单的 per-node 调用，性能不达标再优化。 |
 
 ### Open Questions (Resolved)
 
