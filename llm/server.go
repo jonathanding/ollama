@@ -1111,6 +1111,21 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 
 			gpuLayersMoE := assignLayers(adjustedLayers, adjustedGPUs, requireFull, s.options.NumGPU, 0)
 
+			// Honor user-specified moe GPU layer count exactly.
+			// assignLayers always greedily fills; cap it when the user set a hard limit.
+			if source == "user-override" {
+				if moeGPUCount == 0 {
+					gpuLayersMoE = ml.GPULayersList{}
+				} else if gpuLayersMoE.Sum() > moeGPUCount {
+					var all []int
+					for _, g := range gpuLayersMoE {
+						all = append(all, g.Layers...)
+					}
+					slices.Sort(all)
+					gpuLayersMoE = ml.GPULayersList{{DeviceID: gpuLayersMoE[0].DeviceID, Layers: all[:moeGPUCount]}}
+				}
+			}
+
 			// denseGPULayers: all layers on the same GPU(s) used by gpuLayersMoE
 			allLayerIndices := make([]int, len(layers))
 			for i := range allLayerIndices {
