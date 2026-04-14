@@ -734,6 +734,9 @@ func (s *Server) computeBatch(activeBatch batchState) {
 		CollectTiming(time.Time) []profiler.OpEvent
 	}); ok {
 		if events := ct.CollectTiming(passStart); len(events) > 0 {
+			for i := range events {
+				events[i].PassID = activeBatch.id
+			}
 			s.traceWriter.WriteOps(events)
 		}
 	}

@@ -133,6 +133,10 @@ extern "C" {
 
         // (optional) frees memory from intermediate buffers that was allocated either by graph_compute or graph_reserve
         void                      (*reset)             (ggml_backend_t backend);
+
+        // (optional) collect per-node timing data after graph_compute + synchronize
+        // fills timing_out with elapsed nanoseconds per node, returns number of nodes written
+        int                       (*collect_timing)    (ggml_backend_t backend, uint64_t * timing_out, int capacity);
     };
 
     struct ggml_backend {

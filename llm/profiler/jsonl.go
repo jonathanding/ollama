@@ -13,6 +13,7 @@ import (
 
 type JSONLWriter struct {
 	mu     sync.Mutex
+	wg     sync.WaitGroup
 	lines  [][]byte
 	outDir string
 	seqID  int
@@ -25,10 +26,10 @@ func newJSONLWriter(outDir string) *JSONLWriter {
 func (w *JSONLWriter) WriteOps(ops []OpEvent) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	for i := range ops {
-		ops[i].SeqID = w.seqID
+	for _, op := range ops {
+		op.SeqID = w.seqID
 		w.seqID++
-		line, _ := json.Marshal(ops[i])
+		line, _ := json.Marshal(op)
 		w.lines = append(w.lines, line)
 	}
 }
@@ -64,7 +65,9 @@ func (w *JSONLWriter) Flush(requestID, model string) error {
 		return nil
 	}
 
+	w.wg.Add(1)
 	go func() {
+		defer w.wg.Done()
 		ts := time.Now().UnixMilli()
 		safe := strings.Map(func(r rune) rune {
 			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
@@ -88,4 +91,7 @@ func (w *JSONLWriter) Flush(requestID, model string) error {
 	return nil
 }
 
-func (w *JSONLWriter) Close() error { return nil }
+func (w *JSONLWriter) Close() error {
+	w.wg.Wait()
+	return nil
+}

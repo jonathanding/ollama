@@ -89,12 +89,8 @@ struct ggml_riscv_arch_features_type {
 } ggml_riscv_arch_features = { 0 };
 #endif
 
-// Timing state set by ggml_backend_cpu_graph_compute, read by thread 0
-static uint64_t * ggml_cpu_node_timing_ns = NULL;
-
-void ggml_cpu_set_timing_state(uint64_t * timing_ns) {
-    ggml_cpu_node_timing_ns = timing_ns;
-}
+// Per-node timing is passed through ggml_cplan::node_timing_ns
+// (set by the CPU backend, read by thread 0 during compute)
 
 #if defined(_WIN32)
 
@@ -2953,7 +2949,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
         }
 
         uint64_t t0 = 0;
-        if (state->ith == 0 && ggml_cpu_node_timing_ns) {
+        if (state->ith == 0 && cplan->node_timing_ns) {
             t0 = ggml_time_us();
         }
 
@@ -2974,7 +2970,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
         }
 
         if (state->ith == 0 && t0 != 0) {
-            ggml_cpu_node_timing_ns[node_n] = (ggml_time_us() - t0) * 1000;
+            cplan->node_timing_ns[node_n] = (ggml_time_us() - t0) * 1000;
         }
     }
 

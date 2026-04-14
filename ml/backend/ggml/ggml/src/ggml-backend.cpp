@@ -1901,7 +1901,7 @@ int ggml_backend_sched_get_split_timing(
         return 0;
     }
 
-    // Dispatch to backend-specific timing collection.
+    // Dispatch to backend-specific timing collection via interface.
     // Each backend stores timing in its own context.
     // The backend's collect_timing function fills timing_out with per-node
     // elapsed nanoseconds for nodes in this split's sub-graph.
@@ -1911,19 +1911,9 @@ int ggml_backend_sched_get_split_timing(
     int n_nodes = split->graph.n_nodes;
     int count = n_nodes < capacity ? n_nodes : capacity;
 
-    // Try backend-specific collection via name dispatch
-    const char * name = ggml_backend_name(backend);
-#ifdef GGML_USE_VULKAN
-    if (strncmp(name, "Vulkan", 6) == 0) {
-        extern int ggml_vk_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity);
-        return ggml_vk_collect_timing(backend, timing_out, count);
+    if (backend->iface.collect_timing) {
+        return backend->iface.collect_timing(backend, timing_out, count);
     }
-#endif
-    if (strcmp(name, "CPU") == 0) {
-        extern int ggml_cpu_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity);
-        return ggml_cpu_collect_timing(backend, timing_out, count);
-    }
-    GGML_UNUSED(name);
 
     // Unsupported backend — return zeros
     memset(timing_out, 0, count * sizeof(uint64_t));

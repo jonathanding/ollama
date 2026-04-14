@@ -13390,9 +13390,9 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
     UNUSED(batch_size);
 }
 
-// Called by ggml_backend_sched_get_split_timing after Go-side sync.
+// Called via backend iface after Go-side sync.
 // At this point, all fences are signaled and query pool results are valid.
-extern "C" int ggml_vk_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity) {
+static int ggml_vk_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity) {
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
     if (ctx->timing_query_count < 2 || !ctx->query_pool) {
@@ -13669,6 +13669,10 @@ static ggml_backend_i ggml_backend_vk_interface = {
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
     /* .graph_optimize          = */ ggml_vk_graph_optimize,
+    /* .graph_reserve           = */ NULL,
+    /* .buffer_size             = */ NULL,
+    /* .reset                   = */ NULL,
+    /* .collect_timing          = */ ggml_vk_collect_timing,
 };
 
 static ggml_guid_t ggml_backend_vk_guid() {

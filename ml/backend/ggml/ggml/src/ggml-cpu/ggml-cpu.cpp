@@ -169,16 +169,14 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
     GGML_UNUSED(backend);
 }
 
-// Defined in ggml-cpu.c — sets the per-thread timing pointer
-extern "C" void ggml_cpu_set_timing_state(uint64_t * timing_ns);
-
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph, int batch_size) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
-    // Ensure timing array capacity
+    // Ensure timing array capacity (allocate new buffer before freeing old to be OOM-safe)
     if (backend->timing_enabled && cgraph->n_nodes > cpu_ctx->timing_capacity) {
+        uint64_t * new_buf = new uint64_t[cgraph->n_nodes]();
         delete[] cpu_ctx->node_timing_ns;
-        cpu_ctx->node_timing_ns = new uint64_t[cgraph->n_nodes]();
+        cpu_ctx->node_timing_ns = new_buf;
         cpu_ctx->timing_capacity = cgraph->n_nodes;
     }
 
@@ -198,12 +196,12 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
     cplan.abort_callback      = cpu_ctx->abort_callback;
     cplan.abort_callback_data = cpu_ctx->abort_callback_data;
 
-    // Pass timing array to the compute thread
+    // Pass timing array through cplan (per-instance, not global static)
     if (backend->timing_enabled) {
         memset(cpu_ctx->node_timing_ns, 0, cgraph->n_nodes * sizeof(uint64_t));
-        ggml_cpu_set_timing_state(cpu_ctx->node_timing_ns);
+        cplan.node_timing_ns = cpu_ctx->node_timing_ns;
     } else {
-        ggml_cpu_set_timing_state(NULL);
+        cplan.node_timing_ns = NULL;
     }
 
     return ggml_graph_compute(cgraph, &cplan);
@@ -211,8 +209,7 @@ static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, s
     GGML_UNUSED(batch_size);
 }
 
-// Called by ggml_backend_sched_get_split_timing via name dispatch
-int ggml_cpu_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity) {
+static int ggml_cpu_collect_timing(ggml_backend_t backend, uint64_t * timing_out, int capacity) {
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
     if (!cpu_ctx->node_timing_ns) {
         memset(timing_out, 0, capacity * sizeof(uint64_t));
@@ -238,6 +235,10 @@ static const struct ggml_backend_i ggml_backend_cpu_i = {
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
     /* .graph_optimize          = */ NULL,
+    /* .graph_reserve           = */ NULL,
+    /* .buffer_size             = */ NULL,
+    /* .reset                   = */ NULL,
+    /* .collect_timing          = */ ggml_cpu_collect_timing,
 };
 
 static ggml_guid_t ggml_backend_cpu_guid(void) {

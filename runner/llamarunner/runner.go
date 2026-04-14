@@ -513,6 +513,9 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 
 	// Pull per-node timing data collected during Decode
 	if events := s.lc.CollectTiming(passStart); len(events) > 0 {
+		for i := range events {
+			events[i].PassID = batchID
+		}
 		s.traceWriter.WriteOps(events)
 	}
 
@@ -959,7 +962,9 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 		go s.loadModel(params, s.modelPath, req.LoraPath, req.ProjectorPath, req.KvSize, req.KvCacheType, req.FlashAttention, req.NumThreads, req.MultiUserCache)
 
 	case llm.LoadOperationClose:
-		// No-op for us
+		if s.traceWriter != nil {
+			s.traceWriter.Close()
+		}
 		if err := json.NewEncoder(w).Encode(&llm.LoadResponse{}); err != nil {
 			http.Error(w, fmt.Sprintf("failed to encode response: %v", err), http.StatusInternalServerError)
 		}
