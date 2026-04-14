@@ -10,6 +10,7 @@ def build_summary(
     source_file: str,
     model: str | None = None,
     dag_pass: int | None = None,
+    meta: dict | None = None,
 ) -> dict:
     total_ns = int((ops["t_end"] - ops["t_start"]).sum()) if len(ops) > 0 else 0
 
@@ -164,13 +165,19 @@ def build_summary(
             ts_ms = int(ts_start_col[0])
             timestamp = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
 
+    summary_meta = {
+        "source_file": source_file, "model": model,
+        "timestamp": timestamp,
+        "total_ops": len(ops), "total_passes": len(passes),
+        "total_wall_ms": total_ms,
+    }
+    if meta:
+        summary_meta["request_id"] = meta.get("request_id")
+        summary_meta["input_tokens"] = meta.get("input_tokens")
+        summary_meta["output_tokens"] = meta.get("output_tokens")
+
     return {
-        "meta": {
-            "source_file": source_file, "model": model,
-            "timestamp": timestamp,
-            "total_ops": len(ops), "total_passes": len(passes),
-            "total_wall_ms": total_ms,
-        },
+        "meta": summary_meta,
         "timing": {
             "total_ms": total_ms, "prefill_ms": prefill_ms,
             "prefill_tokens": prefill_tokens, "decode_avg_ms": decode_avg_ms,

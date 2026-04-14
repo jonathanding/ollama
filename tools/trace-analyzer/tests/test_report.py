@@ -8,7 +8,7 @@ from trace_analyzer.report import render_single, render_compare
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_trace.jsonl"
 
 def test_single_report_has_sections():
-    ops, passes = parse_trace(FIXTURE)
+    ops, passes, _ = parse_trace(FIXTURE)
     s = build_summary(ops, passes, source_file="test.jsonl")
     md = render_single(s)
     assert "## Top Operators" in md
@@ -16,13 +16,13 @@ def test_single_report_has_sections():
     assert "## Backend Distribution" in md
 
 def test_single_report_with_model():
-    ops, passes = parse_trace(FIXTURE)
+    ops, passes, _ = parse_trace(FIXTURE)
     s = build_summary(ops, passes, source_file="test.jsonl", model="llama3:8b")
     md = render_single(s)
     assert "llama3:8b" in md
 
 def test_compare_report_has_labels():
-    ops, passes = parse_trace(FIXTURE)
+    ops, passes, _ = parse_trace(FIXTURE)
     s1 = build_summary(ops, passes, source_file="a.jsonl")
     s2 = build_summary(ops, passes, source_file="b.jsonl")
     c = build_compare(s1, s2, labels=["X", "Y"])

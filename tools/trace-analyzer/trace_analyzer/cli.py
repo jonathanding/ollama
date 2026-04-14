@@ -44,10 +44,12 @@ def summary(trace_file: Path, output: Path | None, model: str | None, dag_pass: 
     from .summary import build_summary
 
     click.echo(f"Parsing {trace_file.name}...")
-    ops, passes = parse_trace(trace_file)
+    ops, passes, meta = parse_trace(trace_file)
     click.echo(f"  {_fmt_num(len(ops))} ops across {_fmt_num(len(passes))} passes")
 
-    result = build_summary(ops, passes, source_file=trace_file.name, model=model, dag_pass=dag_pass)
+    if not model and meta:
+        model = meta.get("model")
+    result = build_summary(ops, passes, source_file=trace_file.name, model=model, dag_pass=dag_pass, meta=meta)
 
     n_layers = len(result["layer_stats"])
     top_op = result["op_stats"][0]["op"] if result["op_stats"] else "N/A"
@@ -80,11 +82,11 @@ def compare(trace_a: Path, trace_b: Path, labels: str, output: Path | None, mode
         raise click.BadParameter("Exactly 2 labels required", param_hint="--labels")
 
     click.echo(f"Parsing {trace_a.name} ({label_list[0]})...")
-    ops_a, passes_a = parse_trace(trace_a)
+    ops_a, passes_a, _ = parse_trace(trace_a)
     click.echo(f"  {_fmt_num(len(ops_a))} ops across {_fmt_num(len(passes_a))} passes")
 
     click.echo(f"Parsing {trace_b.name} ({label_list[1]})...")
-    ops_b, passes_b = parse_trace(trace_b)
+    ops_b, passes_b, _ = parse_trace(trace_b)
     click.echo(f"  {_fmt_num(len(ops_b))} ops across {_fmt_num(len(passes_b))} passes")
 
     sa = build_summary(ops_a, passes_a, source_file=trace_a.name, model=model)
@@ -119,16 +121,18 @@ def report(trace_file: Path, output: Path | None, model: str | None, trace_b: Pa
         from .compare import build_compare
         label_list = [l.strip() for l in labels.split(",")] if labels else ["A", "B"]
         click.echo(f"Generating comparison report: {trace_file.name} vs {trace_b.name}...")
-        ops_a, passes_a = parse_trace(trace_file)
-        ops_b, passes_b = parse_trace(trace_b)
+        ops_a, passes_a, _ = parse_trace(trace_file)
+        ops_b, passes_b, _ = parse_trace(trace_b)
         sa = build_summary(ops_a, passes_a, source_file=trace_file.name, model=model)
         sb = build_summary(ops_b, passes_b, source_file=trace_b.name, model=model)
         cmp = build_compare(sa, sb, labels=label_list)
         md = render_compare(cmp)
     else:
         click.echo(f"Generating report for {trace_file.name}...")
-        ops, passes = parse_trace(trace_file)
-        s = build_summary(ops, passes, source_file=trace_file.name, model=model)
+        ops, passes, meta = parse_trace(trace_file)
+        if not model and meta:
+            model = meta.get("model")
+        s = build_summary(ops, passes, source_file=trace_file.name, model=model, meta=meta)
         md = render_single(s)
 
     if output:

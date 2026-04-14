@@ -12,11 +12,13 @@ import (
 )
 
 type JSONLWriter struct {
-	mu     sync.Mutex
-	wg     sync.WaitGroup
-	lines  [][]byte
-	outDir string
-	seqID  int
+	mu           sync.Mutex
+	wg           sync.WaitGroup
+	lines        [][]byte
+	outDir       string
+	seqID        int
+	inputTokens  int
+	outputTokens int
 }
 
 func newJSONLWriter(outDir string) *JSONLWriter {
@@ -42,6 +44,11 @@ func (w *JSONLWriter) WritePassStart(passID int, nTokens int) {
 	w.mu.Lock()
 	w.lines = append(w.lines, line)
 	w.seqID = 0
+	if nTokens > 1 {
+		w.inputTokens += nTokens
+	} else {
+		w.outputTokens += nTokens
+	}
 	w.mu.Unlock()
 }
 
@@ -59,11 +66,24 @@ func (w *JSONLWriter) Flush(requestID, model string) error {
 	w.mu.Lock()
 	lines := w.lines
 	w.lines = nil
+	inputTokens := w.inputTokens
+	outputTokens := w.outputTokens
+	w.inputTokens = 0
+	w.outputTokens = 0
 	w.mu.Unlock()
 
 	if len(lines) == 0 {
 		return nil
 	}
+
+	meta, _ := json.Marshal(map[string]any{
+		"type":          "meta",
+		"model":         model,
+		"request_id":    requestID,
+		"ts":            time.Now().UnixMilli(),
+		"input_tokens":  inputTokens,
+		"output_tokens": outputTokens,
+	})
 
 	w.wg.Add(1)
 	go func() {
@@ -83,6 +103,8 @@ func (w *JSONLWriter) Flush(requestID, model string) error {
 			return
 		}
 		defer f.Close()
+		f.Write(meta)
+		f.Write([]byte{'\n'})
 		for _, line := range lines {
 			f.Write(line)
 			f.Write([]byte{'\n'})

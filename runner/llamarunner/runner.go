@@ -96,6 +96,9 @@ type Sequence struct {
 
 	doneReason llm.DoneReason
 
+	// requestID for trace file naming
+	requestID string
+
 	// logprobs configuration
 	logprobs    bool
 	topLogprobs int
@@ -361,6 +364,8 @@ func (s *Server) removeSequence(seqIndex int, reason llm.DoneReason) {
 	seq.cache.InUse = false
 	s.seqs[seqIndex] = nil
 	s.seqsSem.Release(1)
+
+	s.traceWriter.Flush(seq.requestID, s.modelPath)
 }
 
 func (s *Server) run(ctx context.Context) {
@@ -697,6 +702,7 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to create new sequence: %v", err), http.StatusInternalServerError)
 		return
 	}
+	seq.requestID = requestID
 
 	// Ensure there is a place to put the sequence, released when removed from s.seqs
 	if err := s.seqsSem.Acquire(r.Context(), 1); err != nil {
@@ -738,7 +744,6 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			close(seq.quit)
-			s.traceWriter.Flush(requestID, s.modelPath)
 			return
 		case resp, ok := <-seq.responses:
 			if ok {
@@ -764,7 +769,6 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, fmt.Sprintf("failed to encode final response: %v", err), http.StatusInternalServerError)
 				}
 
-				s.traceWriter.Flush(requestID, s.modelPath)
 				return
 			}
 		}

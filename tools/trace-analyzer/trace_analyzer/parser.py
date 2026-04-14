@@ -6,11 +6,16 @@ import polars as pl
 
 logger = logging.getLogger(__name__)
 
-def parse_trace(path: Path | str) -> tuple[pl.DataFrame, pl.DataFrame]:
+def parse_trace(path: Path | str) -> tuple[pl.DataFrame, pl.DataFrame, dict | None]:
+    """Parse a JSONL trace file.
+
+    Returns (ops_df, passes_df, meta) where meta is the header dict or None.
+    """
     path = Path(path)
     ops: list[dict] = []
     pass_starts: dict[int, dict] = {}
     pass_rows: list[dict] = []
+    meta: dict | None = None
 
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
@@ -24,7 +29,10 @@ def parse_trace(path: Path | str) -> tuple[pl.DataFrame, pl.DataFrame]:
                 continue
 
             t = ev.get("type")
-            if t == "pass_start":
+            if t == "meta":
+                meta = ev
+                continue
+            elif t == "pass_start":
                 pass_starts[ev["pass"]] = {"ts_start": ev["ts"], "n_tokens": ev["n_tokens"]}
             elif t == "pass_end":
                 pid = ev["pass"]
@@ -67,4 +75,4 @@ def parse_trace(path: Path | str) -> tuple[pl.DataFrame, pl.DataFrame]:
         "ts_end": pl.Int64, "n_nodes": pl.Int64, "wall_ms": pl.Int64,
     })
 
-    return ops_df, passes_df
+    return ops_df, passes_df, meta

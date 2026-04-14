@@ -58,31 +58,43 @@ func TestJSONLWriterFlush(t *testing.T) {
 
 	data, _ := os.ReadFile(filepath.Join(dir, entries[0].Name()))
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("expected 4 JSONL lines, got %d", len(lines))
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 JSONL lines (meta + pass_start + 2 ops + pass_end), got %d", len(lines))
+	}
+
+	var meta map[string]any
+	json.Unmarshal([]byte(lines[0]), &meta)
+	if meta["type"] != "meta" {
+		t.Errorf("line 0: expected meta, got %v", meta["type"])
+	}
+	if meta["model"] != "testmodel" {
+		t.Errorf("line 0: expected model=testmodel, got %v", meta["model"])
+	}
+	if meta["request_id"] != "test-req" {
+		t.Errorf("line 0: expected request_id=test-req, got %v", meta["request_id"])
 	}
 
 	var passStart map[string]any
-	json.Unmarshal([]byte(lines[0]), &passStart)
+	json.Unmarshal([]byte(lines[1]), &passStart)
 	if passStart["type"] != "pass_start" {
-		t.Errorf("line 0: expected pass_start, got %v", passStart["type"])
+		t.Errorf("line 1: expected pass_start, got %v", passStart["type"])
 	}
 
 	var op OpEvent
-	json.Unmarshal([]byte(lines[1]), &op)
+	json.Unmarshal([]byte(lines[2]), &op)
 	if op.Type != "op" || op.Op != "MUL_MAT" || op.SeqID != 0 {
-		t.Errorf("line 1: unexpected op %+v", op)
+		t.Errorf("line 2: unexpected op %+v", op)
 	}
 	var op2 OpEvent
-	json.Unmarshal([]byte(lines[2]), &op2)
+	json.Unmarshal([]byte(lines[3]), &op2)
 	if op2.SeqID != 1 {
-		t.Errorf("line 2: expected SeqID=1, got %d", op2.SeqID)
+		t.Errorf("line 3: expected SeqID=1, got %d", op2.SeqID)
 	}
 
 	var passEnd map[string]any
-	json.Unmarshal([]byte(lines[3]), &passEnd)
+	json.Unmarshal([]byte(lines[4]), &passEnd)
 	if passEnd["type"] != "pass_end" {
-		t.Errorf("line 3: expected pass_end, got %v", passEnd["type"])
+		t.Errorf("line 4: expected pass_end, got %v", passEnd["type"])
 	}
 }
 
@@ -103,12 +115,12 @@ func TestJSONLWriterMultiPass(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	data, _ := os.ReadFile(filepath.Join(dir, entries[0].Name()))
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("expected 6 JSONL lines, got %d", len(lines))
+	if len(lines) != 7 {
+		t.Fatalf("expected 7 JSONL lines (meta + 2*(pass_start+op+pass_end)), got %d", len(lines))
 	}
 
 	var op OpEvent
-	json.Unmarshal([]byte(lines[4]), &op)
+	json.Unmarshal([]byte(lines[5]), &op)
 	if op.SeqID != 0 {
 		t.Errorf("pass 1 op: expected SeqID=0, got %d", op.SeqID)
 	}

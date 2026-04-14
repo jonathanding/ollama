@@ -7,7 +7,7 @@ from trace_analyzer.compare import build_compare
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_trace.jsonl"
 
 def _make_two_summaries():
-    ops, passes = parse_trace(FIXTURE)
+    ops, passes, _ = parse_trace(FIXTURE)
     s1 = build_summary(ops, passes, source_file="a.jsonl")
     s2 = build_summary(ops, passes, source_file="b.jsonl")
     return s1, s2
