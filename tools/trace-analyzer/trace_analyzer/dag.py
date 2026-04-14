@@ -167,7 +167,7 @@ def build_dag(ops_df: pl.DataFrame, pass_id: int) -> dict:
             "layer": layer,
             "is_copy": row["op"] in COPY_OPS,
         })
-        for src_name in row.get("srcs", []):
+        for src_name in (row.get("srcs") or []):
             src = node_info.get(src_name)
             if not src:
                 continue
