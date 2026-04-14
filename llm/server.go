@@ -1126,23 +1126,31 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 				}
 			}
 
-			// denseGPULayers: all layers on the same GPU(s) used by gpuLayersMoE
-			allLayerIndices := make([]int, len(layers))
-			for i := range allLayerIndices {
-				allLayerIndices[i] = i
-			}
-			var denseDeviceID ml.DeviceID
-			if len(gpuLayersMoE) > 0 {
-				denseDeviceID = gpuLayersMoE[0].DeviceID
-			} else if len(gpus) > 0 {
-				denseDeviceID = gpus[len(gpus)-1].DeviceID
-			}
-			denseGPULayers = ml.GPULayersList{{
-				DeviceID: denseDeviceID,
-				Layers:   allLayerIndices,
-			}}
+			// If user explicitly disabled MoE split, fall through to standard layout.
+			// Without this, denseGPULayers would put all 49 layers' dense weights on GPU
+			// while MoE experts stay on CPU, triggering op_offload for every layer and
+			// making prefill ~2× slower than the default.
+			if source == "user-override" && moeGPUCount == 0 {
+				slog.Info("moe split: disabled by OLLAMA_MOE_GPU_LAYERS=0, using standard layout")
+			} else {
+				// denseGPULayers: all layers on the same GPU(s) used by gpuLayersMoE
+				allLayerIndices := make([]int, len(layers))
+				for i := range allLayerIndices {
+					allLayerIndices[i] = i
+				}
+				var denseDeviceID ml.DeviceID
+				if len(gpuLayersMoE) > 0 {
+					denseDeviceID = gpuLayersMoE[0].DeviceID
+				} else if len(gpus) > 0 {
+					denseDeviceID = gpus[len(gpus)-1].DeviceID
+				}
+				denseGPULayers = ml.GPULayersList{{
+					DeviceID: denseDeviceID,
+					Layers:   allLayerIndices,
+				}}
 
-			return gpuLayersMoE, denseGPULayers, layers
+				return gpuLayersMoE, denseGPULayers, layers
+			}
 		}
 	}
 	// ── End MoE split logic ──────────────────────────────────────────────────
