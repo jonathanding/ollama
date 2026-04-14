@@ -143,6 +143,28 @@ def report(trace_file: Path, output: Path | None, model: str | None, trace_b: Pa
         click.echo(md)
 
 
+@main.command()
+@click.argument("trace_file", type=click.Path(exists=True, path_type=Path))
+@click.option("-o", "--output", type=click.Path(path_type=Path), default=None,
+              help="Output .json path (default: <trace_file>.perfetto.json)")
+def export(trace_file: Path, output: Path | None):
+    """Export trace to Perfetto / chrome://tracing format."""
+    from .parser import parse_trace
+    from .perfetto import export_perfetto, build_perfetto
+
+    click.echo(f"Parsing {trace_file.name}...")
+    ops, passes, meta = parse_trace(trace_file)
+    click.echo(f"  {_fmt_num(len(ops))} ops across {_fmt_num(len(passes))} passes")
+
+    if output is None:
+        output = trace_file.with_suffix(".perfetto.json")
+
+    export_perfetto(ops, passes, output, meta=meta)
+    size = output.stat().st_size
+    click.echo(click.style(f"  -> {output} ({_fmt_size(size)})", fg="green"))
+    click.echo(f"  Open in: https://ui.perfetto.dev/ or chrome://tracing")
+
+
 def _ensure_web_dist(web_root: Path, force: bool = False) -> Path | None:
     """Return web/dist if it exists; auto-build from source if npm is available."""
     dist_dir = web_root / "dist"

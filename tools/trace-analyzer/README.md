@@ -68,6 +68,15 @@ ollama-trace-analyzer report trace_cuda.jsonl \
     --compare trace_vulkan.jsonl --labels "CUDA,Vulkan" -o compare_report.md
 ```
 
+### Export to Perfetto / chrome://tracing
+
+```bash
+ollama-trace-analyzer export trace_req1.jsonl -o trace.perfetto.json
+# Open in https://ui.perfetto.dev/ or chrome://tracing
+```
+
+Each backend (CPU, CUDA, Vulkan) appears as a separate lane. Passes are shown as spanning events. Op args include tensor name, shape, dtype, and pass/sequence IDs.
+
 ### Launch the visualization server
 
 ```bash
@@ -93,7 +102,11 @@ ollama-trace-analyzer summary /tmp/traces/trace_*.jsonl -o /tmp/traces/summary.j
 # 3. Visualize in browser
 ollama-trace-analyzer serve --data-dir /tmp/traces/
 
-# 4. Or generate a report for LLM analysis
+# 4. Export for Perfetto (interactive flame chart)
+ollama-trace-analyzer export /tmp/traces/trace_*.jsonl -o trace.perfetto.json
+# Open trace.perfetto.json in https://ui.perfetto.dev/
+
+# 5. Or generate a report for LLM analysis
 ollama-trace-analyzer report /tmp/traces/trace_*.jsonl -o report.md
 # Paste report.md into Claude and ask: "Analyze this trace and identify bottlenecks"
 ```
@@ -105,6 +118,7 @@ ollama-trace-analyzer report /tmp/traces/trace_*.jsonl -o report.md
 | `summary` | Single trace → summary.json         | `-o`, `--model`, `--pass`                  |
 | `compare` | Two traces → compare.json           | `--labels` (required), `--threshold`, `-o` |
 | `report`  | Trace → Markdown report             | `--compare`, `--labels`, `-o`              |
+| `export`  | Trace → Perfetto/chrome://tracing   | `-o` (default: `<file>.perfetto.json`)     |
 | `serve`   | Launch visualization server         | `--data-dir` (required), `--port`          |
 
 ## Running Tests

@@ -68,10 +68,10 @@ An opt-in per-operator tracing system that captures every GGML compute node disp
 
 ### How it works
 
-- Hooks into GGML's existing `ggml_backend_sched_eval_callback` mechanism via a minimal C++ patch (~10 lines) and a CGO bridge
-- Zero overhead when disabled — uses a `NoopCollector` that compiles away
+- Uses backend-native timing: **Vulkan GPU timestamps** (`vkCmdWriteTimestamp`) and **CPU `clock_gettime`** barriers, collected via a CGO bridge after each graph compute
+- Zero overhead when disabled — uses a `NoopWriter` that compiles away
 - Events are buffered in memory during inference and flushed asynchronously after each request completes
-- Captures per-operator: op type, tensor name, input tensor names (DAG edges), output shape, data type, backend device (CPU/CUDA/Vulkan), and approximate timestamps
+- Captures per-operator: op type, tensor name, input tensor names (DAG edges), output shape, data type, backend device (CPU/CUDA/Vulkan), and nanosecond timestamps
 
 ### Usage
 
@@ -100,6 +100,10 @@ ollama-trace-analyzer compare trace_cuda.jsonl trace_vulkan.jsonl --labels "CUDA
 rem Generate Markdown report (for LLM analysis)
 ollama-trace-analyzer report C:\workspace\myollama\tmp\trace_xxx.jsonl -o report.md
 
+rem Export to Perfetto / chrome://tracing format
+ollama-trace-analyzer export C:\workspace\myollama\tmp\trace_xxx.jsonl -o trace.perfetto.json
+rem Open trace.perfetto.json in https://ui.perfetto.dev/ or chrome://tracing
+
 rem Launch interactive visualization (DAG / Timeline / Compare views)
 cd web && npm install && npm run build && cd ..
 ollama-trace-analyzer serve --data-dir data\ --port 8765
@@ -110,9 +114,14 @@ See [tools/trace-analyzer/README.md](tools/trace-analyzer/README.md) for full CL
 
 ### JSONL output format
 
-Each line is a JSON object. Two event types:
+Each trace file is a sequence of JSON lines. The first line is a **meta header**, followed by pass/op events:
 
-**Pass events** (one pair per `llama_decode` call):
+**Meta header** (first line):
+```json
+{"type":"meta","model":"llama3:8b","request_id":"req-abc123","ts":1742123456789,"input_tokens":512,"output_tokens":24}
+```
+
+**Pass events** (one pair per compute batch):
 ```json
 {"type":"pass_start","pass":0,"n_tokens":512,"ts":1742123456789}
 {"type":"pass_end","pass":0,"n_nodes":0,"ts":1742123456800}
@@ -123,7 +132,7 @@ Each line is a JSON object. Two event types:
 {"type":"op","pass":0,"seq":42,"op":"MUL_MAT","name":"blk.3.attn_q","srcs":["blk.3.attn_norm","blk.3.attn_q.weight"],"shape":[4096,512],"dtype":"f16","backend":"CUDA0","t_start":1742123456790123456,"t_end":1742123456790234567}
 ```
 
-Fields: `pass` = batch index, `seq` = operator sequence number within the pass, `srcs` = source tensor names (DAG edges), `t_start`/`t_end` = CPU-side nanoseconds. See [Performance impact on GPU models](#performance-impact-on-gpu-models) for how to interpret these timestamps.
+Fields: `pass` = batch index, `seq` = operator sequence number within the pass, `srcs` = source tensor names (DAG edges), `t_start`/`t_end` = nanosecond timestamps (Vulkan GPU timestamps or CPU clock_gettime).
 
 ### Architecture
 
@@ -144,7 +153,7 @@ When tracing is enabled (`OLLAMA_TRACE_DIR` set), backend-native timing is activ
 - **Vulkan:** async `vkCmdWriteTimestamp` inserted into command buffer (no GPU stall)
 - **CPU:** `clock_gettime` barrier-to-barrier timing on thread 0
 
-Overhead: <5% (no forced synchronization between nodes).
+Measured overhead: **~3%** on RTX 3090 with qwen3:0.6b (no forced synchronization between nodes).
 
 ### How to interpret the data
 
@@ -163,8 +172,9 @@ However, `sum(per_op) > actual_total` because normal execution pipelines many op
 | **Shape / dtype** | ✅ `[4096,512] f16` | ❌ | ❌ |
 | **DAG edges** | ✅ src tensor names | ❌ | ❌ |
 | **Backend placement** | ✅ CPU / CUDA / Vulkan | Vulkan only | CUDA only |
-| **Per-op timing** | ⚠️ Approximate (forced sync) | ✅ Accurate (GPU timestamps) | ✅ Accurate (driver-level) |
-| **Affects execution** | ⚠️ Yes — breaks GPU pipeline | ✅ No | ✅ No |
+| **Per-op timing** | ✅ Native (GPU timestamps / CPU clock) | ✅ Accurate (GPU timestamps) | ✅ Accurate (driver-level) |
+| **Affects execution** | ✅ ~3% overhead (no forced sync) | ✅ No | ✅ No |
+| **Perfetto export** | ✅ `export` command | ❌ | ✅ Native |
 | **Setup** | `OLLAMA_TRACE_DIR=dir` | `GGML_VK_PERF_LOGGER=1` | Install Nsight, `nsys profile ...` |
 
 **Key distinction:** `GGML_VK_PERF_LOGGER` averages all ops of the same type together (e.g., 32 `MUL_MAT` of different sizes into one average), losing per-instance detail. Ollama Trace shows every individual op with its specific tensor name, shape, and DAG context.
@@ -175,9 +185,10 @@ However, `sum(per_op) > actual_total` because normal execution pipelines many op
 
 ### Other caveats
 
-- **LlamaRunner only:** The native Go OllamaRunner path has basic pass-level tracing but not full per-op instrumentation
+- **Both runners supported:** OllamaRunner (Go-native models) and LlamaRunner (llama.cpp models) both have full per-op native timing
 - **Op fusion:** Flash attention appears as a single `FLASH_ATTN_EXT` node; SwiGLU may appear as `SWIGLU`. The trace reflects the actual fused execution graph
-- **Backend DLLs:** `ggml-cuda.dll`, `ggml-vulkan.dll` etc. do **not** need recompilation — the eval callback hooks at the scheduler level, above the backend DLLs
+- **Backend DLLs:** `ggml-cuda.dll`, `ggml-vulkan.dll` etc. must be built with timing support enabled (the patched ggml source in this fork)
+- **Parallel sequences:** When running with `OLLAMA_NUM_PARALLEL > 1`, multiple sequences share one computation graph (continuous batching). Per-op timing is captured for the shared graph but cannot be attributed to individual sequences
 
 ---
 
