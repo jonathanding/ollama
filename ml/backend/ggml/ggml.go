@@ -13,6 +13,11 @@ package ggml
 // // moe_pinned_register looks up the cudaHostRegister proc address from the
 // // first CUDA backend registry entry and calls it to pin a CPU memory region.
 // // Returns true on success, false if CUDA is unavailable or registration fails.
+// //
+// // GGML_CUDA_REGISTER_HOST must already be set in the process env block before
+// // this is called. The env var is injected by server.go into the runner child
+// // process at launch time when OLLAMA_MOE_PINNED=1, which ensures all CRT
+// // instances (including ggml-cuda.dll's own CRT) see it at init time.
 // static bool moe_pinned_register(void *ptr, size_t size) {
 //     typedef bool (*register_fn_t)(void *, size_t);
 //     for (int i = 0; i < (int)ggml_backend_dev_count(); i++) {
