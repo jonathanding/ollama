@@ -224,6 +224,12 @@ var (
 	//   >0           = force this many layers to have MoE on GPU
 	// Complementary to llama.cpp's --n-cpu-moe: n_cpu_moe = total_layers - MoeGpuLayers
 	MoeGpuLayers = Int("OLLAMA_MOE_GPU_LAYERS", -1)
+	// MoePinned enables cudaHostRegister for CPU-side MoE expert weight buffers.
+	// When enabled, the CUDA Copy Engine can DMA directly from mmap memory
+	// without CPU-side staging, increasing H2D bandwidth from ~14 GB/s to ~25 GB/s.
+	// Requires MoE split to be active (OLLAMA_MOE_GPU_LAYERS != 0).
+	// Default: false (original pageable behavior).
+	MoePinned = Bool("OLLAMA_MOE_PINNED")
 	// NoHistory disables readline history.
 	NoHistory = Bool("OLLAMA_NOHISTORY")
 	// NoPrune disables pruning of model blobs on startup.
