@@ -1514,9 +1514,9 @@ static void * moe_get_proc(const char * name) {
         if (fn) return (void *)fn;
     }
 #else
-    // dlopen with RTLD_NOLOAD|RTLD_LAZY returns the already-loaded handle
-    // without loading the library anew; dlclose on such a handle is a no-op
-    // (reference count is not incremented when RTLD_NOLOAD is used on Linux).
+    // dlopen with RTLD_NOLOAD returns the already-loaded handle; when the
+    // library is found, the reference count IS incremented, so dlclose is
+    // required to balance it (see dlopen(3) RTLD_NOLOAD semantics).
     static const char * const cuda_so_names[] = {
         "libggml-cuda.so",
         "libggml-cuda-v11.so",
@@ -1758,6 +1758,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv, sched->batch_size);
                 if (ec != GGML_STATUS_SUCCESS) {
+                    if (prefetch_stream) {
+                        auto moe_stream_sync = (moe_stream_synchronize_t)moe_get_proc("ggml_backend_cuda_moe_stream_synchronize");
+                        auto moe_stream_del  = (moe_stream_destroy_t)   moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
+                        auto moe_event_del   = (moe_event_destroy_t)    moe_get_proc("ggml_backend_cuda_moe_event_destroy");
+                        if (moe_stream_sync) moe_stream_sync(prefetch_stream);
+                        if (moe_stream_del)  moe_stream_del(prefetch_stream);
+                        if (moe_event_del)   moe_event_del(prefetch_event);
+                    }
                     return ec;
                 }
 
