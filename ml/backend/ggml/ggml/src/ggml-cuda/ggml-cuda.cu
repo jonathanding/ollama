@@ -5073,6 +5073,72 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
     GGML_UNUSED(reg);
 }
 
+// ---------------------------------------------------------------------------
+// Plan B MoE prefetch CUDA helpers — exposed via proc address as void* handles
+// ---------------------------------------------------------------------------
+
+static void * ggml_backend_cuda_moe_stream_create() {
+    cudaStream_t stream;
+    if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) {
+        return nullptr;
+    }
+    return (void *)stream;
+}
+
+static void ggml_backend_cuda_moe_stream_destroy(void * stream_handle) {
+    if (stream_handle) {
+        cudaStreamDestroy((cudaStream_t)stream_handle);
+    }
+}
+
+static void ggml_backend_cuda_moe_stream_synchronize(void * stream_handle) {
+    if (stream_handle) {
+        cudaStreamSynchronize((cudaStream_t)stream_handle);
+    }
+}
+
+static void * ggml_backend_cuda_moe_event_create() {
+    cudaEvent_t event;
+    // cudaEventDisableTiming: 不记录时间戳，降低 overhead
+    if (cudaEventCreateWithFlags(&event, cudaEventDisableTiming) != cudaSuccess) {
+        return nullptr;
+    }
+    return (void *)event;
+}
+
+static void ggml_backend_cuda_moe_event_destroy(void * event_handle) {
+    if (event_handle) {
+        cudaEventDestroy((cudaEvent_t)event_handle);
+    }
+}
+
+static void ggml_backend_cuda_moe_event_record(void * event_handle, void * stream_handle) {
+    if (event_handle && stream_handle) {
+        cudaEventRecord((cudaEvent_t)event_handle, (cudaStream_t)stream_handle);
+    }
+}
+
+static void ggml_backend_cuda_moe_event_synchronize(void * event_handle) {
+    if (event_handle) {
+        cudaEventSynchronize((cudaEvent_t)event_handle);
+    }
+}
+
+// Full-layer prefetch: copies the entire weight tensor (all experts) from CPU
+// pinned memory to the VRAM input_cpy tensor using the independent copy stream.
+// Returns true on success. Caller must ensure source is pinned (OLLAMA_MOE_PINNED=1).
+static bool ggml_backend_cuda_moe_prefetch_tensor(
+        void * stream_handle,
+        struct ggml_tensor * input,      // CPU-side weight tensor (source)
+        struct ggml_tensor * input_cpy)  // VRAM tensor (destination)
+{
+    if (!stream_handle || !input || !input_cpy) return false;
+    cudaStream_t stream = (cudaStream_t)stream_handle;
+    size_t nbytes = ggml_nbytes(input);
+    return cudaMemcpyAsync(input_cpy->data, input->data, nbytes,
+                           cudaMemcpyHostToDevice, stream) == cudaSuccess;
+}
+
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
     if (strcmp(name, "ggml_backend_split_buffer_type") == 0) {
@@ -5086,6 +5152,30 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_stream_create") == 0) {
+        return (void *)ggml_backend_cuda_moe_stream_create;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_stream_destroy") == 0) {
+        return (void *)ggml_backend_cuda_moe_stream_destroy;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_stream_synchronize") == 0) {
+        return (void *)ggml_backend_cuda_moe_stream_synchronize;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_event_create") == 0) {
+        return (void *)ggml_backend_cuda_moe_event_create;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_event_destroy") == 0) {
+        return (void *)ggml_backend_cuda_moe_event_destroy;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_event_record") == 0) {
+        return (void *)ggml_backend_cuda_moe_event_record;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_event_synchronize") == 0) {
+        return (void *)ggml_backend_cuda_moe_event_synchronize;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_prefetch_tensor") == 0) {
+        return (void *)ggml_backend_cuda_moe_prefetch_tensor;
     }
     return nullptr;
 }
