@@ -1477,6 +1477,60 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Plan B MoE prefetch: function pointer types for CUDA helpers via proc address
+// ---------------------------------------------------------------------------
+
+typedef void *(*moe_stream_create_fn_t)();
+typedef void  (*moe_stream_destroy_fn_t)(void *);
+typedef void  (*moe_stream_synchronize_fn_t)(void *);
+typedef void *(*moe_event_create_fn_t)();
+typedef void  (*moe_event_destroy_fn_t)(void *);
+typedef void  (*moe_event_record_fn_t)(void *, void *);
+typedef void  (*moe_event_synchronize_fn_t)(void *);
+typedef bool  (*moe_prefetch_tensor_fn_t)(void *, struct ggml_tensor *, struct ggml_tensor *);
+
+// Looks up a MoE prefetch proc address from the first GPU backend reg.
+// Returns nullptr if no GPU backend or the proc is not found.
+static void * moe_get_proc(const char * name) {
+    for (int i = 0; i < (int)ggml_backend_dev_count(); i++) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+            continue;
+        }
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        void * fn = ggml_backend_reg_get_proc_address(reg, name);
+        if (fn) return fn;
+    }
+    return nullptr;
+}
+
+// Returns true if split_id refers to a CPU-side MoE expert weight split.
+// Detection criterion: the split's first node is GGML_OP_MUL_MAT_ID and its
+// weight input is a host (CPU) buffer marked GGML_BACKEND_BUFFER_USAGE_WEIGHTS.
+// This is identical to the condition used by ggml-backend.cpp:1517-1521 for
+// expert-granular copy, so no new assumptions are introduced.
+static bool is_moe_cpu_split(ggml_backend_sched_t sched, int split_id) {
+    if (split_id < 0 || split_id >= sched->n_splits) return false;
+    struct ggml_backend_sched_split * split = &sched->splits[split_id];
+    if (split->n_inputs == 0 || split->graph.n_nodes == 0) return false;
+
+    struct ggml_tensor * node = split->graph.nodes[0];
+    if (node->op != GGML_OP_MUL_MAT_ID) return false;
+
+    for (int i = 0; i < split->n_inputs; i++) {
+        struct ggml_tensor * input = split->inputs[i];
+        struct ggml_tensor * input_cpy = tensor_copy(input, split->backend_id, sched->cur_copy);
+        if (node->src[0] == input_cpy &&
+            input->buffer != NULL &&
+            ggml_backend_buffer_get_usage(input->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
+            ggml_backend_buffer_is_host(input->buffer)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     struct ggml_backend_sched_split * splits = sched->splits;
