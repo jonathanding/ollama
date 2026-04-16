@@ -1597,8 +1597,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 fn_prefetch_stream_destroy = (moe_stream_destroy_fn_t)   moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
                 fn_prefetch_event_destroy  = (moe_event_destroy_fn_t)    moe_get_proc("ggml_backend_cuda_moe_event_destroy");
                 prefetch_enabled = true;
-                GGML_LOG_DEBUG("%s: MoE prefetch enabled (stream=%p event=%p)\n",
-                               __func__, prefetch_stream, prefetch_event);
+                GGML_LOG_INFO("%s: MoE prefetch enabled (stream=%p event=%p)\n",
+                              __func__, prefetch_stream, prefetch_event);
             } else {
                 // Partial failure: clean up and fall back silently
                 auto fn_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
@@ -1622,7 +1622,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             if (fn_prefetch_event_sync) fn_prefetch_event_sync(prefetch_event);
             prefetch_pending  = false;
             moe_prefetch_hit  = true;
-            GGML_LOG_DEBUG("%s: prefetch hit for split %d\n", __func__, split_id);
+            GGML_LOG_INFO("%s: prefetch hit split=%d\n", __func__, split_id);
         }
 
         // copy the input tensors to the split backend
@@ -1822,7 +1822,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                             next_node->op == GGML_OP_MUL_MAT_ID) {
                             if (fn_prefetch_tensor(prefetch_stream, inp, inp_cpy)) {
                                 fired = true;
-                                GGML_LOG_DEBUG("%s: prefetch fired for split %d\n", __func__, next_id);
+                                GGML_LOG_INFO("%s: prefetch fired split=%d\n", __func__, next_id);
                             }
                             break;
                         }
