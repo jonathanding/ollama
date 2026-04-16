@@ -1559,11 +1559,18 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     moe_event_destroy_fn_t     fn_prefetch_event_destroy  = nullptr;
 
     if (getenv("OLLAMA_MOE_PREFETCH") != nullptr) {
+        fprintf(stderr, "[moe-prefetch] env var detected, n_backends=%d\n", sched->n_backends);
+        fflush(stderr);
         auto fn_stream_create = (moe_stream_create_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_create");
         auto fn_event_create  = (moe_event_create_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_create");
+        fprintf(stderr, "[moe-prefetch] fn_stream_create=%p fn_event_create=%p\n",
+                (void*)fn_stream_create, (void*)fn_event_create);
+        fflush(stderr);
         if (fn_stream_create && fn_event_create) {
             prefetch_stream = fn_stream_create();
             prefetch_event  = fn_event_create();
+            fprintf(stderr, "[moe-prefetch] stream=%p event=%p\n", prefetch_stream, prefetch_event);
+            fflush(stderr);
             if (prefetch_stream && prefetch_event) {
                 // Resolve all hot-path procs once here
                 fn_prefetch_event_sync    = (moe_event_synchronize_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_synchronize");
@@ -1573,10 +1580,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 fn_prefetch_stream_destroy = (moe_stream_destroy_fn_t)   moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
                 fn_prefetch_event_destroy  = (moe_event_destroy_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_event_destroy");
                 prefetch_enabled = true;
-                GGML_LOG_INFO("%s: MoE prefetch enabled (stream=%p event=%p)\n",
-                              __func__, prefetch_stream, prefetch_event);
+                fprintf(stderr, "[moe-prefetch] ENABLED tensor=%p\n", (void*)fn_prefetch_tensor);
+                fflush(stderr);
             } else {
                 // Partial failure: clean up and fall back silently
+                fprintf(stderr, "[moe-prefetch] FAILED to create stream or event\n");
+                fflush(stderr);
                 auto fn_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
                 auto fn_event_destroy  = (moe_event_destroy_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_destroy");
                 if (fn_stream_destroy && prefetch_stream) fn_stream_destroy(prefetch_stream);
@@ -1584,7 +1593,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 prefetch_stream = nullptr;
                 prefetch_event  = nullptr;
             }
+        } else {
+            fprintf(stderr, "[moe-prefetch] proc lookup FAILED (fn_stream_create=%p fn_event_create=%p)\n",
+                    (void*)fn_stream_create, (void*)fn_event_create);
+            fflush(stderr);
         }
+    } else {
+        // Uncomment to verify env var visibility:
+        // fprintf(stderr, "[moe-prefetch] env var NOT set\n"); fflush(stderr);
     }
 
     for (int split_id = 0; split_id < sched->n_splits; split_id++) {
