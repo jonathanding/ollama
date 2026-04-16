@@ -27,6 +27,10 @@
 #include <sys/sysctl.h>
 #endif
 
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
+
 
 // backend buffer type
 
@@ -1490,18 +1494,43 @@ typedef void  (*moe_event_record_fn_t)(void *, void *);
 typedef void  (*moe_event_synchronize_fn_t)(void *);
 typedef bool  (*moe_prefetch_tensor_fn_t)(void *, struct ggml_tensor *, struct ggml_tensor *);
 
-// Looks up a MoE prefetch proc address from the first GPU backend reg.
-// Returns nullptr if no GPU backend or the proc is not found.
+// Looks up a MoE prefetch proc address directly from the already-loaded CUDA
+// backend DLL.  We use OS-level "find already-loaded module" APIs so that
+// ggml-base does not need to link against ggml (which owns the backend registry
+// and would create a circular dependency).
 static void * moe_get_proc(const char * name) {
-    for (int i = 0; i < (int)ggml_backend_dev_count(); i++) {
-        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) {
-            continue;
-        }
-        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
-        void * fn = ggml_backend_reg_get_proc_address(reg, name);
+#if defined(_WIN32)
+    // GetModuleHandleA does NOT increment the reference count – safe to call.
+    static const char * const cuda_dll_names[] = {
+        "ggml-cuda.dll",
+        "ggml-cuda-v11.dll",
+        "ggml-cuda-v12.dll",
+        nullptr
+    };
+    for (int i = 0; cuda_dll_names[i]; i++) {
+        HMODULE mod = GetModuleHandleA(cuda_dll_names[i]);
+        if (!mod) continue;
+        FARPROC fn = GetProcAddress(mod, name);
+        if (fn) return (void *)fn;
+    }
+#else
+    // dlopen with RTLD_NOLOAD|RTLD_LAZY returns the already-loaded handle
+    // without loading the library anew; dlclose on such a handle is a no-op
+    // (reference count is not incremented when RTLD_NOLOAD is used on Linux).
+    static const char * const cuda_so_names[] = {
+        "libggml-cuda.so",
+        "libggml-cuda-v11.so",
+        "libggml-cuda-v12.so",
+        nullptr
+    };
+    for (int i = 0; cuda_so_names[i]; i++) {
+        void * mod = dlopen(cuda_so_names[i], RTLD_NOLOAD | RTLD_LAZY | RTLD_LOCAL);
+        if (!mod) continue;
+        void * fn = dlsym(mod, name);
+        dlclose(mod);  // balances the RTLD_NOLOAD dlopen
         if (fn) return fn;
     }
+#endif
     return nullptr;
 }
 
@@ -1538,6 +1567,35 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     ggml_tensor * prev_ids_tensor = nullptr;
     std::vector<int32_t> ids;
     std::vector<ggml_bitset_t> used_ids;
+
+    // Plan B MoE prefetch: initialize stream/event if OLLAMA_MOE_PREFETCH is set
+    bool     prefetch_enabled  = false;
+    void *   prefetch_stream   = nullptr;
+    void *   prefetch_event    = nullptr;
+    bool     prefetch_pending  = false;
+    int      prefetch_split_id = -1;
+
+    if (getenv("OLLAMA_MOE_PREFETCH") != nullptr) {
+        auto fn_stream_create = (moe_stream_create_fn_t)moe_get_proc("ggml_backend_cuda_moe_stream_create");
+        auto fn_event_create  = (moe_event_create_fn_t) moe_get_proc("ggml_backend_cuda_moe_event_create");
+        if (fn_stream_create && fn_event_create) {
+            prefetch_stream = fn_stream_create();
+            prefetch_event  = fn_event_create();
+            if (prefetch_stream && prefetch_event) {
+                prefetch_enabled = true;
+                GGML_LOG_DEBUG("%s: MoE prefetch enabled (stream=%p event=%p)\n",
+                               __func__, prefetch_stream, prefetch_event);
+            } else {
+                // Partial failure: clean up and fall back silently
+                auto fn_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
+                auto fn_event_destroy  = (moe_event_destroy_fn_t) moe_get_proc("ggml_backend_cuda_moe_event_destroy");
+                if (fn_stream_destroy && prefetch_stream) fn_stream_destroy(prefetch_stream);
+                if (fn_event_destroy  && prefetch_event)  fn_event_destroy(prefetch_event);
+                prefetch_stream = nullptr;
+                prefetch_event  = nullptr;
+            }
+        }
+    }
 
     for (int split_id = 0; split_id < sched->n_splits; split_id++) {
         struct ggml_backend_sched_split * split = &splits[split_id];
@@ -1670,6 +1728,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph, sched->batch_size);
             if (ec != GGML_STATUS_SUCCESS) {
+                if (prefetch_enabled) {
+                    auto fn_stream_sync    = (moe_stream_synchronize_fn_t)moe_get_proc("ggml_backend_cuda_moe_stream_synchronize");
+                    auto fn_stream_destroy = (moe_stream_destroy_fn_t)    moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
+                    auto fn_event_destroy  = (moe_event_destroy_fn_t)     moe_get_proc("ggml_backend_cuda_moe_event_destroy");
+                    if (fn_stream_sync)    fn_stream_sync(prefetch_stream);
+                    if (fn_stream_destroy) fn_stream_destroy(prefetch_stream);
+                    if (fn_event_destroy)  fn_event_destroy(prefetch_event);
+                }
                 return ec;
             }
         } else {
@@ -1712,6 +1778,18 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
             }
         }
+    }
+
+    // Plan B cleanup: drain the prefetch stream and destroy resources
+    if (prefetch_enabled) {
+        if (prefetch_pending) {
+            auto fn_event_sync = (moe_event_synchronize_fn_t)moe_get_proc("ggml_backend_cuda_moe_event_synchronize");
+            if (fn_event_sync) fn_event_sync(prefetch_event);
+        }
+        auto fn_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
+        auto fn_event_destroy  = (moe_event_destroy_fn_t) moe_get_proc("ggml_backend_cuda_moe_event_destroy");
+        if (fn_stream_destroy) fn_stream_destroy(prefetch_stream);
+        if (fn_event_destroy)  fn_event_destroy(prefetch_event);
     }
 
     return GGML_STATUS_SUCCESS;
