@@ -1602,6 +1602,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
+        // Plan B: if this split was prefetched, wait for the copy to complete
+        bool moe_prefetch_hit = false;
+        if (prefetch_enabled && prefetch_pending && split_id == prefetch_split_id) {
+            auto fn_event_sync = (moe_event_synchronize_fn_t)moe_get_proc("ggml_backend_cuda_moe_event_synchronize");
+            if (fn_event_sync) fn_event_sync(prefetch_event);
+            prefetch_pending  = false;
+            moe_prefetch_hit  = true;
+            GGML_LOG_DEBUG("%s: prefetch hit for split %d\n", __func__, split_id);
+        }
+
         // copy the input tensors to the split backend
         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
             ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
@@ -1632,6 +1642,13 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     (node->src[0] == input_cpy && node->op == GGML_OP_MUL_MAT_ID)
                     //|| (node->src[1] == input_cpy && node->op == GGML_OP_ADD_ID) /* GGML_OP_ADD_ID weights are small and not worth splitting */
                     )) {
+
+                    // Plan B: full-layer prefetch already wrote to input_cpy — skip copy
+                    if (moe_prefetch_hit) {
+                        GGML_LOG_DEBUG("%s: skipping expert copy for split %d (prefetched)\n",
+                                       __func__, split_id);
+                        continue;
+                    }
 
                     const int64_t n_expert   = node->op == GGML_OP_MUL_MAT_ID ? input->ne[2] : input->ne[1];
                     const size_t expert_size = node->op == GGML_OP_MUL_MAT_ID ? input->nb[2] : input->nb[1];
@@ -1759,12 +1776,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &gv, sched->batch_size);
                 if (ec != GGML_STATUS_SUCCESS) {
                     if (prefetch_stream) {
-                        auto moe_stream_sync = (moe_stream_synchronize_t)moe_get_proc("ggml_backend_cuda_moe_stream_synchronize");
-                        auto moe_stream_del  = (moe_stream_destroy_t)   moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
-                        auto moe_event_del   = (moe_event_destroy_t)    moe_get_proc("ggml_backend_cuda_moe_event_destroy");
-                        if (moe_stream_sync) moe_stream_sync(prefetch_stream);
-                        if (moe_stream_del)  moe_stream_del(prefetch_stream);
-                        if (moe_event_del)   moe_event_del(prefetch_event);
+                        auto fn_stream_sync    = (moe_stream_synchronize_fn_t)moe_get_proc("ggml_backend_cuda_moe_stream_synchronize");
+                        auto fn_stream_destroy = (moe_stream_destroy_fn_t)    moe_get_proc("ggml_backend_cuda_moe_stream_destroy");
+                        auto fn_event_destroy  = (moe_event_destroy_fn_t)     moe_get_proc("ggml_backend_cuda_moe_event_destroy");
+                        if (fn_stream_sync)    fn_stream_sync(prefetch_stream);
+                        if (fn_stream_destroy) fn_stream_destroy(prefetch_stream);
+                        if (fn_event_destroy)  fn_event_destroy(prefetch_event);
                     }
                     return ec;
                 }
@@ -1777,6 +1794,40 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 }
 
                 j0 = j1;
+            }
+        }
+
+        // Plan B: after submitting compute N, fire prefetch for split N+1
+        if (prefetch_enabled && !sched->callback_eval && !prefetch_pending) {
+            int next_id = split_id + 1;
+            if (is_moe_cpu_split(sched, next_id)) {
+                struct ggml_backend_sched_split * next_split = &sched->splits[next_id];
+                struct ggml_tensor * next_node = next_split->graph.nodes[0];
+                auto fn_prefetch     = (moe_prefetch_tensor_fn_t)moe_get_proc("ggml_backend_cuda_moe_prefetch_tensor");
+                auto fn_event_record = (moe_event_record_fn_t)   moe_get_proc("ggml_backend_cuda_moe_event_record");
+                if (fn_prefetch && fn_event_record) {
+                    bool fired = false;
+                    for (int i = 0; i < next_split->n_inputs; i++) {
+                        struct ggml_tensor * inp     = next_split->inputs[i];
+                        struct ggml_tensor * inp_cpy = tensor_copy(inp, next_split->backend_id, sched->cur_copy);
+                        if (next_node->src[0] == inp_cpy &&
+                            inp->buffer != NULL &&
+                            ggml_backend_buffer_get_usage(inp->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
+                            ggml_backend_buffer_is_host(inp->buffer) &&
+                            next_node->op == GGML_OP_MUL_MAT_ID) {
+                            if (fn_prefetch(prefetch_stream, inp, inp_cpy)) {
+                                fired = true;
+                                GGML_LOG_DEBUG("%s: prefetch fired for split %d\n", __func__, next_id);
+                            }
+                            break;
+                        }
+                    }
+                    if (fired) {
+                        fn_event_record(prefetch_event, prefetch_stream);
+                        prefetch_pending  = true;
+                        prefetch_split_id = next_id;
+                    }
+                }
             }
         }
 
