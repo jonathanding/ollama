@@ -1558,21 +1558,14 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     moe_stream_destroy_fn_t    fn_prefetch_stream_destroy = nullptr;
     moe_event_destroy_fn_t     fn_prefetch_event_destroy  = nullptr;
 
+    static bool prefetch_init_logged = false;
     if (getenv("OLLAMA_MOE_PREFETCH") != nullptr) {
-        fprintf(stderr, "[moe-prefetch] env var detected, n_backends=%d\n", sched->n_backends);
-        fflush(stderr);
         auto fn_stream_create = (moe_stream_create_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_create");
         auto fn_event_create  = (moe_event_create_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_create");
-        fprintf(stderr, "[moe-prefetch] fn_stream_create=%p fn_event_create=%p\n",
-                (void*)fn_stream_create, (void*)fn_event_create);
-        fflush(stderr);
         if (fn_stream_create && fn_event_create) {
             prefetch_stream = fn_stream_create();
             prefetch_event  = fn_event_create();
-            fprintf(stderr, "[moe-prefetch] stream=%p event=%p\n", prefetch_stream, prefetch_event);
-            fflush(stderr);
             if (prefetch_stream && prefetch_event) {
-                // Resolve all hot-path procs once here
                 fn_prefetch_event_sync    = (moe_event_synchronize_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_synchronize");
                 fn_prefetch_tensor        = (moe_prefetch_tensor_fn_t)   moe_get_proc(sched, "ggml_backend_cuda_moe_prefetch_tensor");
                 fn_prefetch_event_record  = (moe_event_record_fn_t)      moe_get_proc(sched, "ggml_backend_cuda_moe_event_record");
@@ -1580,27 +1573,28 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 fn_prefetch_stream_destroy = (moe_stream_destroy_fn_t)   moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
                 fn_prefetch_event_destroy  = (moe_event_destroy_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_event_destroy");
                 prefetch_enabled = true;
-                fprintf(stderr, "[moe-prefetch] ENABLED tensor=%p\n", (void*)fn_prefetch_tensor);
-                fflush(stderr);
+                if (!prefetch_init_logged) {
+                    GGML_LOG_INFO("%s: MoE lookahead prefetch enabled\n", __func__);
+                    prefetch_init_logged = true;
+                }
             } else {
-                // Partial failure: clean up and fall back silently
-                fprintf(stderr, "[moe-prefetch] FAILED to create stream or event\n");
-                fflush(stderr);
                 auto fn_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
                 auto fn_event_destroy  = (moe_event_destroy_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_destroy");
                 if (fn_stream_destroy && prefetch_stream) fn_stream_destroy(prefetch_stream);
                 if (fn_event_destroy  && prefetch_event)  fn_event_destroy(prefetch_event);
                 prefetch_stream = nullptr;
                 prefetch_event  = nullptr;
+                if (!prefetch_init_logged) {
+                    GGML_LOG_WARN("%s: MoE prefetch disabled — stream/event creation failed\n", __func__);
+                    prefetch_init_logged = true;
+                }
             }
         } else {
-            fprintf(stderr, "[moe-prefetch] proc lookup FAILED (fn_stream_create=%p fn_event_create=%p)\n",
-                    (void*)fn_stream_create, (void*)fn_event_create);
-            fflush(stderr);
+            if (!prefetch_init_logged) {
+                GGML_LOG_WARN("%s: MoE prefetch disabled — proc lookup failed\n", __func__);
+                prefetch_init_logged = true;
+            }
         }
-    } else {
-        // Uncomment to verify env var visibility:
-        // fprintf(stderr, "[moe-prefetch] env var NOT set\n"); fflush(stderr);
     }
 
     for (int split_id = 0; split_id < sched->n_splits; split_id++) {
@@ -1614,7 +1608,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             if (fn_prefetch_event_sync) fn_prefetch_event_sync(prefetch_event);
             prefetch_pending  = false;
             moe_prefetch_hit  = true;
-            GGML_LOG_INFO("%s: prefetch hit split=%d\n", __func__, split_id);
+            GGML_LOG_DEBUG("%s: prefetch hit split=%d\n", __func__, split_id);
         }
 
         // copy the input tensors to the split backend
@@ -1814,7 +1808,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                             next_node->op == GGML_OP_MUL_MAT_ID) {
                             if (fn_prefetch_tensor(prefetch_stream, inp, inp_cpy)) {
                                 fired = true;
-                                GGML_LOG_INFO("%s: prefetch fired split=%d\n", __func__, next_id);
+                                GGML_LOG_DEBUG("%s: prefetch fired split=%d\n", __func__, next_id);
                             }
                             break;
                         }
