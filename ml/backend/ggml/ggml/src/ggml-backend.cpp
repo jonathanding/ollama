@@ -1495,6 +1495,18 @@ typedef void  (*moe_staging_destroy_fn_t)(void * backend);
 typedef bool  (*moe_staging_h2d_fn_t)(void * backend, void * prefetch_stream, int slot, struct ggml_tensor * input);
 typedef bool  (*moe_staging_d2d_fn_t)(void * backend, int slot, struct ggml_tensor * input_cpy);
 
+// Selective variant range descriptor — must match the struct in ggml-cuda.cu.
+struct moe_expert_range {
+    int32_t first_id;
+    int32_t last_id;
+};
+typedef bool  (*moe_staging_h2d_ranges_fn_t)(void * backend, void * prefetch_stream, int slot,
+                                             struct ggml_tensor * input,
+                                             const struct moe_expert_range * ranges, int n_ranges);
+typedef bool  (*moe_staging_d2d_ranges_fn_t)(void * backend, int slot,
+                                             struct ggml_tensor * input_cpy,
+                                             const struct moe_expert_range * ranges, int n_ranges);
+
 // Looks up a MoE prefetch proc address via the ggml backend registry.
 // Iterates sched->backends to find the first GPU backend, then calls
 // ggml_backend_reg_get_proc_address on its reg.  This is the correct path
@@ -1567,22 +1579,34 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     int      prefetch_counter  = 0;   // monotonic fire counter; slot = counter & 1
     ggml_backend_t moe_cuda_backend = nullptr;  // backend that owns the staging buffers
 
+    // Per-slot selective-prefetch range cache. When a fire was issued via
+    // fn_staging_h2d_ranges, the corresponding slot remembers its ranges so the
+    // consume path can dispatch fn_staging_d2d_ranges with the exact same set.
+    // n_ranges == 0 means the slot was H2D'd full-tensor and should D2D full.
+    static const int MOE_MAX_RANGES = 1024;
+    struct moe_expert_range prefetch_ranges[2][MOE_MAX_RANGES] = {};
+    int    prefetch_n_ranges[2] = {0, 0};
+
     moe_stream_destroy_fn_t    fn_prefetch_stream_destroy = nullptr;
     moe_stream_synchronize_fn_t fn_prefetch_stream_sync   = nullptr;
-    moe_staging_init_fn_t      fn_staging_init    = nullptr;
-    moe_staging_destroy_fn_t   fn_staging_destroy = nullptr;
-    moe_staging_h2d_fn_t       fn_staging_h2d     = nullptr;
-    moe_staging_d2d_fn_t       fn_staging_d2d     = nullptr;
+    moe_staging_init_fn_t       fn_staging_init          = nullptr;
+    moe_staging_destroy_fn_t    fn_staging_destroy       = nullptr;
+    moe_staging_h2d_fn_t        fn_staging_h2d           = nullptr;
+    moe_staging_d2d_fn_t        fn_staging_d2d           = nullptr;
+    moe_staging_h2d_ranges_fn_t fn_staging_h2d_ranges    = nullptr;
+    moe_staging_d2d_ranges_fn_t fn_staging_d2d_ranges    = nullptr;
 
     static bool prefetch_init_logged = false;
     if (getenv("OLLAMA_MOE_PREFETCH") != nullptr) {
         auto fn_stream_create = (moe_stream_create_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_create");
         fn_prefetch_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
         fn_prefetch_stream_sync    = (moe_stream_synchronize_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_synchronize");
-        fn_staging_init    = (moe_staging_init_fn_t)   moe_get_proc(sched, "ggml_backend_cuda_moe_staging_init");
-        fn_staging_destroy = (moe_staging_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_staging_destroy");
-        fn_staging_h2d     = (moe_staging_h2d_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_staging_h2d");
-        fn_staging_d2d     = (moe_staging_d2d_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_staging_d2d");
+        fn_staging_init        = (moe_staging_init_fn_t)       moe_get_proc(sched, "ggml_backend_cuda_moe_staging_init");
+        fn_staging_destroy     = (moe_staging_destroy_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_staging_destroy");
+        fn_staging_h2d         = (moe_staging_h2d_fn_t)        moe_get_proc(sched, "ggml_backend_cuda_moe_staging_h2d");
+        fn_staging_d2d         = (moe_staging_d2d_fn_t)        moe_get_proc(sched, "ggml_backend_cuda_moe_staging_d2d");
+        fn_staging_h2d_ranges  = (moe_staging_h2d_ranges_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_staging_h2d_ranges");
+        fn_staging_d2d_ranges  = (moe_staging_d2d_ranges_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_staging_d2d_ranges");
 
         if (fn_stream_create && fn_staging_init && fn_staging_h2d && fn_staging_d2d) {
             // Walk splits to find the max MoE weight tensor size and the CUDA backend
@@ -1682,27 +1706,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     //|| (node->src[1] == input_cpy && node->op == GGML_OP_ADD_ID) /* GGML_OP_ADD_ID weights are small and not worth splitting */
                     )) {
 
-                    // Plan B (Option D staging): prefetch stream already H2D'd the
-                    // full weight into staging[slot] and recorded h2d_done[slot].
-                    // Issue a main-stream waitEvent + D2D staging->input_cpy. This
-                    // keeps the write to input_cpy on the same stream as the
-                    // subsequent compute (no cross-stream alias race) while
-                    // allowing the H2D itself to overlap with the previous split's
-                    // compute.
-                    if (moe_prefetch_hit && fn_staging_d2d && moe_prefetch_slot >= 0) {
-                        if (fn_staging_d2d((void *)split_backend, moe_prefetch_slot, input_cpy)) {
-                            GGML_LOG_DEBUG("%s: staging D2D split=%d slot=%d\n",
-                                           __func__, split_id, moe_prefetch_slot);
-                            continue;
-                        }
-                        GGML_LOG_WARN("%s: staging D2D failed split=%d slot=%d — falling back to selective copy\n",
-                                      __func__, split_id, moe_prefetch_slot);
-                    }
-
                     const int64_t n_expert   = node->op == GGML_OP_MUL_MAT_ID ? input->ne[2] : input->ne[1];
                     const size_t expert_size = node->op == GGML_OP_MUL_MAT_ID ? input->nb[2] : input->nb[1];
-
-                    ggml_backend_synchronize(input_backend);
 
                     // get the ids
                     ggml_tensor * ids_tensor = node->src[2];
@@ -1719,6 +1724,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     }
 
                     if (ids_tensor != prev_ids_tensor) {
+                        ggml_backend_synchronize(input_backend);
+
                         ids.resize(ggml_nbytes(ids_tensor) / sizeof(int32_t));
                         ggml_backend_tensor_get_async(ids_backend, ids_tensor, ids.data(), 0, ggml_nbytes(ids_tensor));
                         ggml_backend_synchronize(ids_backend);
@@ -1735,6 +1742,43 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                         }
 
                         prev_ids_tensor = ids_tensor;
+                    }
+
+                    // Plan B (staging): prefetch stream already H2D'd the weight
+                    // bytes into staging[slot] and recorded h2d_done[slot]. Issue
+                    // a main-stream waitEvent + D2D staging->input_cpy. This keeps
+                    // the write to input_cpy on the same stream as the subsequent
+                    // compute (no cross-stream alias race) while allowing the H2D
+                    // itself to overlap with the previous split's compute.
+                    //
+                    // n_ranges == 0 means the slot was H2D'd full-tensor; >0 means
+                    // selective, and we dispatch the mirror-range D2D so only the
+                    // same expert byte windows are transferred.
+                    //
+                    // NOTE: ids parse above must run FIRST so prev_ids_tensor and
+                    // used_ids are current when the fire block (after compute
+                    // submission below) picks up selective mode.
+                    if (moe_prefetch_hit && moe_prefetch_slot >= 0) {
+                        const int n_ranges = prefetch_n_ranges[moe_prefetch_slot];
+                        bool d2d_ok = false;
+                        const char * mode_str = "full";
+                        if (n_ranges > 0 && fn_staging_d2d_ranges) {
+                            d2d_ok = fn_staging_d2d_ranges((void *)split_backend,
+                                                           moe_prefetch_slot, input_cpy,
+                                                           prefetch_ranges[moe_prefetch_slot],
+                                                           n_ranges);
+                            mode_str = "selective";
+                        } else if (fn_staging_d2d) {
+                            d2d_ok = fn_staging_d2d((void *)split_backend, moe_prefetch_slot, input_cpy);
+                        }
+                        prefetch_n_ranges[moe_prefetch_slot] = 0;  // invalidate cached ranges
+                        if (d2d_ok) {
+                            GGML_LOG_DEBUG("%s: staging D2D split=%d slot=%d mode=%s ranges=%d\n",
+                                           __func__, split_id, moe_prefetch_slot, mode_str, n_ranges);
+                            continue;
+                        }
+                        GGML_LOG_WARN("%s: staging D2D failed split=%d slot=%d — falling back to selective copy\n",
+                                      __func__, split_id, moe_prefetch_slot);
                     }
 
                     // group consecutive experts and copy them together
@@ -1838,11 +1882,20 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
-        // Plan B (Option D staging): after submitting compute N, fire the next
-        // split's H2D on the INDEPENDENT prefetch stream, writing into the
-        // double-buffered staging[slot]. The D2D staging->input_cpy on the main
-        // stream will fence against h2d_done[slot] when split N+1 runs, so the
-        // H2D is free to overlap with this split's compute.
+        // Plan B (staging): after submitting compute N, fire the next split's
+        // H2D on the INDEPENDENT prefetch stream, writing into the
+        // double-buffered staging[slot].
+        //
+        // Selective mode: when the next split's ids tensor matches the
+        // ids tensor consumed by the current split (same-layer A->B or B->C),
+        // used_ids was just built above. We reuse it to emit one memcpy per
+        // activated expert range (matching Plan A's copy_experts layout). The
+        // consume path (fn_staging_d2d_ranges) mirrors the exact same ranges.
+        //
+        // Full-tensor fallback is used for:
+        //   - split A (cross-layer boundary; previous split's ids don't apply)
+        //   - selective dispatch failure
+        //   - _ranges proc addresses not available (old DLL).
         if (prefetch_enabled && !sched->callback_eval && !prefetch_pending) {
             int next_id = split_id + 1;
             if (is_moe_cpu_split(sched, next_id)) {
@@ -1851,6 +1904,18 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 if (fn_staging_h2d) {
                     bool fired = false;
                     int  slot  = prefetch_counter & 1;
+                    const char * mode_str = "full";
+                    int    n_ranges_used  = 0;
+                    size_t bytes_to_copy  = 0;
+
+                    struct ggml_tensor * next_ids = next_node->src[2];
+                    const bool can_selective =
+                        (fn_staging_h2d_ranges != nullptr) &&
+                        (fn_staging_d2d_ranges != nullptr) &&
+                        (prev_ids_tensor != nullptr) &&
+                        (next_ids == prev_ids_tensor) &&
+                        !used_ids.empty();
+
                     for (int i = 0; i < next_split->n_inputs; i++) {
                         struct ggml_tensor * inp     = next_split->inputs[i];
                         struct ggml_tensor * inp_cpy = tensor_copy(inp, next_split->backend_id, sched->cur_copy);
@@ -1859,10 +1924,68 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                             ggml_backend_buffer_get_usage(inp->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
                             ggml_backend_buffer_is_host(inp->buffer) &&
                             next_node->op == GGML_OP_MUL_MAT_ID) {
-                            if (fn_staging_h2d((void *)moe_cuda_backend, prefetch_stream, slot, inp)) {
-                                fired = true;
-                                GGML_LOG_DEBUG("%s: staging H2D fired split=%d slot=%d\n",
-                                               __func__, next_id, slot);
+
+                            const int64_t n_expert    = inp->ne[2];
+                            const size_t  expert_size = inp->nb[2];
+
+                            if (can_selective) {
+                                GGML_ASSERT(n_expert > 0 && n_expert <= MOE_MAX_RANGES);
+                                const int n_expert_i = (int)n_expert;
+                                struct moe_expert_range ranges[MOE_MAX_RANGES];
+                                int n_ranges = 0;
+
+                                int id = 0;
+                                while (id < n_expert_i && !ggml_bitset_get(used_ids.data(), id)) {
+                                    id++;
+                                }
+                                if (id < n_expert_i) {
+                                    int32_t first_id = (int32_t)id;
+                                    int32_t last_id  = first_id;
+                                    for (++id; id < n_expert_i; ++id) {
+                                        if (!ggml_bitset_get(used_ids.data(), id)) continue;
+                                        if (id == last_id + 1) {
+                                            last_id = (int32_t)id;
+                                            continue;
+                                        }
+                                        ranges[n_ranges].first_id = first_id;
+                                        ranges[n_ranges].last_id  = last_id;
+                                        n_ranges++;
+                                        first_id = (int32_t)id;
+                                        last_id  = first_id;
+                                    }
+                                    ranges[n_ranges].first_id = first_id;
+                                    ranges[n_ranges].last_id  = last_id;
+                                    n_ranges++;
+                                }
+
+                                if (n_ranges > 0 &&
+                                    fn_staging_h2d_ranges((void *)moe_cuda_backend, prefetch_stream,
+                                                          slot, inp, ranges, n_ranges)) {
+                                    memcpy(prefetch_ranges[slot], ranges, sizeof(ranges[0]) * n_ranges);
+                                    prefetch_n_ranges[slot] = n_ranges;
+                                    fired = true;
+                                    mode_str = "selective";
+                                    n_ranges_used = n_ranges;
+                                    for (int r = 0; r < n_ranges; r++) {
+                                        bytes_to_copy += (size_t)(ranges[r].last_id - ranges[r].first_id + 1) * expert_size;
+                                    }
+                                }
+                            }
+
+                            if (!fired) {
+                                if (fn_staging_h2d((void *)moe_cuda_backend, prefetch_stream, slot, inp)) {
+                                    prefetch_n_ranges[slot] = 0;  // flag as full-tensor
+                                    fired = true;
+                                    mode_str = "full";
+                                    n_ranges_used = 1;
+                                    bytes_to_copy = ggml_nbytes(inp);
+                                }
+                            }
+
+                            if (fired) {
+                                GGML_LOG_DEBUG("%s: moe prefetch fired: split=%d slot=%d mode=%s ids=%p bytes=%zu ranges=%d\n",
+                                               __func__, next_id, slot, mode_str, (void *)next_ids,
+                                               bytes_to_copy, n_ranges_used);
                             }
                             break;
                         }

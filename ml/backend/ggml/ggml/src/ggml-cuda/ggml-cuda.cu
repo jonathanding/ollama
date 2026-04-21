@@ -5270,6 +5270,102 @@ static bool ggml_backend_cuda_moe_staging_d2d(
                            cudaMemcpyDeviceToDevice, main_stream) == cudaSuccess;
 }
 
+// Range descriptor for selective staging: [first_id, last_id] inclusive, along
+// the expert dimension (input->ne[2]) of a MUL_MAT_ID weight tensor.
+struct moe_expert_range {
+    int32_t first_id;
+    int32_t last_id;
+};
+
+// Selective H2D on the prefetch stream: for each range, copy the corresponding
+// contiguous expert rows from pinned CPU memory to staging[slot] at the SAME
+// byte offset (so the subsequent D2D can mirror the layout). After all ranges
+// are submitted, record h2d_done[slot] once. Mirrors the MMQ padding_end
+// behavior of the Plan A main path.
+static bool ggml_backend_cuda_moe_staging_h2d_ranges(
+        void * backend_handle, void * prefetch_stream_handle, int slot,
+        struct ggml_tensor * input,
+        const struct moe_expert_range * ranges, int n_ranges) {
+    if (!backend_handle || !prefetch_stream_handle || !input) return false;
+    if (!ranges || n_ranges <= 0) return false;
+    if (slot < 0 || slot > 1) return false;
+    ggml_backend_t backend = (ggml_backend_t)backend_handle;
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
+    if (cuda_ctx->moe_staging.buffers[slot] == nullptr ||
+        cuda_ctx->moe_staging.h2d_done[slot] == nullptr) return false;
+    size_t tensor_nbytes = ggml_nbytes(input);
+    if (tensor_nbytes > cuda_ctx->moe_staging.capacity) return false;
+
+    const int32_t n_expert    = (int32_t)input->ne[2];
+    const size_t  expert_size = input->nb[2];
+    const size_t  padding     = expert_size < 512 ? expert_size : 512;
+
+    cudaStream_t pstream = (cudaStream_t)prefetch_stream_handle;
+    uint8_t *    staging = (uint8_t *)cuda_ctx->moe_staging.buffers[slot];
+
+    for (int r = 0; r < n_ranges; r++) {
+        const int32_t first_id = ranges[r].first_id;
+        const int32_t last_id  = ranges[r].last_id;
+        if (first_id < 0 || last_id < first_id || last_id >= n_expert) return false;
+
+        const size_t expert_offset    = (size_t)first_id * expert_size;
+        const size_t expert_size_copy = (size_t)(last_id - first_id + 1) * expert_size;
+        const size_t padding_end      = (n_expert > 1 && last_id < n_expert - 1) ? padding : 0;
+
+        const uint8_t * src = (const uint8_t *)input->data + expert_offset;
+        uint8_t       * dst = staging + expert_offset;
+        if (cudaMemcpyAsync(dst, src, expert_size_copy + padding_end,
+                            cudaMemcpyHostToDevice, pstream) != cudaSuccess) {
+            return false;
+        }
+    }
+    return cudaEventRecord(cuda_ctx->moe_staging.h2d_done[slot], pstream) == cudaSuccess;
+}
+
+// Selective D2D on the main compute stream: wait on h2d_done[slot] once, then
+// issue one cudaMemcpyAsync per range, reading from staging[slot] at the same
+// expert offset that the H2D wrote to.
+static bool ggml_backend_cuda_moe_staging_d2d_ranges(
+        void * backend_handle, int slot, struct ggml_tensor * input_cpy,
+        const struct moe_expert_range * ranges, int n_ranges) {
+    if (!backend_handle || !input_cpy) return false;
+    if (!ranges || n_ranges <= 0) return false;
+    if (slot < 0 || slot > 1) return false;
+    ggml_backend_t backend = (ggml_backend_t)backend_handle;
+    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
+    if (cuda_ctx->moe_staging.buffers[slot] == nullptr ||
+        cuda_ctx->moe_staging.h2d_done[slot] == nullptr) return false;
+    size_t tensor_nbytes = ggml_nbytes(input_cpy);
+    if (tensor_nbytes > cuda_ctx->moe_staging.capacity) return false;
+
+    const int32_t n_expert    = (int32_t)input_cpy->ne[2];
+    const size_t  expert_size = input_cpy->nb[2];
+    const size_t  padding     = expert_size < 512 ? expert_size : 512;
+
+    cudaStream_t main_stream = cuda_ctx->stream();
+    if (cudaStreamWaitEvent(main_stream, cuda_ctx->moe_staging.h2d_done[slot], 0) != cudaSuccess) return false;
+
+    const uint8_t * staging = (const uint8_t *)cuda_ctx->moe_staging.buffers[slot];
+    uint8_t *       dst_base = (uint8_t *)input_cpy->data;
+
+    for (int r = 0; r < n_ranges; r++) {
+        const int32_t first_id = ranges[r].first_id;
+        const int32_t last_id  = ranges[r].last_id;
+        if (first_id < 0 || last_id < first_id || last_id >= n_expert) return false;
+
+        const size_t expert_offset    = (size_t)first_id * expert_size;
+        const size_t expert_size_copy = (size_t)(last_id - first_id + 1) * expert_size;
+        const size_t padding_end      = (n_expert > 1 && last_id < n_expert - 1) ? padding : 0;
+
+        if (cudaMemcpyAsync(dst_base + expert_offset, staging + expert_offset,
+                            expert_size_copy + padding_end,
+                            cudaMemcpyDeviceToDevice, main_stream) != cudaSuccess) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
     if (strcmp(name, "ggml_backend_split_buffer_type") == 0) {
@@ -5319,6 +5415,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_cuda_moe_staging_d2d") == 0) {
         return (void *)ggml_backend_cuda_moe_staging_d2d;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_staging_h2d_ranges") == 0) {
+        return (void *)ggml_backend_cuda_moe_staging_h2d_ranges;
+    }
+    if (strcmp(name, "ggml_backend_cuda_moe_staging_d2d_ranges") == 0) {
+        return (void *)ggml_backend_cuda_moe_staging_d2d_ranges;
     }
     return nullptr;
 }
