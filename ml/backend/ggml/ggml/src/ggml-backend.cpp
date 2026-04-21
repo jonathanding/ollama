@@ -1602,10 +1602,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
-        // Plan B: if this split was prefetched, wait for the copy to complete
+        // Plan B: if this split was prefetched, skip the redundant weight copy.
+        // Under OPTION A the H2D was enqueued on this split's own compute stream,
+        // so FIFO ordering guarantees the weights are in place before compute —
+        // no event synchronize required.
         bool moe_prefetch_hit = false;
         if (prefetch_enabled && prefetch_pending && split_id == prefetch_split_id) {
-            if (fn_prefetch_event_sync) fn_prefetch_event_sync(prefetch_event);
             prefetch_pending  = false;
             moe_prefetch_hit  = true;
             GGML_LOG_DEBUG("%s: prefetch hit split=%d\n", __func__, split_id);
@@ -1790,13 +1792,21 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
-        // Plan B: after submitting compute N, fire prefetch for split N+1
+        // Plan B: after submitting compute N, fire prefetch for split N+1.
+        //
+        // OPTION A: The prefetch now runs on the destination split's main compute
+        // stream (see ggml_backend_cuda_moe_prefetch_tensor). Same-stream FIFO
+        // ordering makes the cross-split event unnecessary — the subsequent
+        // compute N+1 on that stream will automatically wait for the H2D to
+        // finish. We still maintain `prefetch_pending`/`prefetch_split_id` so
+        // the split-N+1 input_copy block can skip its redundant copy.
         if (prefetch_enabled && !sched->callback_eval && !prefetch_pending) {
             int next_id = split_id + 1;
             if (is_moe_cpu_split(sched, next_id)) {
                 struct ggml_backend_sched_split * next_split = &sched->splits[next_id];
                 struct ggml_tensor * next_node = next_split->graph.nodes[0];
-                if (fn_prefetch_tensor && fn_prefetch_event_record) {
+                ggml_backend_t next_backend = sched->backends[next_split->backend_id];
+                if (fn_prefetch_tensor) {
                     bool fired = false;
                     for (int i = 0; i < next_split->n_inputs; i++) {
                         struct ggml_tensor * inp     = next_split->inputs[i];
@@ -1806,7 +1816,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                             ggml_backend_buffer_get_usage(inp->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
                             ggml_backend_buffer_is_host(inp->buffer) &&
                             next_node->op == GGML_OP_MUL_MAT_ID) {
-                            if (fn_prefetch_tensor(prefetch_stream, inp, inp_cpy)) {
+                            if (fn_prefetch_tensor((void *)next_backend, inp, inp_cpy)) {
                                 fired = true;
                                 GGML_LOG_DEBUG("%s: prefetch fired split=%d\n", __func__, next_id);
                             }
@@ -1814,7 +1824,6 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                         }
                     }
                     if (fired) {
-                        fn_prefetch_event_record(prefetch_event, prefetch_stream);
                         prefetch_pending  = true;
                         prefetch_split_id = next_id;
                     }
