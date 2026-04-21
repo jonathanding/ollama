@@ -1489,6 +1489,12 @@ typedef void  (*moe_event_record_fn_t)(void *, void *);
 typedef void  (*moe_event_synchronize_fn_t)(void *);
 typedef bool  (*moe_prefetch_tensor_fn_t)(void *, struct ggml_tensor *, struct ggml_tensor *);
 
+// Plan B staging buffer helpers (overlap-safe prefetch)
+typedef bool  (*moe_staging_init_fn_t)(void * backend, size_t max_size);
+typedef void  (*moe_staging_destroy_fn_t)(void * backend);
+typedef bool  (*moe_staging_h2d_fn_t)(void * backend, void * prefetch_stream, int slot, struct ggml_tensor * input);
+typedef bool  (*moe_staging_d2d_fn_t)(void * backend, int slot, struct ggml_tensor * input_cpy);
+
 // Looks up a MoE prefetch proc address via the ggml backend registry.
 // Iterates sched->backends to find the first GPU backend, then calls
 // ggml_backend_reg_get_proc_address on its reg.  This is the correct path
@@ -1544,48 +1550,79 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
     std::vector<int32_t> ids;
     std::vector<ggml_bitset_t> used_ids;
 
-    // Plan B MoE prefetch: initialize stream/event if OLLAMA_MOE_PREFETCH is set
+    // Plan B MoE prefetch (staging path): initialize independent prefetch stream
+    // and double staging buffers if OLLAMA_MOE_PREFETCH is set.
+    //
+    // Architecture:
+    //   prefetch stream: H2D pinned_CPU -> staging[slot], record h2d_done[slot]
+    //   main stream:     waitEvent(h2d_done[slot]), D2D staging[slot] -> input_cpy
+    // Double buffering (slot = counter & 1) lets the next H2D start while the
+    // current D2D is still draining, reclaiming copy/compute overlap without
+    // racing on ggml-alloc-aliased input_cpy regions.
     bool     prefetch_enabled  = false;
     void *   prefetch_stream   = nullptr;
-    void *   prefetch_event    = nullptr;
     bool     prefetch_pending  = false;
     int      prefetch_split_id = -1;
-    // Pre-resolved hot-path function pointers (avoid repeated moe_get_proc in the split loop)
-    moe_event_synchronize_fn_t fn_prefetch_event_sync   = nullptr;
-    moe_prefetch_tensor_fn_t   fn_prefetch_tensor        = nullptr;
-    moe_event_record_fn_t      fn_prefetch_event_record  = nullptr;
-    moe_stream_synchronize_fn_t fn_prefetch_stream_sync  = nullptr;
+    int      prefetch_slot     = 0;   // which staging buffer was H2D-written
+    int      prefetch_counter  = 0;   // monotonic fire counter; slot = counter & 1
+    ggml_backend_t moe_cuda_backend = nullptr;  // backend that owns the staging buffers
+
     moe_stream_destroy_fn_t    fn_prefetch_stream_destroy = nullptr;
-    moe_event_destroy_fn_t     fn_prefetch_event_destroy  = nullptr;
+    moe_stream_synchronize_fn_t fn_prefetch_stream_sync   = nullptr;
+    moe_staging_init_fn_t      fn_staging_init    = nullptr;
+    moe_staging_destroy_fn_t   fn_staging_destroy = nullptr;
+    moe_staging_h2d_fn_t       fn_staging_h2d     = nullptr;
+    moe_staging_d2d_fn_t       fn_staging_d2d     = nullptr;
 
     static bool prefetch_init_logged = false;
     if (getenv("OLLAMA_MOE_PREFETCH") != nullptr) {
         auto fn_stream_create = (moe_stream_create_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_create");
-        auto fn_event_create  = (moe_event_create_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_create");
-        if (fn_stream_create && fn_event_create) {
-            prefetch_stream = fn_stream_create();
-            prefetch_event  = fn_event_create();
-            if (prefetch_stream && prefetch_event) {
-                fn_prefetch_event_sync    = (moe_event_synchronize_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_synchronize");
-                fn_prefetch_tensor        = (moe_prefetch_tensor_fn_t)   moe_get_proc(sched, "ggml_backend_cuda_moe_prefetch_tensor");
-                fn_prefetch_event_record  = (moe_event_record_fn_t)      moe_get_proc(sched, "ggml_backend_cuda_moe_event_record");
-                fn_prefetch_stream_sync   = (moe_stream_synchronize_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_synchronize");
-                fn_prefetch_stream_destroy = (moe_stream_destroy_fn_t)   moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
-                fn_prefetch_event_destroy  = (moe_event_destroy_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_event_destroy");
-                prefetch_enabled = true;
-                if (!prefetch_init_logged) {
-                    GGML_LOG_INFO("%s: MoE lookahead prefetch enabled\n", __func__);
-                    prefetch_init_logged = true;
+        fn_prefetch_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
+        fn_prefetch_stream_sync    = (moe_stream_synchronize_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_synchronize");
+        fn_staging_init    = (moe_staging_init_fn_t)   moe_get_proc(sched, "ggml_backend_cuda_moe_staging_init");
+        fn_staging_destroy = (moe_staging_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_staging_destroy");
+        fn_staging_h2d     = (moe_staging_h2d_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_staging_h2d");
+        fn_staging_d2d     = (moe_staging_d2d_fn_t)    moe_get_proc(sched, "ggml_backend_cuda_moe_staging_d2d");
+
+        if (fn_stream_create && fn_staging_init && fn_staging_h2d && fn_staging_d2d) {
+            // Walk splits to find the max MoE weight tensor size and the CUDA backend
+            size_t max_moe_split_size = 0;
+            for (int s = 0; s < sched->n_splits; s++) {
+                if (!is_moe_cpu_split(sched, s)) continue;
+                struct ggml_backend_sched_split * sp = &sched->splits[s];
+                for (int i = 0; i < sp->n_inputs; i++) {
+                    struct ggml_tensor * inp = sp->inputs[i];
+                    if (inp->buffer &&
+                        ggml_backend_buffer_is_host(inp->buffer) &&
+                        ggml_backend_buffer_get_usage(inp->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
+                        size_t nb = ggml_nbytes(inp);
+                        if (nb > max_moe_split_size) max_moe_split_size = nb;
+                        if (!moe_cuda_backend) moe_cuda_backend = sched->backends[sp->backend_id];
+                    }
+                }
+            }
+            if (max_moe_split_size > 0 && moe_cuda_backend) {
+                prefetch_stream = fn_stream_create();
+                if (prefetch_stream && fn_staging_init((void *)moe_cuda_backend, max_moe_split_size)) {
+                    prefetch_enabled = true;
+                    if (!prefetch_init_logged) {
+                        GGML_LOG_INFO("%s: MoE lookahead prefetch enabled (staging 2x%zu MiB)\n",
+                                      __func__, max_moe_split_size / (1024 * 1024));
+                        prefetch_init_logged = true;
+                    }
+                } else {
+                    if (fn_prefetch_stream_destroy && prefetch_stream) {
+                        fn_prefetch_stream_destroy(prefetch_stream);
+                    }
+                    prefetch_stream = nullptr;
+                    if (!prefetch_init_logged) {
+                        GGML_LOG_WARN("%s: MoE prefetch disabled — staging allocation failed\n", __func__);
+                        prefetch_init_logged = true;
+                    }
                 }
             } else {
-                auto fn_stream_destroy = (moe_stream_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_stream_destroy");
-                auto fn_event_destroy  = (moe_event_destroy_fn_t) moe_get_proc(sched, "ggml_backend_cuda_moe_event_destroy");
-                if (fn_stream_destroy && prefetch_stream) fn_stream_destroy(prefetch_stream);
-                if (fn_event_destroy  && prefetch_event)  fn_event_destroy(prefetch_event);
-                prefetch_stream = nullptr;
-                prefetch_event  = nullptr;
                 if (!prefetch_init_logged) {
-                    GGML_LOG_WARN("%s: MoE prefetch disabled — stream/event creation failed\n", __func__);
+                    GGML_LOG_INFO("%s: MoE prefetch inactive — no CPU-MoE splits in graph\n", __func__);
                     prefetch_init_logged = true;
                 }
             }
@@ -1602,15 +1639,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
 
-        // Plan B: if this split was prefetched, skip the redundant weight copy.
-        // Under OPTION A the H2D was enqueued on this split's own compute stream,
-        // so FIFO ordering guarantees the weights are in place before compute —
-        // no event synchronize required.
-        bool moe_prefetch_hit = false;
+        // Plan B (Option D staging): if this split was prefetched, the weights are
+        // already in staging VRAM. Remember the slot so the input_copy block below
+        // can issue a staging->input_cpy D2D instead of the regular H2D.
+        bool moe_prefetch_hit  = false;
+        int  moe_prefetch_slot = -1;
         if (prefetch_enabled && prefetch_pending && split_id == prefetch_split_id) {
-            prefetch_pending  = false;
             moe_prefetch_hit  = true;
-            GGML_LOG_DEBUG("%s: prefetch hit split=%d\n", __func__, split_id);
+            moe_prefetch_slot = prefetch_slot;
+            prefetch_pending  = false;
+            GGML_LOG_DEBUG("%s: prefetch hit split=%d slot=%d\n", __func__, split_id, moe_prefetch_slot);
         }
 
         // copy the input tensors to the split backend
@@ -1644,11 +1682,21 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     //|| (node->src[1] == input_cpy && node->op == GGML_OP_ADD_ID) /* GGML_OP_ADD_ID weights are small and not worth splitting */
                     )) {
 
-                    // Plan B: full-layer prefetch already wrote to input_cpy — skip copy
-                    if (moe_prefetch_hit) {
-                        GGML_LOG_DEBUG("%s: skipping expert copy for split %d (prefetched)\n",
-                                       __func__, split_id);
-                        continue;
+                    // Plan B (Option D staging): prefetch stream already H2D'd the
+                    // full weight into staging[slot] and recorded h2d_done[slot].
+                    // Issue a main-stream waitEvent + D2D staging->input_cpy. This
+                    // keeps the write to input_cpy on the same stream as the
+                    // subsequent compute (no cross-stream alias race) while
+                    // allowing the H2D itself to overlap with the previous split's
+                    // compute.
+                    if (moe_prefetch_hit && fn_staging_d2d && moe_prefetch_slot >= 0) {
+                        if (fn_staging_d2d((void *)split_backend, moe_prefetch_slot, input_cpy)) {
+                            GGML_LOG_DEBUG("%s: staging D2D split=%d slot=%d\n",
+                                           __func__, split_id, moe_prefetch_slot);
+                            continue;
+                        }
+                        GGML_LOG_WARN("%s: staging D2D failed split=%d slot=%d — falling back to selective copy\n",
+                                      __func__, split_id, moe_prefetch_slot);
                     }
 
                     const int64_t n_expert   = node->op == GGML_OP_MUL_MAT_ID ? input->ne[2] : input->ne[1];
@@ -1749,7 +1797,6 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                 if (prefetch_enabled) {
                     if (fn_prefetch_stream_sync)    fn_prefetch_stream_sync(prefetch_stream);
                     if (fn_prefetch_stream_destroy) fn_prefetch_stream_destroy(prefetch_stream);
-                    if (fn_prefetch_event_destroy)  fn_prefetch_event_destroy(prefetch_event);
                 }
                 return ec;
             }
@@ -1776,7 +1823,6 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     if (prefetch_enabled) {
                         if (fn_prefetch_stream_sync)    fn_prefetch_stream_sync(prefetch_stream);
                         if (fn_prefetch_stream_destroy) fn_prefetch_stream_destroy(prefetch_stream);
-                        if (fn_prefetch_event_destroy)  fn_prefetch_event_destroy(prefetch_event);
                     }
                     return ec;
                 }
@@ -1792,22 +1838,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
-        // Plan B: after submitting compute N, fire prefetch for split N+1.
-        //
-        // OPTION A: The prefetch now runs on the destination split's main compute
-        // stream (see ggml_backend_cuda_moe_prefetch_tensor). Same-stream FIFO
-        // ordering makes the cross-split event unnecessary — the subsequent
-        // compute N+1 on that stream will automatically wait for the H2D to
-        // finish. We still maintain `prefetch_pending`/`prefetch_split_id` so
-        // the split-N+1 input_copy block can skip its redundant copy.
+        // Plan B (Option D staging): after submitting compute N, fire the next
+        // split's H2D on the INDEPENDENT prefetch stream, writing into the
+        // double-buffered staging[slot]. The D2D staging->input_cpy on the main
+        // stream will fence against h2d_done[slot] when split N+1 runs, so the
+        // H2D is free to overlap with this split's compute.
         if (prefetch_enabled && !sched->callback_eval && !prefetch_pending) {
             int next_id = split_id + 1;
             if (is_moe_cpu_split(sched, next_id)) {
                 struct ggml_backend_sched_split * next_split = &sched->splits[next_id];
                 struct ggml_tensor * next_node = next_split->graph.nodes[0];
-                ggml_backend_t next_backend = sched->backends[next_split->backend_id];
-                if (fn_prefetch_tensor) {
+                if (fn_staging_h2d) {
                     bool fired = false;
+                    int  slot  = prefetch_counter & 1;
                     for (int i = 0; i < next_split->n_inputs; i++) {
                         struct ggml_tensor * inp     = next_split->inputs[i];
                         struct ggml_tensor * inp_cpy = tensor_copy(inp, next_split->backend_id, sched->cur_copy);
@@ -1816,9 +1859,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                             ggml_backend_buffer_get_usage(inp->buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS &&
                             ggml_backend_buffer_is_host(inp->buffer) &&
                             next_node->op == GGML_OP_MUL_MAT_ID) {
-                            if (fn_prefetch_tensor((void *)next_backend, inp, inp_cpy)) {
+                            if (fn_staging_h2d((void *)moe_cuda_backend, prefetch_stream, slot, inp)) {
                                 fired = true;
-                                GGML_LOG_DEBUG("%s: prefetch fired split=%d\n", __func__, next_id);
+                                GGML_LOG_DEBUG("%s: staging H2D fired split=%d slot=%d\n",
+                                               __func__, next_id, slot);
                             }
                             break;
                         }
@@ -1826,6 +1870,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
                     if (fired) {
                         prefetch_pending  = true;
                         prefetch_split_id = next_id;
+                        prefetch_slot     = slot;
+                        prefetch_counter++;
                     }
                 }
             }
@@ -1839,13 +1885,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         }
     }
 
-    // Plan B cleanup: drain the prefetch stream and destroy resources
+    // Plan B cleanup: drain the prefetch stream and destroy it.
+    // (Staging buffers + per-slot events live on the CUDA backend context and
+    // are torn down in ggml_backend_sched_free / ~ggml_backend_cuda_context.)
     if (prefetch_enabled) {
-        if (prefetch_pending) {
-            if (fn_prefetch_event_sync) fn_prefetch_event_sync(prefetch_event);
-        }
+        if (fn_prefetch_stream_sync)    fn_prefetch_stream_sync(prefetch_stream);
         if (fn_prefetch_stream_destroy) fn_prefetch_stream_destroy(prefetch_stream);
-        if (fn_prefetch_event_destroy)  fn_prefetch_event_destroy(prefetch_event);
     }
 
     return GGML_STATUS_SUCCESS;
@@ -1939,6 +1984,23 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     if (sched == NULL) {
         return;
     }
+
+    // Plan B (Option D): release the MoE staging buffers on the CUDA backend
+    // before tearing down sched internals. Proactive cleanup avoids holding
+    // ~2 * max_split_size of VRAM across sched recreation; the CUDA context
+    // destructor remains as a safety net.
+    if (auto fn_staging_destroy =
+            (moe_staging_destroy_fn_t)moe_get_proc(sched, "ggml_backend_cuda_moe_staging_destroy")) {
+        for (int b = 0; b < sched->n_backends; b++) {
+            ggml_backend_t backend = sched->backends[b];
+            if (!backend) continue;
+            ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+            if (!dev || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+            fn_staging_destroy((void *)backend);
+            break;
+        }
+    }
+
     for (int b = 0; b < sched->n_backends; b++) {
         for (int c = 0; c < sched->n_copies; c++) {
             ggml_backend_event_free(sched->events[b][c]);
