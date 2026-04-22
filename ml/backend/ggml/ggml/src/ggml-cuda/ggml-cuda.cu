@@ -5108,66 +5108,6 @@ static void ggml_backend_cuda_moe_stream_synchronize(void * stream_handle) {
     }
 }
 
-static void * ggml_backend_cuda_moe_event_create() {
-    cudaEvent_t event;
-    // cudaEventDisableTiming: 不记录时间戳，降低 overhead
-    if (cudaEventCreateWithFlags(&event, cudaEventDisableTiming) != cudaSuccess) {
-        return nullptr;
-    }
-    return (void *)event;
-}
-
-static void ggml_backend_cuda_moe_event_destroy(void * event_handle) {
-    if (event_handle) {
-        cudaEventDestroy((cudaEvent_t)event_handle);
-    }
-}
-
-static void ggml_backend_cuda_moe_event_record(void * event_handle, void * stream_handle) {
-    if (event_handle && stream_handle) {
-        cudaEventRecord((cudaEvent_t)event_handle, (cudaStream_t)stream_handle);
-    }
-}
-
-static void ggml_backend_cuda_moe_event_synchronize(void * event_handle) {
-    if (event_handle) {
-        cudaEventSynchronize((cudaEvent_t)event_handle);
-    }
-}
-
-// Full-layer prefetch: copies the entire weight tensor (all experts) from CPU
-// pinned memory to the VRAM input_cpy tensor.
-//
-// OPTION A (correctness fix for cross-stream race):
-// Issues the H2D copy on the CUDA backend's main compute stream (same stream
-// used by ggml_backend_tensor_set_async). Rationale: ggml-alloc may alias the
-// input_cpy tensors of consecutive same-layer splits onto the same VRAM region
-// (their lifetimes are non-overlapping in graph view). Writing on an independent
-// stream concurrently with the previous split's in-flight compute (reading the
-// aliased region) is a data race. Using the main compute stream enforces FIFO
-// ordering: compute N completes before H2D for split N+1 begins. This gives up
-// copy/compute overlap but restores correctness. A future revision can stage
-// into a private buffer on an independent stream and D2D into input_cpy on the
-// main stream to reclaim the overlap.
-//
-// The backend_handle must be the CUDA backend that will compute the destination
-// split (so the copy lands on the same stream as that split's compute).
-// The stream_handle parameter is retained for ABI compatibility but ignored.
-// Returns true on success. Caller must ensure source is pinned (OLLAMA_MOE_PINNED=1).
-static bool ggml_backend_cuda_moe_prefetch_tensor(
-        void * backend_handle,
-        struct ggml_tensor * input,      // CPU-side weight tensor (source)
-        struct ggml_tensor * input_cpy)  // VRAM tensor (destination)
-{
-    if (!backend_handle || !input || !input_cpy) return false;
-    ggml_backend_t backend = (ggml_backend_t)backend_handle;
-    ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
-    cudaStream_t stream = cuda_ctx->stream();
-    size_t nbytes = ggml_nbytes(input);
-    return cudaMemcpyAsync(input_cpy->data, input->data, nbytes,
-                           cudaMemcpyHostToDevice, stream) == cudaSuccess;
-}
-
 // ---------------------------------------------------------------------------
 // Plan B MoE prefetch — staging buffer path (overlap-safe)
 //
@@ -5388,21 +5328,6 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_cuda_moe_stream_synchronize") == 0) {
         return (void *)ggml_backend_cuda_moe_stream_synchronize;
-    }
-    if (strcmp(name, "ggml_backend_cuda_moe_event_create") == 0) {
-        return (void *)ggml_backend_cuda_moe_event_create;
-    }
-    if (strcmp(name, "ggml_backend_cuda_moe_event_destroy") == 0) {
-        return (void *)ggml_backend_cuda_moe_event_destroy;
-    }
-    if (strcmp(name, "ggml_backend_cuda_moe_event_record") == 0) {
-        return (void *)ggml_backend_cuda_moe_event_record;
-    }
-    if (strcmp(name, "ggml_backend_cuda_moe_event_synchronize") == 0) {
-        return (void *)ggml_backend_cuda_moe_event_synchronize;
-    }
-    if (strcmp(name, "ggml_backend_cuda_moe_prefetch_tensor") == 0) {
-        return (void *)ggml_backend_cuda_moe_prefetch_tensor;
     }
     if (strcmp(name, "ggml_backend_cuda_moe_staging_init") == 0) {
         return (void *)ggml_backend_cuda_moe_staging_init;

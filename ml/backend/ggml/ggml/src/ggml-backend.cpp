@@ -1483,11 +1483,6 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 typedef void *(*moe_stream_create_fn_t)();
 typedef void  (*moe_stream_destroy_fn_t)(void *);
 typedef void  (*moe_stream_synchronize_fn_t)(void *);
-typedef void *(*moe_event_create_fn_t)();
-typedef void  (*moe_event_destroy_fn_t)(void *);
-typedef void  (*moe_event_record_fn_t)(void *, void *);
-typedef void  (*moe_event_synchronize_fn_t)(void *);
-typedef bool  (*moe_prefetch_tensor_fn_t)(void *, struct ggml_tensor *, struct ggml_tensor *);
 
 // Plan B staging buffer helpers (overlap-safe prefetch)
 typedef bool  (*moe_staging_init_fn_t)(void * backend, size_t max_size);
