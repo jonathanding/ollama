@@ -387,7 +387,7 @@ overlap 机制在 Stage 4 已经建立，Stage 5 的增量收益纯粹来自 **P
 
 换言之 Stage 5 只搬运了 Stage 4 **63.0%** 的字节量，在 PCIe 带宽固定（≈25 GB/s pinned）的前提下，节省的时间正好是 134 GiB / 25 GB/s ≈ 5.4 s 累计（除以 11 次请求 ≈ 488 ms/次），与观测到的 398 ms 净节省基本吻合（差值来自 H2D 与 compute 的部分 overlap 在 Stage 4 本就存在）。
 
-**残差来源：** A split 必须 full（跨层 router 未知）→ 每层 ≈288 MiB 全量拷贝，30 层共 ≈8.4 GiB 无法 selective。如后续能在 router split 结束后 lazy 把 ids D2H 下来，A 也能 selective → 预期再省 60–80 ms。
+**残差来源：** A split 必须 full（跨层 router 未知）→ 每层 ≈288 MiB 全量拷贝，30 层共 ≈8.4 GiB 无法 selective。但需注意：A 的 prefetch 在 layer N 的 C compute 触发瞬间即 fire，A full-copy 11.25 ms 已基本塞进 10–15 ms 的跨层 overlap 窗口，**再把 A 改 selective 并不会加速**（详见 §9 bullet 1 的分析）；真正的残余优化空间在 D2D stage-out 并行化和 layer-level prefetch。
 
 ### 6.5 代码改动
 
@@ -560,7 +560,12 @@ def fibonacci(n: int) -> int:
 
 ## 9. 未来方向
 
-1. **跨层 A-split 也走 selective**：在 layer N 的 router split compute 之后、ids 写入 VRAM 的瞬间 lazy 触发一次 ids D2H。工程成本中等，预期再省 60–80 ms
+1. **跨层 A-split 走 selective —— 已分析否决**：原本设想在 layer N+1 的 router compute 结束后 lazy 触发 ids D2H 再对 A-split 发起 selective H2D。重新校对 fire 时序后确认此路径**反而更慢**，不是可行方向。
+   - **当前 Stage 5 的真实时序**：A[N+1] 的 prefetch 在 **layer N 的 C compute 触发瞬间**即 fire。overlap 窗口 = `layer N 的 C compute + layer N+1 的 attention + router + 其他非 MoE 算子` ≈ 10–15 ms。A full-copy ≈288 MiB / 25 GB/s ≈ 11.25 ms 刚好塞进这个窗口，A 其实已经接近最优，§6.3 gantt 里 15 ms `wait E[1]` 的主要来源是 D2D stage-out 与 event 同步，而非 copy 带宽
+   - **改 selective 的致命代价**：ids 必须等 layer N+1 router 结束才能拿到，fire 点被迫**从 layer N 的 C compute 触发瞬间推到 layer N+1 router 之后**，前面 10+ ms 的跨层 overlap 窗口全部消失；剩下只有 router 到首个 MoE 算子之间的极短尾巴，A selective 7.2 ms 几乎完全串行，净效果比现在全量 prefetch 更差
+   - **可行的替代方向**：
+     - **A 的 D2D stage-out 并行化**：让 D2D 与同层后续 compute 重叠，直接削减 15 ms bubble 中非带宽部分
+     - **Layer-level prefetch**：把 N+2 甚至 N+3 的 A full-copy 提前到 layer N 发起，彻底让 A 退出 critical path（和 bullet 4 合并考虑）
 2. **Parallel mode 适配**：当前所有测试在非 parallel 模式（`n_copies = 1`）下。`n_copies > 1` 时 arena aliasing 规则不同，需要单独验证 DSB 不与 parallel 双缓冲冲突
 3. **激活率敏感性 sweep**：观测到激活率在 40–75% 浮动，低激活率下 selective 收益更大，建议做 `selective_ratio × prefill_ms` 的扫描
 4. **Layer-level prefetch**：当前 prefetch 仅前瞻一个 split（≈3.5 ms compute 窗口）。若能跨多个 non-MoE 算子提前 prefetch 下一层 A-split 的 full copy，可能进一步缩短 A-split 的等待
