@@ -219,11 +219,11 @@ var (
 	// KvCacheType is the quantization type for the K/V cache.
 	KvCacheType = String("OLLAMA_KV_CACHE_TYPE")
 	// MoeGpuLayers controls how many layers have MoE expert weights resident on GPU.
-	//   -1 (default) = auto-compute from remaining VRAM after dense allocation
-	//    0           = disable MoE split (all MoE stays on CPU, useful for baseline comparison)
+	//    0 (default) = disable MoE split (default weight layout, useful for baseline comparison)
+	//   -1           = auto-compute from remaining VRAM after dense allocation
 	//   >0           = force this many layers to have MoE on GPU
 	// Complementary to llama.cpp's --n-cpu-moe: n_cpu_moe = total_layers - MoeGpuLayers
-	MoeGpuLayers = Int("OLLAMA_MOE_GPU_LAYERS", -1)
+	MoeGpuLayers = Int("OLLAMA_MOE_GPU_LAYERS", 0)
 	// MoePinned enables cudaHostRegister for CPU-side MoE expert weight buffers.
 	// When enabled, the CUDA Copy Engine can DMA directly from mmap memory
 	// without CPU-side staging, increasing H2D bandwidth from ~14 GB/s to ~25 GB/s.

@@ -1016,7 +1016,7 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 
 	isMoEModel := slices.ContainsFunc(moeSize, func(s uint64) bool { return s > 0 })
 
-	if isMoEModel {
+	if isMoEModel && envconfig.MoeGpuLayers() != 0 {
 		// dense size per layer = total layer size - MoE expert weights
 		denseSize := make([]uint64, len(layers))
 		for i := range denseSize {
@@ -1132,44 +1132,32 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 
 			// Honor user-specified moe GPU layer count exactly.
 			// assignLayers always greedily fills; cap it when the user set a hard limit.
-			if source == "user-override" {
-				if moeGPUCount == 0 {
-					gpuLayersMoE = ml.GPULayersList{}
-				} else if gpuLayersMoE.Sum() > moeGPUCount {
-					var all []int
-					for _, g := range gpuLayersMoE {
-						all = append(all, g.Layers...)
-					}
-					slices.Sort(all)
-					gpuLayersMoE = ml.GPULayersList{{DeviceID: gpuLayersMoE[0].DeviceID, Layers: all[:moeGPUCount]}}
+			if source == "user-override" && gpuLayersMoE.Sum() > moeGPUCount {
+				var all []int
+				for _, g := range gpuLayersMoE {
+					all = append(all, g.Layers...)
 				}
+				slices.Sort(all)
+				gpuLayersMoE = ml.GPULayersList{{DeviceID: gpuLayersMoE[0].DeviceID, Layers: all[:moeGPUCount]}}
 			}
 
-			// If user explicitly disabled MoE split, fall through to standard layout.
-			// Without this, denseGPULayers would put all 49 layers' dense weights on GPU
-			// while MoE experts stay on CPU, triggering op_offload for every layer and
-			// making prefill ~2× slower than the default.
-			if source == "user-override" && moeGPUCount == 0 {
-				slog.Info("moe split: disabled by OLLAMA_MOE_GPU_LAYERS=0, using standard layout")
-			} else {
-				// denseGPULayers: all layers on the same GPU(s) used by gpuLayersMoE
-				allLayerIndices := make([]int, len(layers))
-				for i := range allLayerIndices {
-					allLayerIndices[i] = i
-				}
-				var denseDeviceID ml.DeviceID
-				if len(gpuLayersMoE) > 0 {
-					denseDeviceID = gpuLayersMoE[0].DeviceID
-				} else if len(gpus) > 0 {
-					denseDeviceID = gpus[len(gpus)-1].DeviceID
-				}
-				denseGPULayers = ml.GPULayersList{{
-					DeviceID: denseDeviceID,
-					Layers:   allLayerIndices,
-				}}
-
-				return gpuLayersMoE, denseGPULayers, layers
+			// denseGPULayers: all layers on the same GPU(s) used by gpuLayersMoE
+			allLayerIndices := make([]int, len(layers))
+			for i := range allLayerIndices {
+				allLayerIndices[i] = i
 			}
+			var denseDeviceID ml.DeviceID
+			if len(gpuLayersMoE) > 0 {
+				denseDeviceID = gpuLayersMoE[0].DeviceID
+			} else if len(gpus) > 0 {
+				denseDeviceID = gpus[len(gpus)-1].DeviceID
+			}
+			denseGPULayers = ml.GPULayersList{{
+				DeviceID: denseDeviceID,
+				Layers:   allLayerIndices,
+			}}
+
+			return gpuLayersMoE, denseGPULayers, layers
 		}
 	}
 	// ── End MoE split logic ──────────────────────────────────────────────────
