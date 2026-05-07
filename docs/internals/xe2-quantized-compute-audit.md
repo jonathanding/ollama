@@ -35,13 +35,13 @@
 
 GGUF 格式的量化模型（如 Q4_K_M）属于 **weight-only post-training quantization (PTQ)**：仅权重被离线量化为低精度（4-bit），而激活值（activation）在推理时始终以 fp32/fp16 全精度流动。这种范式在业界通常记作 **W4A16**（4-bit weights, 16-bit activations）。与 W8A8 等 weight-and-activation 量化方案不同，W4A16 保留了激活的全精度，因此不需要校准数据集（calibration dataset），可直接对预训练权重进行量化。
 
-W4A16 带来一个根本性矛盾：**硬件没有 int4 × fp16 的原生指令**。GPU 的整数单元（如 Xe2 的 `OpSDotKHR` / DPAS int8 模式）要求两边都是整数；浮点矩阵单元（如 XMX fp16 模式 / `coopmatMulAdd`）要求两边都是浮点。因此，4-bit 整数权重与 fp16 浮点激活之间的 matmul 必须先做一次类型对齐。
+W4A16 带来一个根本性矛盾：**硬件没有 int4 × fp16 的原生指令**。GPU 的整数点积单元要求两边都是整数；浮点矩阵单元（cooperative matrix / `coopmatMulAdd`）要求两边都是浮点。因此，4-bit 整数权重与 fp16 浮点激活之间的 **matmul（矩阵乘法）** 必须先做一次类型对齐。
 
-ggml Vulkan 后端为此提供了两条路径：
+ggml Vulkan 后端为 matmul 算子提供了两条路径（详见 Section 2）：
 
-1. **Dequant+F16 路径**（`mul_mm_funcs.glsl`）：将 int4 权重完全反量化为 f16，与 f16 激活一起送入 `coopmatMulAdd`（cooperative matrix，映射到 XMX fp16 管线）。权重在 shared memory 中被逐元素解包并乘以 scale/min，转为 `FLOAT_TYPE_VEC2`（即 f16vec2）存储 (source: `mul_mm_funcs.glsl:170-202`，Q4_K 分支)。
+1. 🟧 **Dequant+F16 路径**（`mul_mm_funcs.glsl`）：将 int4 权重完全反量化为 f16，与 f16 激活一起送入 `coopmatMulAdd`（cooperative matrix，映射到 XMX fp16 管线）。权重在 shared memory 中被逐元素解包并乘以 scale/min，转为 `FLOAT_TYPE_VEC2`（即 f16vec2）存储 (source: `mul_mm_funcs.glsl:170-202`，Q4_K 分支)。
 
-2. **MMQ 路径**（`mul_mmq_funcs.glsl`）：将权重保持在整数域（int4 → int8 容器），同时将 fp32 激活在运行时量化为 Q8_1（int8 + scale + weighted sum）。这一量化由专用 compute shader `quantize_q8_1.comp` 完成：对每 32 个 fp32 值找 absmax，除以 127 得到 scale，再 round 到 int8 (source: `quantize_q8_1.comp:84-86`)。之后，int8 权重与 int8 激活通过 `dotPacked4x8EXT`（映射到 `OpSDotKHR`，即 Xe2 的 DP4A 指令）执行 4 路 packed int8 dot product (source: `mul_mmq_funcs.glsl:359`)。这条路径本质上将 W4A16 转化为 **W4A8**（或更准确地说，int8 容器内的 int4×int8）。
+2. 🟦 **MMQ 路径**（`mul_mmq_funcs.glsl`）：将权重保持在整数域（int4 → int8 容器），同时将 fp32 激活在运行时量化为 Q8_1（int8 + scale + weighted sum）。这一量化由专用 compute shader `quantize_q8_1.comp` 完成：对每 32 个 fp32 值找 absmax，除以 127 得到 scale，再 round 到 int8 (source: `quantize_q8_1.comp:84-86`)。之后，int8 权重与 int8 激活通过 `dotPacked4x8EXT`（映射到 `OpSDotKHR`，即 Xe2 的 DP4A 指令）执行 4 路 packed int8 dot product (source: `mul_mmq_funcs.glsl:359`)。这条路径本质上将 W4A16 转化为 **W4A8**（或更准确地说，int8 容器内的 int4×int8）。Decode（单 token 推理）时，matmul 退化为矩阵-向量乘法（MUL_MAT_VEC），对应的整数 dot product 变体称为 🟦 **MMVQ**（`mul_mat_vecq_funcs.glsl`），同样使用 `dotPacked4x8EXT`。
 
 ```mermaid
 graph TD
@@ -57,14 +57,18 @@ graph TD
     W --> D
     A --> D
 
-    D -->|"方案 1: 反量化权重"| P1["Dequant+F16 路径<br/>权重 int4→f16<br/>激活 fp32→f16<br/>f16×f16 coopmatMulAdd"]:::cpp
-    D -->|"方案 2: 量化激活"| P2["MMQ 路径<br/>权重 int4→int8 容器<br/>激活 fp32→int8 (Q8_1)<br/>int8×int8 dotPacked4x8EXT"]:::cpp
+    D -->|"方案 1: 反量化权重"| P1["🟧 Dequant+F16 路径<br/>权重 int4→f16<br/>激活 fp32→f16<br/>f16×f16 coopmatMulAdd"]:::cpp
+    D -->|"方案 2: 量化激活"| P2["🟦 MMQ 路径 (Prefill)<br/>🟦 MMVQ 路径 (Decode)<br/>权重 int4→int8 容器<br/>激活 fp32→int8 (Q8_1)<br/>int8×int8 dotPacked4x8EXT"]:::cpp
 
     P1 -->|"source"| S1["mul_mm_funcs.glsl:170-202"]:::legend
     P2 -->|"source"| S2["mul_mmq_funcs.glsl:349-363<br/>quantize_q8_1.comp:84-86"]:::legend
 ```
 
-这两条路径在性能特征上有本质差异：Dequant+F16 利用 XMX fp16 吞吐但需要反量化开销和更多 shared memory；MMQ 利用整数 dot product 单元，避免反量化但引入了激活量化开销和额外的精度损失（fp32→int8 round）。后续章节将详细分析每条路径在 Xe2 上的具体 shader 实现与硬件映射。
+这两条路径在性能特征上有本质差异：Dequant+F16 利用 XMX fp16 吞吐但需要反量化开销和更多 shared memory；MMQ 利用整数 dot product 单元，避免反量化但引入了激活量化开销和额外的精度损失（fp32→int8 round）。
+
+**注意**：上述两条路径仅针对 **matmul 算子**（权重 × 激活的矩阵乘法）。推理中还有一类关键算子——**Flash Attention**——其输入不涉及量化权重，而是来自上游 matmul 输出的 fp32 Q 向量和 f16 KV cache，计算全程在浮点域（f16/fp32）进行（详见 [Section 2.3](#23-flash-attention-coopmat-路径)）。
+
+后续章节将详细分析每条路径在 Xe2 上的具体 shader 实现与硬件映射。
 
 ---
 
@@ -72,18 +76,32 @@ graph TD
 
 下表列出 Q4_K_M 模型在 Intel Xe2 ggml Vulkan 后端推理时，**每个主要算子**的权重精度、计算路径、计算/累加精度、XMX 参与情况，以及 Prefill 与 Decode 之间的差异。所有单元格均引用后续章节中的已验证事实。
 
-| 算子 | 权重存储精度 | 计算路径 | 计算精度(输入端) | 累加精度 | XMX 参与 | Prefill vs Decode 差异 |
-|------|-------------|----------|-----------------|----------|---------|----------------------|
-| **Embedding lookup** (GET_ROWS) | — (token index → embedding 查表) | 标量 `get_rows.comp` (§4.3.4) | fp32 (`dequantize()` → `vec2`) | fp32 | ❌ 无 | 无差异 |
-| **RMS Norm + RoPE** | — (norm weight fp32, 无 RoPE 权重) | 标量 `norm.comp` / `rope_funcs.glsl` (§4.3.4) | fp32 全程 | fp32 | ❌ 无 | 无差异 |
-| **QKV 投影** (MUL_MAT Q5_K) | Q5_K (5.5 bpw) | Prefill: MMQ `mul_mmq.comp` (§2.1); Decode: MMVQ `mul_mat_vecq.comp` (§3.2.1) | 权重 int5→int8, 激活 fp32→int8 (Q8_1); `dotPacked4x8EXT` int8×int8 | fp32 (`ACC_TYPE=float`, §4.4) | ⚠️ DP4A 或 DPAS int8（待确认, §2.1.4） | Prefill: MUL_MAT MMQ; Decode: MUL_MAT_VEC MMVQ（均用 `dotPacked4x8EXT`） |
-| **Flash Attention** (FLASH_ATTN_EXT) | — (Q/K/V 来自 fp32 buffer 和 f16 KV cache) | Prefill (N≥16): coopmat1 `flash_attn_cm1.comp` (§2.3); Decode (N=1): scalar `flash_attn.comp` (§2.3.2) | QK^T: f16×f16; Softmax: fp32; PV: fp32 | QK^T: f32 或 f16 (§4.4); Softmax: fp32（始终）; PV: f32 或 f16 | Prefill: ✅ QK^T via XMX fp16 coopmat; PV: ❌ 标量 ALU; Decode: ❌ 全标量 | **关键差异**: Prefill QK^T 走 XMX fp16 coopmat1; Decode 全部降级为 scalar shader (§2.3.2) |
-| **Attention Output 投影** (MUL_MAT Q4_K) | Q4_K (4.5 bpw) | Prefill: MMQ (§2.1); Decode: MMVQ (§3.2.1) | 权重 int4→int8, 激活 fp32→int8; `dotPacked4x8EXT` int8×int8 | fp32 (§4.4) | ⚠️ DP4A 或 DPAS int8（待确认） | Prefill: MUL_MAT MMQ; Decode: MUL_MAT_VEC MMVQ |
-| **残差加法** (ADD) | — | 标量 `add.comp` (§4.3.4) | fp32 (`FLOAT_TYPE` 中间变量) | fp32 | ❌ 无 | 无差异 |
-| **FFN gate/up 投影** (MUL_MAT Q4_K) | Q4_K (4.5 bpw) | Prefill: MMQ (§2.1); Decode: MMVQ (§3.2.1) | 同 Attention Output | fp32 (§4.4) | ⚠️ DP4A 或 DPAS int8（待确认） | Prefill: MUL_MAT MMQ; Decode: MUL_MAT_VEC MMVQ |
-| **SwiGLU 激活** (GLU) | — | 标量 `swiglu.comp` + `glu_main.glsl` (§4.3.4) | fp32 全程 | fp32 | ❌ 无 | 无差异 |
-| **FFN down 投影** (MUL_MAT Q4_K/Q6_K) | Q4_K 或 Q6_K（取决于层位置, §4.1.1 `use_more_bits()`） | Prefill: MMQ（Q4_K 和 Q6_K 均走 MMQ, §2.1.3）; Decode: Q4_K→MMVQ, **Q6_K→dequant f32 标量**（§3.2.1, Q6_K 被全局排除于 MMVQ） | Prefill 同上; Decode Q6_K: 权重反量化→fp32, 无整数 dot | fp32 (§4.4) | Prefill: ⚠️ DP4A/DPAS int8; Decode Q4_K: ⚠️ 同上; **Decode Q6_K: ❌ 无 XMX** | ⚠️ **Q6_K 层 Decode 退化**：Prefill 走 MMQ（整数 dot），Decode 无 MMVQ fallback 到标量 dequant (source: `ggml-vulkan.cpp:6934`) |
-| **Output Head** (MUL_MAT/MUL_MAT_VEC) | f16 或 Q6_K（§4.1.1, 实际取决于模型） | f16: dequant pipeline; Q6_K: Prefill→MMQ, Decode→dequant f32 标量 | f16 路径: f16×f16 或 f16→fp32; Q6_K 路径: 同 FFN down | fp32 (§4.5.1, `D_TYPE=float`) | f16: 取决于路径; Q6_K Prefill: ⚠️ 整数 dot; Q6_K Decode: ❌ 无 | 同 FFN down Q6_K 差异 |
+> **路径图例**：🟦 = 整数 dot product 路径（MMQ = Prefill batch matmul, MMVQ = Decode matrix-vector）· 🟧 = Dequant 路径（反量化→标量/coopmat 浮点计算）
+>
+> ⚠️ 表示**待确认**：驱动将 `OpSDotKHR` 映射到 DP4A 还是 DPAS int8，无法从代码确定。详见[已知不确定项 #5](#5-opsdotkhr-与-dp4a--dpas-的映射关系)。
+
+| 算子 | 阶段 | 权重精度 | 计算路径 | 计算精度 | 累加 | XMX |
+|------|------|---------|---------|---------|------|-----|
+| **Embedding** (GET_ROWS) | P+D | — | 标量 ([§4.3.4](#434-标量算子精度)) | fp32 | fp32 | ❌ |
+| **RMS Norm + RoPE** | P+D | — | 标量 ([§4.3.4](#434-标量算子精度)) | fp32 | fp32 | ❌ |
+| **QKV 投影** (Q5_K) | Prefill | Q5_K 5.5bpw | 🟦MMQ ([§2.1](#21-mmq-路径integer-dot-product)) | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| | Decode | Q5_K 5.5bpw | 🟦MMVQ ([§3.2.1](#321-mul_mat--mul_mat_vec)) | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| **Flash Attention** | Prefill (N≥16) | — (f16 KV) | coopmat1 ([§2.3](#23-flash-attention-coopmat-路径)) | QK^T: f16×f16; SM+PV: fp32 | QK^T: f32/f16; SM: fp32 | QK^T: ✅ XMX fp16; PV: ❌ 标量 |
+| | Decode (N=1) | — (f16 KV) | scalar ([§2.3.2](#232-decode-时的-scalar-fallback)) | 全 fp32 | fp32 | ❌ 全标量 |
+| **Attn Output** (Q4_K) | Prefill | Q4_K 4.5bpw | 🟦MMQ ([§2.1](#21-mmq-路径integer-dot-product)) | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| | Decode | Q4_K 4.5bpw | 🟦MMVQ ([§3.2.1](#321-mul_mat--mul_mat_vec)) | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| **残差 ADD** | P+D | — | 标量 ([§4.3.4](#434-标量算子精度)) | fp32 | fp32 | ❌ |
+| **FFN gate/up** (Q4_K) | Prefill | Q4_K 4.5bpw | 🟦MMQ | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| | Decode | Q4_K 4.5bpw | 🟦MMVQ | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| **SwiGLU** (GLU) | P+D | — | 标量 ([§4.3.4](#434-标量算子精度)) | fp32 | fp32 | ❌ |
+| **FFN down** (Q4_K 层) | Prefill | Q4_K 4.5bpw | 🟦MMQ ([§2.1](#21-mmq-路径integer-dot-product)) | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| | Decode | Q4_K 4.5bpw | 🟦MMVQ ([§3.2.1](#321-mul_mat--mul_mat_vec)) | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| **FFN down** (Q6_K 层) | Prefill | Q6_K ([§4.1.1](#411-q4_k_m-混合量化策略)) | 🟦MMQ ([§2.1.3](#213-q6_k-的-mmq-路径)) | int8×int8 `dotPacked4x8EXT` | fp32 | ⚠️ DP4A/DPAS |
+| | Decode | Q6_K | **🟧dequant f32 标量** ([§3.2.1](#321-mul_mat--mul_mat_vec)) | fp32（反量化→标量乘加） | fp32 | **❌ 无 XMX** |
+| **Output Head**¹ | Prefill | f16 或 Q6_K | f16: 🟧dequant; Q6_K: 🟦MMQ | f16→fp32 或 int8 dot | fp32 | Q6_K: ⚠️; f16: 取决于路径 |
+| | Decode | f16 或 Q6_K | f16: 🟧dequant; Q6_K: 🟧dequant f32 | fp32 | fp32 | **❌** |
+
+> ¹ **Output Head 存储精度说明**：`llama-quant.cpp` 将 `output.weight` 升级为 Q6_K（[§4.1.1](#411-q4_k_m-混合量化策略)），但许多模型（如 Qwen3 1.7B）使用 tied embedding（`output.weight` 与 `token_embd.weight` 共享），此时 `output.weight` 以 f16 存储而非量化。实际类型取决于模型文件中的 tensor 格式。
 
 ### 阅读指引
 
@@ -143,7 +161,7 @@ device->integer_dot_product = device->integer_dot_product
 ```
 (source: `ggml-vulkan.cpp:4478`)
 
-`integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE` 表示驱动声明此操作有硬件加速（而非软件模拟）。Xe2 驱动对此返回 `VK_TRUE`。
+`integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE` 表示驱动声明此操作有硬件加速（而非软件模拟）。⚠️ **待确认**：Xe2 驱动是否对此返回 `VK_TRUE` 需通过实机查询 `VkPhysicalDeviceShaderIntegerDotProductProperties` 确认——代码仅显示检查此 property，不能确认 Xe2 驱动实际返回值。但鉴于 Xe2 硬件确实具备整数 dot product 单元，且 MMQ 路径在 Xe2 上被设计为首选路径，合理推断驱动应返回 `VK_TRUE`。
 
 **③ 运行期：MUL_MAT 路径选择优先级**
 
@@ -674,7 +692,7 @@ PV 乘法（probability × value）**不使用 coopmat**，而是标量逐元素
 ```glsl
 [[unroll]] for (uint32_t c = 0; c < cols_per_thread; ++c) {
     // V 从全局内存/反量化加载
-    vec4 Vf = vec4(data_vv4[v_offset / 4 + ... ]);  // f16 → fp32
+    vec4 Vf = vec4(data_vv4[v_offset / 4 + (j * Bc + c * cols_per_iter + col_tid) * v_stride / 4 + d * D_split + d_tid]);  // f16 → fp32
     [[unroll]] for (uint32_t r = 0; r < rows_per_thread; ++r) {
         Of[r][d] += ACC_TYPE(Pf[r]) * ACC_TYPEV4(Vf);  // P × V 累加
     }
@@ -1062,30 +1080,28 @@ Decode 阶段的根本瓶颈从计算变为**显存带宽**：
 ```mermaid
 graph TB
     classDef cpp stroke:#f97316,stroke-width:3px
-    classDef xmx fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-    classDef scalar fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
+    classDef xmx stroke:#f97316,stroke-width:3px,fill:#fff7ed
+    classDef scalar stroke:#f97316,stroke-width:3px,fill:#f5f5f5
     classDef legend fill:#fff,stroke:#999
-    classDef phase fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
 
-    L1["🔵 = 使用 XMX / 整数 dot product"]:::xmx
-    L2["🟢 = 标量 ALU (Vector Engine)"]:::scalar
+    L["🟠 = llama.cpp Vulkan shader<br/>实心浅橙底 = XMX/整数 dot product 路径<br/>灰底 = 标量 ALU (Vector Engine)"]:::legend
 
     subgraph PREFILL["Prefill (N tokens)"]
         direction TB
-        P_IN["输入 hidden state<br/>fp32 (2048, N)"]:::scalar
-        P_NORM1["① RMS_NORM_MUL<br/>fp32 标量"]:::scalar
-        P_QKV["② MUL_MAT Q5_K<br/>6144×N×2048<br/>MMQ dotPacked4x8EXT"]:::xmx
-        P_ROPE_Q["③ RMS_NORM_MUL_ROPE<br/>(Q heads: 128×16×N)"]:::scalar
-        P_ROPE_K["④ RMS_NORM_MUL_ROPE<br/>(K heads: 128×8×N)"]:::scalar
-        P_SET["⑤ SET_ROWS<br/>(KV cache write)"]:::scalar
-        P_FA["⑥ FLASH_ATTN_EXT<br/>QK^T: coopmat1 f16×f16<br/>Softmax: fp32 标量<br/>PV: fp32 标量"]:::xmx
-        P_OUT["⑦ MUL_MAT Q4_K<br/>2048×N×2048<br/>MMQ dotPacked4x8EXT"]:::xmx
-        P_ADD1["⑧ ADD 残差<br/>fp32 标量"]:::scalar
-        P_NORM2["⑨ RMS_NORM_MUL<br/>fp32 标量"]:::scalar
-        P_GU["⑩ MUL_MAT Q4_K<br/>6144×N×2048<br/>MMQ dotPacked4x8EXT"]:::xmx
-        P_GLU["⑪ GLU (SwiGLU)<br/>fp32 标量"]:::scalar
-        P_DOWN["⑫ MUL_MAT Q4_K/Q6_K<br/>2048×N×6144<br/>MMQ dotPacked4x8EXT"]:::xmx
-        P_ADD2["⑬ ADD 残差<br/>fp32 标量"]:::scalar
+        P_IN["输入 hidden state<br/>fp32 (2048, N)<br/>标量"]:::scalar
+        P_NORM1["① RMS_NORM_MUL<br/>fp32 标量 ALU"]:::scalar
+        P_QKV["② MUL_MAT Q5_K<br/>6144×N×2048<br/>MMQ dotPacked4x8EXT<br/>⚡ XMX int8"]:::xmx
+        P_ROPE_Q["③ RMS_NORM_MUL_ROPE<br/>(Q heads: 128×16×N)<br/>标量 ALU"]:::scalar
+        P_ROPE_K["④ RMS_NORM_MUL_ROPE<br/>(K heads: 128×8×N)<br/>标量 ALU"]:::scalar
+        P_SET["⑤ SET_ROWS<br/>(KV cache write)<br/>标量"]:::scalar
+        P_FA["⑥ FLASH_ATTN_EXT<br/>QK^T: coopmat1 f16×f16 ⚡ XMX fp16<br/>Softmax: fp32 标量 ALU<br/>PV: fp32 标量 ALU"]:::xmx
+        P_OUT["⑦ MUL_MAT Q4_K<br/>2048×N×2048<br/>MMQ dotPacked4x8EXT<br/>⚡ XMX int8"]:::xmx
+        P_ADD1["⑧ ADD 残差<br/>fp32 标量 ALU"]:::scalar
+        P_NORM2["⑨ RMS_NORM_MUL<br/>fp32 标量 ALU"]:::scalar
+        P_GU["⑩ MUL_MAT Q4_K<br/>6144×N×2048<br/>MMQ dotPacked4x8EXT<br/>⚡ XMX int8"]:::xmx
+        P_GLU["⑪ GLU (SwiGLU)<br/>fp32 标量 ALU"]:::scalar
+        P_DOWN["⑫ MUL_MAT Q4_K/Q6_K<br/>2048×N×6144<br/>MMQ dotPacked4x8EXT<br/>⚡ XMX int8"]:::xmx
+        P_ADD2["⑬ ADD 残差<br/>fp32 标量 ALU"]:::scalar
 
         P_IN --> P_NORM1 --> P_QKV --> P_ROPE_Q & P_ROPE_K
         P_ROPE_Q --> P_FA
@@ -1095,21 +1111,21 @@ graph TB
 
     subgraph DECODE["Decode (N=1)"]
         direction TB
-        D_IN["输入 hidden state<br/>fp32 (2048, 1)"]:::scalar
-        D_NORM1["① RMS_NORM_MUL<br/>fp32 标量"]:::scalar
-        D_QKV["② MUL_MAT_VEC Q5_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
-        D_ROPE_Q["③ RMS_NORM_MUL_ROPE<br/>(Q heads)"]:::scalar
-        D_ROPE_K["④ RMS_NORM_MUL_ROPE<br/>(K heads)"]:::scalar
-        D_SET["⑤ SET_ROWS<br/>(KV cache write)"]:::scalar
-        D_FA["⑥ FLASH_ATTN_EXT<br/>scalar shader 全 ALU<br/>无 XMX"]:::scalar
-        D_OUT["⑦ MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
-        D_ADD1["⑧ ADD 残差"]:::scalar
-        D_NORM2["⑨ RMS_NORM_MUL"]:::scalar
-        D_GU["⑩ MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
-        D_GLU["⑪ GLU (SwiGLU)"]:::scalar
-        D_DOWN_Q4["⑫a MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT"]:::xmx
-        D_DOWN_Q6["⑫b MUL_MAT_VEC Q6_K<br/>dequant f32 标量<br/>⚠️ 无 MMVQ"]:::scalar
-        D_ADD2["⑬ ADD 残差"]:::scalar
+        D_IN["输入 hidden state<br/>fp32 (2048, 1)<br/>标量"]:::scalar
+        D_NORM1["① RMS_NORM_MUL<br/>fp32 标量 ALU"]:::scalar
+        D_QKV["② MUL_MAT_VEC Q5_K<br/>MMVQ dotPacked4x8EXT<br/>⚡ DP4A/DPAS int8"]:::xmx
+        D_ROPE_Q["③ RMS_NORM_MUL_ROPE<br/>(Q heads)<br/>标量 ALU"]:::scalar
+        D_ROPE_K["④ RMS_NORM_MUL_ROPE<br/>(K heads)<br/>标量 ALU"]:::scalar
+        D_SET["⑤ SET_ROWS<br/>(KV cache write)<br/>标量"]:::scalar
+        D_FA["⑥ FLASH_ATTN_EXT<br/>scalar shader 全标量 ALU<br/>无 XMX"]:::scalar
+        D_OUT["⑦ MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT<br/>⚡ DP4A/DPAS int8"]:::xmx
+        D_ADD1["⑧ ADD 残差<br/>标量 ALU"]:::scalar
+        D_NORM2["⑨ RMS_NORM_MUL<br/>标量 ALU"]:::scalar
+        D_GU["⑩ MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT<br/>⚡ DP4A/DPAS int8"]:::xmx
+        D_GLU["⑪ GLU (SwiGLU)<br/>标量 ALU"]:::scalar
+        D_DOWN_Q4["⑫a MUL_MAT_VEC Q4_K<br/>MMVQ dotPacked4x8EXT<br/>⚡ DP4A/DPAS int8"]:::xmx
+        D_DOWN_Q6["⑫b MUL_MAT_VEC Q6_K<br/>dequant f32 标量 ALU<br/>⚠️ 无 MMVQ 无 XMX"]:::scalar
+        D_ADD2["⑬ ADD 残差<br/>标量 ALU"]:::scalar
 
         D_IN --> D_NORM1 --> D_QKV --> D_ROPE_Q & D_ROPE_K
         D_ROPE_Q --> D_FA

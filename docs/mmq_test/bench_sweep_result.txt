@@ -1,0 +1,26 @@
+PS C:\workspace\bench-sweep> .\bench-sweep.exe run -model qwen3.5:4b -name baseline -sizes 1024
+Starting benchmark: model=qwen3.5:4b  sizes=1024  epochs=6  warmup=4
+Warning: warmup may be insufficient — prefill_tps changed 76% between warmup iterations
+  hint: increase -warmup (current: 4)
+
+Model: qwen3.5:4b  |  Epochs: 6  |  Warmup: 4
+note: prefill_ms is the server-side prompt processing time (Ollama internal metric); ttft_ms is the wall-clock time to first token (= prefill_ms + HTTP round-trip + scheduling, typically 80–200 ms longer on localhost).
+
+prompt_tokens │ prefill_ms │   CV% │ prefill_tps │   CV% │ ttft_ms    │   CV% │ gen_ms    │   CV% │ gen_tps   │   CV% │ status
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1024          │    5023 ms │  5.5% │     195 t/s │  3.6% │    5174 ms │  5.5% │    933 ms │  2.5% │    17 t/s │  2.5% │ ⚠
+⚠ [size=1024] ttft_ms CV=5.5% exceeds threshold 5.0%
+
+Run "baseline" saved to C:\Users\webpn\.ollama\bench\qwen3.5_4b_baseline.json
+PS C:\workspace\bench-sweep> .\bench-sweep.exe run -model qwen3.5:4b -name disable-int-dot-product -sizes 1024
+Starting benchmark: model=qwen3.5:4b  sizes=1024  epochs=6  warmup=4
+
+Model: qwen3.5:4b  |  Epochs: 6  |  Warmup: 4
+note: prefill_ms is the server-side prompt processing time (Ollama internal metric); ttft_ms is the wall-clock time to first token (= prefill_ms + HTTP round-trip + scheduling, typically 80–200 ms longer on localhost).
+
+prompt_tokens │ prefill_ms │   CV% │ prefill_tps │   CV% │ ttft_ms    │   CV% │ gen_ms    │   CV% │ gen_tps   │   CV% │ status
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1024          │    4976 ms │  5.2% │     197 t/s │  3.3% │    5116 ms │  5.2% │    846 ms │  1.8% │    19 t/s │  1.8% │ ⚠
+⚠ [size=1024] ttft_ms CV=5.2% exceeds threshold 5.0%
+
+Run "disable-int-dot-product" saved to C:\Users\webpn\.ollama\bench\qwen3.5_4b_disable-int-dot-product.json

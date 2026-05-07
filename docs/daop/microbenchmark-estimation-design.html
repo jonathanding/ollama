@@ -1,0 +1,719 @@
+<!DOCTYPE html><html><head>
+      <title>microbenchmark-estimation-design</title>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      
+      <link rel="stylesheet" href="file:///c:\Users\jding4\.vscode\extensions\shd101wyy.markdown-preview-enhanced-0.8.22\crossnote\dependencies\katex\katex.min.css">
+      
+      
+      <script type="text/javascript" src="file:///c:\Users\jding4\.vscode\extensions\shd101wyy.markdown-preview-enhanced-0.8.22\crossnote\dependencies\mermaid\mermaid.min.js" charset="UTF-8"></script>
+      
+      
+      <style>
+      code[class*=language-],pre[class*=language-]{color:#333;background:0 0;font-family:Consolas,"Liberation Mono",Menlo,Courier,monospace;text-align:left;white-space:pre;word-spacing:normal;word-break:normal;word-wrap:normal;line-height:1.4;-moz-tab-size:8;-o-tab-size:8;tab-size:8;-webkit-hyphens:none;-moz-hyphens:none;-ms-hyphens:none;hyphens:none}pre[class*=language-]{padding:.8em;overflow:auto;border-radius:3px;background:#f5f5f5}:not(pre)>code[class*=language-]{padding:.1em;border-radius:.3em;white-space:normal;background:#f5f5f5}.token.blockquote,.token.comment{color:#969896}.token.cdata{color:#183691}.token.doctype,.token.macro.property,.token.punctuation,.token.variable{color:#333}.token.builtin,.token.important,.token.keyword,.token.operator,.token.rule{color:#a71d5d}.token.attr-value,.token.regex,.token.string,.token.url{color:#183691}.token.atrule,.token.boolean,.token.code,.token.command,.token.constant,.token.entity,.token.number,.token.property,.token.symbol{color:#0086b3}.token.prolog,.token.selector,.token.tag{color:#63a35c}.token.attr-name,.token.class,.token.class-name,.token.function,.token.id,.token.namespace,.token.pseudo-class,.token.pseudo-element,.token.url-reference .token.variable{color:#795da3}.token.entity{cursor:help}.token.title,.token.title .token.punctuation{font-weight:700;color:#1d3e81}.token.list{color:#ed6a43}.token.inserted{background-color:#eaffea;color:#55a532}.token.deleted{background-color:#ffecec;color:#bd2c00}.token.bold{font-weight:700}.token.italic{font-style:italic}.language-json .token.property{color:#183691}.language-markup .token.tag .token.punctuation{color:#333}.language-css .token.function,code.language-css{color:#0086b3}.language-yaml .token.atrule{color:#63a35c}code.language-yaml{color:#183691}.language-ruby .token.function{color:#333}.language-markdown .token.url{color:#795da3}.language-makefile .token.symbol{color:#795da3}.language-makefile .token.variable{color:#183691}.language-makefile .token.builtin{color:#0086b3}.language-bash .token.keyword{color:#0086b3}pre[data-line]{position:relative;padding:1em 0 1em 3em}pre[data-line] .line-highlight-wrapper{position:absolute;top:0;left:0;background-color:transparent;display:block;width:100%}pre[data-line] .line-highlight{position:absolute;left:0;right:0;padding:inherit 0;margin-top:1em;background:hsla(24,20%,50%,.08);background:linear-gradient(to right,hsla(24,20%,50%,.1) 70%,hsla(24,20%,50%,0));pointer-events:none;line-height:inherit;white-space:pre}pre[data-line] .line-highlight:before,pre[data-line] .line-highlight[data-end]:after{content:attr(data-start);position:absolute;top:.4em;left:.6em;min-width:1em;padding:0 .5em;background-color:hsla(24,20%,50%,.4);color:#f4f1ef;font:bold 65%/1.5 sans-serif;text-align:center;vertical-align:.3em;border-radius:999px;text-shadow:none;box-shadow:0 1px #fff}pre[data-line] .line-highlight[data-end]:after{content:attr(data-end);top:auto;bottom:.4em}html body{font-family:'Helvetica Neue',Helvetica,'Segoe UI',Arial,freesans,sans-serif;font-size:16px;line-height:1.6;color:#333;background-color:#fff;overflow:initial;box-sizing:border-box;word-wrap:break-word}html body>:first-child{margin-top:0}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{line-height:1.2;margin-top:1em;margin-bottom:16px;color:#000}html body h1{font-size:2.25em;font-weight:300;padding-bottom:.3em}html body h2{font-size:1.75em;font-weight:400;padding-bottom:.3em}html body h3{font-size:1.5em;font-weight:500}html body h4{font-size:1.25em;font-weight:600}html body h5{font-size:1.1em;font-weight:600}html body h6{font-size:1em;font-weight:600}html body h1,html body h2,html body h3,html body h4,html body h5{font-weight:600}html body h5{font-size:1em}html body h6{color:#5c5c5c}html body strong{color:#000}html body del{color:#5c5c5c}html body a:not([href]){color:inherit;text-decoration:none}html body a{color:#08c;text-decoration:none}html body a:hover{color:#00a3f5;text-decoration:none}html body img{max-width:100%}html body>p{margin-top:0;margin-bottom:16px;word-wrap:break-word}html body>ol,html body>ul{margin-bottom:16px}html body ol,html body ul{padding-left:2em}html body ol.no-list,html body ul.no-list{padding:0;list-style-type:none}html body ol ol,html body ol ul,html body ul ol,html body ul ul{margin-top:0;margin-bottom:0}html body li{margin-bottom:0}html body li.task-list-item{list-style:none}html body li>p{margin-top:0;margin-bottom:0}html body .task-list-item-checkbox{margin:0 .2em .25em -1.8em;vertical-align:middle}html body .task-list-item-checkbox:hover{cursor:pointer}html body blockquote{margin:16px 0;font-size:inherit;padding:0 15px;color:#5c5c5c;background-color:#f0f0f0;border-left:4px solid #d6d6d6}html body blockquote>:first-child{margin-top:0}html body blockquote>:last-child{margin-bottom:0}html body hr{height:4px;margin:32px 0;background-color:#d6d6d6;border:0 none}html body table{margin:10px 0 15px 0;border-collapse:collapse;border-spacing:0;display:block;width:100%;overflow:auto;word-break:normal;word-break:keep-all}html body table th{font-weight:700;color:#000}html body table td,html body table th{border:1px solid #d6d6d6;padding:6px 13px}html body dl{padding:0}html body dl dt{padding:0;margin-top:16px;font-size:1em;font-style:italic;font-weight:700}html body dl dd{padding:0 16px;margin-bottom:16px}html body code{font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:.85em;color:#000;background-color:#f0f0f0;border-radius:3px;padding:.2em 0}html body code::after,html body code::before{letter-spacing:-.2em;content:'\00a0'}html body pre>code{padding:0;margin:0;word-break:normal;white-space:pre;background:0 0;border:0}html body .highlight{margin-bottom:16px}html body .highlight pre,html body pre{padding:1em;overflow:auto;line-height:1.45;border:#d6d6d6;border-radius:3px}html body .highlight pre{margin-bottom:0;word-break:normal}html body pre code,html body pre tt{display:inline;max-width:initial;padding:0;margin:0;overflow:initial;line-height:inherit;word-wrap:normal;background-color:transparent;border:0}html body pre code:after,html body pre code:before,html body pre tt:after,html body pre tt:before{content:normal}html body blockquote,html body dl,html body ol,html body p,html body pre,html body ul{margin-top:0;margin-bottom:16px}html body kbd{color:#000;border:1px solid #d6d6d6;border-bottom:2px solid #c7c7c7;padding:2px 4px;background-color:#f0f0f0;border-radius:3px}@media print{html body{background-color:#fff}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{color:#000;page-break-after:avoid}html body blockquote{color:#5c5c5c}html body pre{page-break-inside:avoid}html body table{display:table}html body img{display:block;max-width:100%;max-height:100%}html body code,html body pre{word-wrap:break-word;white-space:pre}}.markdown-preview{width:100%;height:100%;box-sizing:border-box}.markdown-preview ul{list-style:disc}.markdown-preview ul ul{list-style:circle}.markdown-preview ul ul ul{list-style:square}.markdown-preview ol{list-style:decimal}.markdown-preview ol ol,.markdown-preview ul ol{list-style-type:lower-roman}.markdown-preview ol ol ol,.markdown-preview ol ul ol,.markdown-preview ul ol ol,.markdown-preview ul ul ol{list-style-type:lower-alpha}.markdown-preview .newpage,.markdown-preview .pagebreak{page-break-before:always}.markdown-preview pre.line-numbers{position:relative;padding-left:3.8em;counter-reset:linenumber}.markdown-preview pre.line-numbers>code{position:relative}.markdown-preview pre.line-numbers .line-numbers-rows{position:absolute;pointer-events:none;top:1em;font-size:100%;left:0;width:3em;letter-spacing:-1px;border-right:1px solid #999;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}.markdown-preview pre.line-numbers .line-numbers-rows>span{pointer-events:none;display:block;counter-increment:linenumber}.markdown-preview pre.line-numbers .line-numbers-rows>span:before{content:counter(linenumber);color:#999;display:block;padding-right:.8em;text-align:right}.markdown-preview .mathjax-exps .MathJax_Display{text-align:center!important}.markdown-preview:not([data-for=preview]) .code-chunk .code-chunk-btn-group{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .status{display:none}.markdown-preview:not([data-for=preview]) .code-chunk .output-div{margin-bottom:16px}.markdown-preview .md-toc{padding:0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link div,.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}.markdown-preview .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}.scrollbar-style::-webkit-scrollbar{width:8px}.scrollbar-style::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}.scrollbar-style::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode]){position:relative;width:100%;height:100%;top:0;left:0;margin:0;padding:0;overflow:auto}html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{position:relative;top:0;min-height:100vh}@media screen and (min-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em calc(50% - 457px + 2em)}}@media screen and (max-width:914px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode]) .markdown-preview{font-size:14px!important;padding:1em}}@media print{html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{display:none}}html body[for=html-export]:not([data-presentation-mode]) #sidebar-toc-btn{position:fixed;bottom:8px;left:8px;font-size:28px;cursor:pointer;color:inherit;z-index:99;width:32px;text-align:center;opacity:.4}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] #sidebar-toc-btn{opacity:1}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc{position:fixed;top:0;left:0;width:300px;height:100%;padding:32px 0 48px 0;font-size:14px;box-shadow:0 0 4px rgba(150,150,150,.33);box-sizing:border-box;overflow:auto;background-color:inherit}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar{width:8px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,.66);border:4px solid rgba(150,150,150,.66);background-clip:content-box}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc a{text-decoration:none}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc{padding:0 16px}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link div,html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link p{display:inline}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{left:300px;width:calc(100% - 300px);padding:2em calc(50% - 457px - 300px / 2);margin:0;box-sizing:border-box}@media screen and (max-width:1274px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for=html-export]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{width:100%}}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .markdown-preview{left:50%;transform:translateX(-50%)}html body[for=html-export]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .md-sidebar-toc{display:none}
+/* Please visit the URL below for more information: */
+/*   https://shd101wyy.github.io/markdown-preview-enhanced/#/customize-css */
+
+      </style>
+      <script type="text/javascript">
+  document.addEventListener("DOMContentLoaded", function () {
+    // your code here
+  });
+</script>
+    </head>
+    <body for="html-export">
+      <div class="crossnote markdown-preview  ">
+      
+<h1 id="microbenchmark-based-llm-inference-performance-estimation">Microbenchmark-Based LLM Inference Performance Estimation </h1>
+<blockquote>
+<p><strong>daop-estimate</strong>: Predict LLM inference speed on any GPU — without running inference.</p>
+</blockquote>
+<p><strong>Version</strong>: v0.3.0<br>
+<strong>Status</strong>: Implemented, validated within 2× accuracy on Intel Arc (Vulkan) for qwen3:1.7b (Q4_K_M)<br>
+<strong>Platform</strong>: <a href="https://ollama.com">Ollama</a> — Go-based LLM inference engine with llama.cpp backends</p>
+<hr>
+<h2 id="1-motivation">1. Motivation </h2>
+<p>Deploying LLMs requires answering: <em>"How fast will model X run on my hardware?"</em> Current approaches — running actual inference or relying on published benchmarks — are slow, hardware-specific, and unavailable for configurations the user hasn't tried. We want a system that can:</p>
+<ol>
+<li><strong>Predict tokens/sec</strong> for any model × hardware combination</li>
+<li><strong>No weights download or inference required</strong> — estimate from model metadata (GGUF header) and a one-time GPU profile, before committing to a multi-GB download or GPU compute</li>
+<li><strong>Millisecond-level estimation for any new model</strong>, using a pre-computed GPU profile from a one-time ~90s benchmark (run once per hardware, reused for all future estimates)</li>
+<li><strong>Work across backends</strong> (Vulkan, CUDA, Metal, CPU) with a single design</li>
+</ol>
+<p>The core insight: LLM inference is a sequence of ~300 GPU kernel dispatches per token. If we can predict each kernel's latency from its shape and dtype, we can sum them to predict total latency.</p>
+<h3 id="11-why-measure-not-calculate-from-specs">1.1 Why Measure, Not Calculate from Specs? </h3>
+<p>One might ask: why not compute expected latency from hardware spec sheets (peak TFLOPS, memory bandwidth) and operation FLOPs? The answer is that <strong>published specs represent theoretical maximums</strong> that are rarely achieved in practice. The gap between spec and reality comes from many sources:</p>
+<ul>
+<li><strong>Software stack overhead</strong>: driver compilation, command buffer submission, shader dispatch</li>
+<li><strong>Hardware utilization</strong>: GPU warp/thread occupancy depends on tensor shapes and tile alignment</li>
+<li><strong>Quantized dtype complexity</strong>: dequantization (e.g., q4_K → f16) adds overhead not captured by simple FLOP counting</li>
+<li><strong>Memory hierarchy effects</strong>: L2 cache behavior, bank conflicts, memory coalescing patterns</li>
+<li><strong>Backend-specific kernel selection</strong>: different GPU vendors choose different shader implementations for the same operation</li>
+</ul>
+<p>In practice, we observe that a single "efficiency factor" applied to spec-sheet numbers varies by <strong>3-5× across different tensor shapes</strong> on the same hardware. This makes theoretical prediction unreliable for anything beyond order-of-magnitude estimates, and motivates direct measurement of each operator on the actual hardware+software stack.</p>
+<h3 id="12-fundamental-limitations-of-per-op-summation">1.2 Fundamental Limitations of Per-Op Summation </h3>
+<p>Our approach estimates total latency as <code>Σ per-op latency</code>. This assumes operations execute <strong>sequentially and independently</strong>, which is a simplification:</p>
+<ul>
+<li><strong>Inter-kernel gaps</strong>: Vulkan batches ~100 ops into a single command buffer before submission (<code>vkQueueSubmit</code>), so per-submission overhead is amortized. However, within a command buffer, each dispatch still incurs pipeline barrier and descriptor binding costs, and the GPU experiences pipeline bubbles between sequential kernels — gaps that don't exist in single-op benchmarks where the GPU runs one kernel in a tight loop.</li>
+<li><strong>Pipeline parallelism</strong>: Modern GPUs can overlap compute, memory transfers, and command processing. Summing isolated op times ignores potential overlap.</li>
+<li><strong>Resource contention</strong>: When ~300 ops share GPU resources in sequence, register pressure, L2 cache thrashing, and compute unit occupancy differ from single-op benchmarks that enjoy exclusive GPU access with warm caches.</li>
+<li><strong>Copy/sync operations</strong>: Some inter-op memory copies and synchronization points contribute latency not attributed to any compute op.</li>
+</ul>
+<p>These effects explain the observed <strong>3× gap</strong> between single-op benchmark predictions and actual multi-op inference on prefill workloads (Section 8.1). Addressing this through <strong>telemetry-based calibration</strong> — using actual inference timing to calibrate or correct per-op estimates — is a key direction for future work.</p>
+<hr>
+<h2 id="2-system-overview">2. System Overview </h2>
+<p>The system has two phases: <strong>Benchmark</strong> (one-time, per-GPU) and <strong>Estimate</strong> (per-model, instant).</p>
+<div class="mermaid">flowchart LR
+    subgraph "Phase 1: Benchmark · once per GPU"
+        HW["Hardware Characterization\n(Peak TOPS, Bandwidth)"]
+        OB["Operator Benchmarking\nGrid of (shape, dtype) points"]
+        P[("Profile JSON")]
+        HW --&gt; P
+        OB --&gt; P
+    end
+
+    subgraph "Phase 2: Estimate · per model"
+        M["Load Model Metadata"]
+        G["Capture Compute Graph"]
+        S["Backend Assignment\n+ Op Fusion"]
+        L["Piecewise Log-space\nInterpolation per Op"]
+        R["Sum → Predict tok/s"]
+        M --&gt; G --&gt; S --&gt; L --&gt; R
+    end
+
+    P -.-&gt;|calibration data| L
+
+    style HW fill:#e8f5e9
+    style OB fill:#e8f5e9
+    style P fill:#fff9c4
+    style M fill:#e3f2fd
+    style G fill:#e3f2fd
+    style S fill:#e3f2fd
+    style L fill:#e3f2fd
+    style R fill:#e3f2fd
+</div><hr>
+<h2 id="3-phase-1-benchmarking">3. Phase 1: Benchmarking </h2>
+<h3 id="31-hardware-characterization">3.1 Hardware Characterization </h3>
+<p>Before measuring individual operators, we characterize the GPU's raw capabilities:</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Method</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Peak TOPS</strong> (f16, int8)</td>
+<td>Large matrix multiply (M=K=N=4096)</td>
+<td>Compute-bound ceiling</td>
+</tr>
+<tr>
+<td><strong>Peak Bandwidth</strong> (GB/s)</td>
+<td>Large vector copy</td>
+<td>Memory-bound ceiling</td>
+</tr>
+</tbody>
+</table>
+<p>These are measured — not read from spec sheets — because they capture the actual throughput achievable through the specific software stack (Vulkan/CUDA driver, GGML shader, etc.). They establish the <strong>Roofline Model</strong> bounds used as fallbacks (Section 4.1).</p>
+<h3 id="32-operator-registry">3.2 Operator Registry </h3>
+<p>We identify the operators that dominate LLM inference time:</p>
+<table>
+<thead>
+<tr>
+<th>Operator</th>
+<th>Dimensions</th>
+<th>Coverage</th>
+<th>Typical Share</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MUL_MAT</code></td>
+<td>M × K × N per dtype</td>
+<td>Weight matmuls</td>
+<td>60-80%</td>
+</tr>
+<tr>
+<td><code>FLASH_ATTN_EXT</code></td>
+<td>seqQ × seqKV × Q-heads × KV-heads</td>
+<td>Fused attention</td>
+<td>10-40%</td>
+</tr>
+<tr>
+<td><code>RMS_NORM_MUL</code></td>
+<td>N (element count)</td>
+<td>Fused normalization</td>
+<td>2-5%</td>
+</tr>
+<tr>
+<td><code>ROPE</code></td>
+<td>N</td>
+<td>Position encoding</td>
+<td>1-2%</td>
+</tr>
+<tr>
+<td><code>ADD</code>, <code>SILU</code>, <code>SOFT_MAX</code>, ...</td>
+<td>N</td>
+<td>Element-wise ops</td>
+<td>1-3%</td>
+</tr>
+</tbody>
+</table>
+<h3 id="33-benchmark-parameter-space">3.3 Benchmark Parameter Space </h3>
+<p>Each operator is benchmarked across a parameter grid designed to cover the shapes seen in real models:</p>
+<p><strong>MUL_MAT</strong> — the dominant operator, requiring the richest coverage:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>(M, K) grid:  {512, 2048, 8192} × {512, 2048, 8192}  = 9 pairs
+dtype:        {f32, f16, q4_0, q8_0, q4_K, q6_K}      = 6 types
+N (seq len):  Adaptive sampling, ~8-20 points per curve
+─────────────────────────────────────────────────────────
+Curves: 54       Measurements: 54 × ~12 ≈ 648
+</code></pre><p><strong>MUL_MAT_ADD</strong> (fused bias) — one fixed shape per dtype:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>(M, K):  fixed (4096, 4096)
+dtype:   same 6 types
+─────────────────────────────────────────────────────────
+Curves: 6        Measurements: 6 × ~12 ≈ 72
+</code></pre><p><strong>FLASH_ATTN_EXT</strong> — requires GQA (Grouped Query Attention) coverage:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>(Q-heads, KV-heads):  all pairs from {4, 8, 16, 32} where KV ≤ Q = 10 configs
+SeqLen:               Adaptive sampling, decode [1,N] + prefill [N,N]
+─────────────────────────────────────────────────────────
+Curves: 10       Measurements: 10 × ~16 ≈ 160
+</code></pre><p><strong>Element-wise + fused 1D ops</strong> — single N dimension, f32 only:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>Element-wise: ADD, MUL, SILU, GELU, RELU, SOFT_MAX, CONT, RMS_NORM, ROPE = 9 ops
+Fused 1D:     RMS_NORM_MUL, RMS_NORM_MUL_ROPE                            = 2 ops
+─────────────────────────────────────────────────────────
+Curves: 11       Measurements: 11 × ~12 ≈ 132
+</code></pre><p><strong>Total: ~81 curves, ~1,012 measurements + hardware characterization + orchestration overhead.</strong></p>
+<h3 id="34-gpu-timestamp-measurement">3.4 GPU Timestamp Measurement </h3>
+<p>Wall-clock timing includes CPU overhead and driver queueing. We use <strong>GPU timestamps</strong> for accurate kernel-only timing:</p>
+<div class="mermaid">sequenceDiagram
+    participant CPU
+    participant GPU
+    CPU-&gt;&gt;GPU: Submit compute + timestamp queries
+    GPU-&gt;&gt;GPU: Record timestamp_begin (device clock)
+    GPU-&gt;&gt;GPU: Execute kernel
+    GPU-&gt;&gt;GPU: Record timestamp_end (device clock)
+    GPU--&gt;&gt;CPU: Read back raw tick delta
+    Note over CPU,GPU: GPU clocks use a device-specific frequency.&lt;br/&gt;timestampPeriod (ns/tick) converts ticks to real time.&lt;br/&gt;Latency = (end − begin) × timestampPeriod
+</div><p><code>timestampPeriod</code> is a Vulkan device property (<code>VkPhysicalDeviceLimits.timestampPeriod</code>) expressing nanoseconds per GPU clock tick. For example, Intel Arc reports 83.333 ns/tick (12 GHz clock), so 1000 raw ticks = 83.3 μs.</p>
+<p>This matches what <code>GGML_VK_PERF_LOGGER=1</code> measures during actual inference, ensuring benchmark and inference use the same clock source.</p>
+<h3 id="35-adaptive-sampling">3.5 Adaptive Sampling </h3>
+<p>Rather than a fixed grid, we use <strong>adaptive refinement in log-space</strong> to concentrate samples where the latency curve has the most curvature:</p>
+<div class="mermaid">flowchart TD
+    A["Initial: 8 log-spaced points\nN from 1024 to 8M"] --&gt; B{"Interpolation error\n&gt; threshold?"}
+    B --&gt;|Yes| C["Measure midpoint of\nworst interval"]
+    C --&gt; D{"Budget\nexhausted?"}
+    D --&gt;|No| B
+    D --&gt;|Yes| E["Return curve\n~12-20 points"]
+    B --&gt;|No| E
+
+    style A fill:#e8f5e9
+    style E fill:#e8f5e9
+</div><p><strong>Interpolation error metric</strong>: For each internal measured point, we interpolate its value from its two neighbors in log-log space (piecewise linear), then compute the relative error in log space: <code>|log(interpolated) − log(actual)| / |log(actual)|</code>. The interval adjacent to the worst-predicted point is selected for refinement.</p>
+<p><strong>Key design choices:</strong></p>
+<ul>
+<li><strong>Log-space</strong> — GPU latency follows power-law scaling; linear spacing wastes samples at large N</li>
+<li><strong>Error-driven refinement</strong> — adds points only where the curve bends (typically at the memory→compute transition)</li>
+<li><strong>Early convergence</strong> — stops when interpolation error &lt; 5%, typically at 12-15 points</li>
+<li><strong>Safety threshold</strong> — stops if latency exceeds 500ms (prevents GPU TDR timeout on Windows)</li>
+</ul>
+<h3 id="36-convergence-and-statistical-quality">3.6 Convergence and Statistical Quality </h3>
+<p>Each measurement point uses adaptive repetitions:</p>
+<ol>
+<li>Run warmup iterations until latency stabilizes</li>
+<li>Collect samples, trimming outliers (top/bottom 10%)</li>
+<li>Stop when coefficient of variation (CV) &lt; 5% on trimmed samples</li>
+<li>Minimum 5 repetitions to ensure stability</li>
+</ol>
+<p>Total benchmark time: <strong>~90 seconds</strong> for a full GPU profile (~81 curves, ~1,000 measurements).</p>
+<hr>
+<h2 id="4-theoretical-foundation">4. Theoretical Foundation </h2>
+<h3 id="41-roofline-model">4.1 Roofline Model </h3>
+<p>Every GPU operation is bounded by two ceilings. The classic Roofline model visualizes this in <strong>log-log space</strong>:</p>
+<div class="mermaid">%%{init: {'theme': 'base', 'themeVariables': {'xyChart': {'plotColorPalette': '#2563eb'}}}}%%
+xychart-beta
+    title "Roofline Model (log-log)"
+    x-axis "log(Arithmetic Intensity)" ["1", "2", "4", "8", "16", "32", "64", "128", "256"]
+    y-axis "log(Throughput tok/s)" 1 --&gt; 7
+    line [1, 2, 3, 4, 5, 6, 6, 6, 6]
+</div><p>The knee where the line flattens is the <strong>balance point</strong> — left of it the workload is memory-bound (throughput ∝ AI), right of it compute-bound (throughput = peak TOPS).</p>
+<p><strong>Arithmetic Intensity (AI)</strong> = FLOPs / bytes_transferred.  <strong>Balance Point</strong> = Peak_TOPS / Peak_Bandwidth.</p>
+<ul>
+<li>Left of the knee (<code>AI &lt; Balance Point</code>) → <strong>Memory-bound</strong>: throughput scales with AI, latency ≈ data_size / bandwidth</li>
+<li>Right of the knee (<code>AI &gt; Balance Point</code>) → <strong>Compute-bound</strong>: throughput saturates at peak TOPS, latency ≈ FLOPs / peak_TOPS</li>
+</ul>
+<p>For <code>MUL_MAT(M, K, N)</code> with fixed weight matrix (M × K):</p>
+<ul>
+<li>FLOPs = 2 × M × K × N</li>
+<li>Bytes = M × K × bytes_per_element (weight) + K × N × 4 (activation) + M × N × 4 (output)</li>
+<li>At <strong>N=1 (decode)</strong>: AI ≈ 2N/bpe → small → <strong>memory-bound</strong> (loading weights dominates)</li>
+<li>At <strong>N=300 (prefill)</strong>: AI saturates → <strong>compute-bound</strong> (matrix multiply dominates)</li>
+</ul>
+<h3 id="42-why-theory-alone-is-insufficient">4.2 Why Theory Alone Is Insufficient </h3>
+<p>The roofline model gives <strong>theoretical bounds</strong>, but real GPU performance deviates significantly:</p>
+<table>
+<thead>
+<tr>
+<th>Factor</th>
+<th>Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Warp/tile utilization</td>
+<td>M=512 vs M=2048 at same FLOPs → 2-3× latency difference</td>
+</tr>
+<tr>
+<td>Quantized dequant overhead</td>
+<td>q4_K→f16 conversion adds time not in FLOP count</td>
+</tr>
+<tr>
+<td>L2 cache effects</td>
+<td>Small tensors benefit from caching; large ones miss entirely</td>
+</tr>
+<tr>
+<td>Shader kernel selection</td>
+<td>Driver picks different kernels for different shapes</td>
+</tr>
+</tbody>
+</table>
+<p>A single efficiency factor η varies by 3-5× across shapes on the same hardware. This is why we measure a <strong>grid of (M, K) pairs × dtypes</strong> rather than fitting a single roofline constant (see Section 6.1 for this design evolution).</p>
+<h3 id="43-log-space-interpolation">4.3 Log-Space Interpolation </h3>
+<p>GPU kernel latency follows <strong>power-law scaling</strong> across most of its range:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>latency ∝ N^α    (α varies by regime)
+</code></pre><p>Taking logarithms: <code>log(latency) = α · log(N) + c</code></p>
+<p>This transforms the power-law curve into a <strong>piecewise linear function in log-log space</strong>, enabling accurate interpolation with few sample points. Our <code>Interpolate1D</code> function performs piecewise linear interpolation in this log-log space, with power-law extrapolation beyond measured range.</p>
+<h3 id="44-multi-dimensional-interpolation">4.4 Multi-Dimensional Interpolation </h3>
+<p>For <code>MUL_MAT</code>, latency depends on three dimensions (M, K, N) plus dtype. We decompose this:</p>
+<ol>
+<li><strong>Fixed (M, K)</strong>: benchmark at a 3×3 grid of (M, K) pairs per dtype</li>
+<li><strong>Variable N</strong>: adaptive 1D curve per (M, K, dtype) — this is the log-space interpolated dimension</li>
+<li><strong>Query</strong>: for an arbitrary (M, K, N), find the 2 nearest (M, K) curves and blend using <strong>Inverse Distance Weighting (IDW)</strong> in log(M, K) space</li>
+</ol>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>Query (M=3000, K=4000, N=200, q4_K):
+  → Find nearest curves: (2048,2048) and (2048,8192)
+  → Interpolate N=200 on each curve → lat₁, lat₂
+  → IDW blend in log(M,K) space → final_latency
+</code></pre><p>For <code>FLASH_ATTN_EXT</code>, we interpolate across:</p>
+<ul>
+<li><strong>(seqQ, seqKV)</strong>: blend between decode (seqQ=1) and prefill (seqQ=seqKV) regimes</li>
+<li><strong>(Q-heads, KV-heads)</strong>: 2D distance in (Q, KV) space, IDW of 2 nearest GQA curves</li>
+</ul>
+<hr>
+<h2 id="5-phase-2-estimation">5. Phase 2: Estimation </h2>
+<h3 id="51-model-graph-capture">5.1 Model Graph Capture </h3>
+<p>We load the model metadata and forward-pass structure <strong>without allocating weight memory</strong>:</p>
+<div class="mermaid">flowchart TD
+    A["Load GGUF metadata\n(architecture, layers, head dims, dtype)"] --&gt; B["model.New with\nSkipWeightAlloc=true"]
+    B --&gt; C["Initialize KV cache\ncapacity = inputLength"]
+    C --&gt; D["Prefill graph:\nForward(batch=inputLength)"]
+    C --&gt; E["Decode graph:\nForward(batch=1)"]
+    D --&gt; F["~300 GraphNodes per graph\n(op, shapes, dtypes)"]
+    E --&gt; F
+
+    style A fill:#e3f2fd
+    style F fill:#fff9c4
+</div><p>Each <code>GraphNode</code> contains:</p>
+<ul>
+<li><strong>Op</strong>: <code>MUL_MAT</code>, <code>FLASH_ATTN_EXT</code>, <code>ADD</code>, etc.</li>
+<li><strong>Input shapes</strong>: tensor dimensions (determines M, K, N for matmuls; seqQ, seqKV for attention)</li>
+<li><strong>Compute/weight dtype</strong>: <code>f32</code>, <code>q4_K</code>, etc.</li>
+<li><strong>Backend</strong>: assigned in next step</li>
+</ul>
+<p>The graph is an exact replica of what Ollama's inference engine would build — it captures the full computation including KV cache interaction, attention masking, and fused ops. The op count per layer is determined by the model architecture: for a standard transformer, each layer contributes one <code>FLASH_ATTN_EXT</code> (when flash attention is enabled), several <code>MUL_MAT</code> (QKV projections, feedforward), and assorted element-wise ops.</p>
+<p>For <strong>prefill</strong>: a single <code>Forward(batch=inputLength)</code> produces one <code>FLASH_ATTN_EXT</code> per attention layer with shape <code>[seqQ=inputLength, seqKV=roundUp(inputLength, CachePadding), Q_heads, KV_heads]</code>. The KV cache is filled in one pass.</p>
+<p>For <strong>decode</strong>: a single <code>Forward(batch=1)</code> produces one <code>FLASH_ATTN_EXT</code> per layer with shape <code>[seqQ=1, seqKV=roundUp(inputLength, CachePadding), Q_heads, KV_heads]</code>. The seqKV reflects the full context the decode token attends to.</p>
+<h3 id="52-backend-assignment-and-op-fusion">5.2 Backend Assignment and Op Fusion </h3>
+<p>We replicate Ollama's scheduling logic without the C-level <code>split_graph</code>:</p>
+<div class="mermaid">flowchart LR
+    subgraph "Go-Level Schedule"
+        N["Raw Graph Nodes"] --&gt; A["assignBackends\nlayer → GPU/CPU"]
+        A --&gt; F["ApplyFusion\nmerge op patterns"]
+        F --&gt; O["Optimized Graph"]
+    end
+
+    style N fill:#ffecb3
+    style O fill:#e8f5e9
+</div><p><strong>Backend assignment</strong>: parse weight tensor names to identify layer indices, map layers to devices via the offload schedule. Non-layer ops inherit their neighbor's backend.</p>
+<p><strong>Op fusion</strong> simulates GGML backend fusion rules (3 core patterns):</p>
+<ul>
+<li><code>RMS_NORM</code> + <code>MUL</code> → <code>RMS_NORM_MUL</code></li>
+<li><code>RMS_NORM_MUL</code> + <code>ROPE</code> → <code>RMS_NORM_MUL_ROPE</code></li>
+<li><code>MUL_MAT</code> + <code>ADD</code> → <code>MUL_MAT_ADD</code> (bias fusion)</li>
+</ul>
+<h3 id="53-per-op-latency-lookup">5.3 Per-Op Latency Lookup </h3>
+<p>For each node in the optimized graph, look up estimated latency:</p>
+<div class="mermaid">flowchart TD
+    N["GraphNode\n(op, shape, dtype)"] --&gt; D{"Op type?"}
+    D --&gt;|MUL_MAT| MM["IDW interpolate\nfrom 9×6 reference curves"]
+    D --&gt;|FLASH_ATTN| FA["Multi-head GQA\ninterpolation"]
+    D --&gt;|Element-wise| EW["1D log-log\ninterpolation"]
+    D --&gt;|Unknown| RF["Bandwidth\nroofline fallback"]
+    
+    MM --&gt; S["Sum all ops\n→ total latency"]
+    FA --&gt; S
+    EW --&gt; S
+    RF --&gt; S
+    S --&gt; R["Prefill: ms total\nDecode: ms/token → tok/s"]
+
+    style N fill:#e3f2fd
+    style R fill:#e8f5e9
+</div><p><strong>Fallback chain</strong> (for ops without exact calibration data):</p>
+<ol>
+<li>Exact dtype match from benchmark curves</li>
+<li>Approximate dtype (e.g., <code>q4_K</code> → <code>q4_0</code>)</li>
+<li>Bandwidth roofline estimate</li>
+</ol>
+<hr>
+<h2 id="6-design-evolution">6. Design Evolution </h2>
+<p>The current design emerged through several iterations, each addressing accuracy gaps revealed by validation:</p>
+<h3 id="61-roofline--η--direct-empirical-curves">6.1 Roofline + η → Direct Empirical Curves </h3>
+<p><strong>Initial approach</strong>: Model MUL_MAT with a roofline formula:</p>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>latency = max(FLOPs / (η × PeakTOPS), DataBytes / (η_bw × PeakBW))
+</code></pre><p>where η (compute efficiency) and η_bw (bandwidth efficiency) are fitted constants per dtype.</p>
+<p><strong>Problem</strong>: A single efficiency factor cannot capture the complex shape-dependent behavior. MUL_MAT throughput varies by 3-5× depending on (M, K, N) even at fixed total FLOPs, due to GPU tile/warp utilization effects.</p>
+<p><strong>Solution</strong>: Replace with <strong>direct empirical interpolation</strong> from a 3×3 (M, K) grid of measured curves. The roofline model remains as a fallback for uncalibrated shapes.</p>
+<h3 id="62-wall-clock--gpu-timestamps">6.2 Wall-Clock → GPU Timestamps </h3>
+<p><strong>Initial approach</strong>: Measure ops using Go <code>time.Now()</code> around backend compute calls.</p>
+<p><strong>Problem</strong>: 18× discrepancy between predicted and actual GPU time. Wall-clock includes CPU scheduling, Vulkan command submission, and pipeline stalls.</p>
+<p><strong>Solution</strong>: Use <strong>GPU-side timestamp queries</strong> (<code>vkCmdWriteTimestamp</code>) to measure only kernel execution time. This matches the GPU perf logger used to measure actual inference, eliminating the apples-to-oranges comparison.</p>
+<h3 id="63-fixed-head-count--gqa-grid">6.3 Fixed Head Count → GQA Grid </h3>
+<p><strong>Initial approach</strong>: Benchmark FLASH_ATTN with fixed 32 heads.</p>
+<p><strong>Problem</strong>: Models use varying Q/KV head ratios (GQA). qwen3:1.7b has Q=16, KV=8 — not in the benchmark grid. Decode estimate was 0.16× actual.</p>
+<p><strong>Solution</strong>: Benchmark all (Q, KV) combinations from {4, 8, 16, 32} where KV ≤ Q (10 configs). Interpolate in 2D (Q, KV) space for arbitrary head configurations.</p>
+<h3 id="64-prefill-seqkv-padding-correction">6.4 Prefill SeqKV Padding Correction </h3>
+<p><strong>Initial approach</strong>: Use raw tensor shapes from graph capture for FLASH_ATTN interpolation.</p>
+<p><strong>Problem</strong>: KV cache size is aligned to <code>CachePadding=256</code>, so <code>seqKV = roundUp(300, 256) = 512</code>. The prefill interpolation at seqKV=512 gave [512,512] latency (2.08× overestimate), but GPU flash attention skips masked padding positions efficiently.</p>
+<p><strong>Solution</strong>: Prefill component interpolates at <strong>seqQ</strong> (actual token count) rather than seqKV (padded cache size), with a monotonicity floor ensuring the blend never drops below decode latency.</p>
+<hr>
+<h2 id="7-validation-results">7. Validation Results </h2>
+<p>Validated on <strong>qwen3:1.7b</strong> (Q4_K_M quantization) with Intel Xe integrated GPU (Vulkan backend).</p>
+<h3 id="71-end-to-end-accuracy">7.1 End-to-End Accuracy </h3>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">Input Length</th>
+<th>Phase</th>
+<th style="text-align:right">Actual (ms)</th>
+<th style="text-align:right">Estimate (ms)</th>
+<th style="text-align:right">Ratio (est/actual)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">18</td>
+<td>Prefill</td>
+<td style="text-align:right">410.9</td>
+<td style="text-align:right">234.8</td>
+<td style="text-align:right">0.57×</td>
+</tr>
+<tr>
+<td style="text-align:right">18</td>
+<td>Decode</td>
+<td style="text-align:right">81.3</td>
+<td style="text-align:right">94.6</td>
+<td style="text-align:right">1.16×</td>
+</tr>
+<tr>
+<td style="text-align:right">150</td>
+<td>Prefill</td>
+<td style="text-align:right">1,638.3</td>
+<td style="text-align:right">1,032.1</td>
+<td style="text-align:right">0.63×</td>
+</tr>
+<tr>
+<td style="text-align:right">150</td>
+<td>Decode</td>
+<td style="text-align:right">117.2</td>
+<td style="text-align:right">94.6</td>
+<td style="text-align:right">0.81×</td>
+</tr>
+<tr>
+<td style="text-align:right">300</td>
+<td>Prefill</td>
+<td style="text-align:right">4,080.2</td>
+<td style="text-align:right">2,255.9</td>
+<td style="text-align:right">0.55×</td>
+</tr>
+<tr>
+<td style="text-align:right">300</td>
+<td>Decode</td>
+<td style="text-align:right">131.9</td>
+<td style="text-align:right">115.2</td>
+<td style="text-align:right">0.87×</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Decode accuracy: within 1.2× for all input lengths.</strong> Prefill underestimate is dominated by MUL_MAT single-op benchmark vs. multi-op inference gap (see Section 8).</p>
+<h3 id="72-per-op-accuracy-decode-input_length300">7.2 Per-Op Accuracy (Decode, input_length=300) </h3>
+<table>
+<thead>
+<tr>
+<th>Operator</th>
+<th style="text-align:right">Actual (μs)</th>
+<th style="text-align:right">Estimate (μs)</th>
+<th style="text-align:right">Ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MUL_MAT q4_K</td>
+<td style="text-align:right">43,660</td>
+<td style="text-align:right">27,761</td>
+<td style="text-align:right">0.64×</td>
+</tr>
+<tr>
+<td>FLASH_ATTN_EXT</td>
+<td style="text-align:right">41,440</td>
+<td style="text-align:right">51,646</td>
+<td style="text-align:right">1.25×</td>
+</tr>
+<tr>
+<td>MUL_MAT q6_K</td>
+<td style="text-align:right">17,488</td>
+<td style="text-align:right">8,761</td>
+<td style="text-align:right">0.50×</td>
+</tr>
+<tr>
+<td>MUL_MAT_ADD q4_K</td>
+<td style="text-align:right">14,631</td>
+<td style="text-align:right">8,726</td>
+<td style="text-align:right">0.60×</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td style="text-align:right"><strong>131,943</strong></td>
+<td style="text-align:right"><strong>115,216</strong></td>
+<td style="text-align:right"><strong>0.87×</strong></td>
+</tr>
+</tbody>
+</table>
+<h3 id="73-improvement-journey">7.3 Improvement Journey </h3>
+<pre data-role="codeBlock" data-info="" class="language-text"><code>18× off  ──[GPU timestamps]──▶  3.6×  ──[direct curves]──▶  1.04× (decode)
+                                       ──[GQA grid]──▶       1.20× (FLASH_ATTN decode)
+                                       ──[seqKV fix]──▶      0.78× (FLASH_ATTN prefill)
+</code></pre><hr>
+<h2 id="8-known-limitations">8. Known Limitations </h2>
+<h3 id="81-mul_mat-benchmark-vs-inference-gap">8.1 MUL_MAT Benchmark vs. Inference Gap </h3>
+<p>Single-op benchmarks achieve <strong>108% of peak TOPS</strong> (due to aggressive GPU utilization), while multi-op inference achieves only <strong>29%</strong> for the same shapes. This 3× gap cannot be explained by memory bandwidth (roofline analysis confirms compute-bound at large N). Likely causes:</p>
+<ul>
+<li><strong>Inter-kernel gaps</strong>: Although Vulkan batches ~100 ops per command buffer submission, pipeline barriers and descriptor binding between dispatches create micro-gaps that accumulate across ~300 ops/token</li>
+<li><strong>Occupancy degradation</strong>: GPU register and shared memory pressure differs between isolated ops and full inference pipelines with ~300 ops competing for resources</li>
+<li><strong>Cache thrashing</strong>: Single-op benchmarks enjoy warm L2 caches; in multi-op inference, each op evicts the previous op's cached data</li>
+</ul>
+<p>This is the dominant source of prefill underestimation (Section 7.1).</p>
+<h3 id="82-cachepadding-effects-on-decode">8.2 CachePadding Effects on Decode </h3>
+<p>KV cache alignment inflates decode seqKV (e.g., 18 tokens → seqKV=256), causing overestimation for short contexts where the GPU skips masked positions.</p>
+<h3 id="83-uncalibrated-operators">8.3 Uncalibrated Operators </h3>
+<p><code>GLU</code> and <code>SET_ROWS</code> lack benchmark curves and fall back to bandwidth roofline estimates. Combined impact: &lt;2% of total latency.</p>
+<hr>
+<h2 id="9-future-work">9. Future Work </h2>
+<table>
+<thead>
+<tr>
+<th>Priority</th>
+<th>Item</th>
+<th>Expected Impact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>HIGH</strong></td>
+<td><strong>Multi-model validation</strong>: test on diverse architectures (llama3, gemma, phi, mistral), quantizations (Q4_0, Q5_K, Q8_0), and sizes (1B–70B) to verify generalization</td>
+<td>Confidence in cross-model accuracy</td>
+</tr>
+<tr>
+<td><strong>HIGH</strong></td>
+<td><strong>Telemetry-based calibration</strong>: use actual inference GPU timings to derive per-op or pipeline-level correction factors, bridging the single-op benchmark vs. multi-op inference gap</td>
+<td>Prefill accuracy 0.55× → ~1×</td>
+</tr>
+<tr>
+<td><strong>HIGH</strong></td>
+<td>Decode CachePadding correction (use actual context length, not padded seqKV)</td>
+<td>Decode accuracy for short contexts</td>
+</tr>
+<tr>
+<td><strong>MED</strong></td>
+<td>Partial offload estimation (CPU+GPU split, data transfer modeling)</td>
+<td>Support non-full-offload scenarios</td>
+</tr>
+<tr>
+<td><strong>MED</strong></td>
+<td>Extend to CUDA/Metal backends</td>
+<td>Cross-platform validation</td>
+</tr>
+<tr>
+<td><strong>LOW</strong></td>
+<td>Pre-download estimation (GGUF header only, ~50KB)</td>
+<td>True "before download" prediction</td>
+</tr>
+<tr>
+<td><strong>LOW</strong></td>
+<td>Multi-user concurrent inference modeling</td>
+<td>Server deployment planning</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="appendix-a-profile-data-structure">Appendix A: Profile Data Structure </h2>
+<p>The benchmark produces a JSON profile containing:</p>
+<pre data-role="codeBlock" data-info="json" class="language-json json"><code><span class="token punctuation">{</span>
+  <span class="token property">"version"</span><span class="token operator">:</span> <span class="token number">3</span><span class="token punctuation">,</span>
+  <span class="token property">"hardware"</span><span class="token operator">:</span> <span class="token punctuation">{</span>
+    <span class="token property">"peak_tops_f16"</span><span class="token operator">:</span> <span class="token number">425.3</span><span class="token punctuation">,</span>
+    <span class="token property">"peak_tops_int8"</span><span class="token operator">:</span> <span class="token number">671.2</span><span class="token punctuation">,</span>
+    <span class="token property">"peak_bandwidth_bytes_per_sec"</span><span class="token operator">:</span> <span class="token number">52e9</span><span class="token punctuation">,</span>
+    <span class="token property">"efficiency_constants"</span><span class="token operator">:</span> <span class="token punctuation">{</span> <span class="token property">"MUL_MAT_f16"</span><span class="token operator">:</span> <span class="token number">0.87</span><span class="token punctuation">,</span> ... <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token property">"backend_caps"</span><span class="token operator">:</span> <span class="token punctuation">{</span>
+    <span class="token property">"Vulkan"</span><span class="token operator">:</span> <span class="token punctuation">{</span> <span class="token property">"has_gpu_timestamp"</span><span class="token operator">:</span> <span class="token boolean">true</span><span class="token punctuation">,</span> <span class="token property">"fusion_rules"</span><span class="token operator">:</span> <span class="token punctuation">[</span>...<span class="token punctuation">]</span> <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token property">"operators"</span><span class="token operator">:</span> <span class="token punctuation">[</span>
+    <span class="token punctuation">{</span>
+      <span class="token property">"op"</span><span class="token operator">:</span> <span class="token string">"MUL_MAT"</span><span class="token punctuation">,</span> <span class="token property">"weight_dtype"</span><span class="token operator">:</span> <span class="token string">"q4_K"</span><span class="token punctuation">,</span> <span class="token property">"backend"</span><span class="token operator">:</span> <span class="token string">"Vulkan"</span><span class="token punctuation">,</span>
+      <span class="token property">"fixed_dims"</span><span class="token operator">:</span> <span class="token punctuation">{</span> <span class="token property">"M"</span><span class="token operator">:</span> <span class="token number">2048</span><span class="token punctuation">,</span> <span class="token property">"K"</span><span class="token operator">:</span> <span class="token number">2048</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>
+      <span class="token property">"points"</span><span class="token operator">:</span> <span class="token punctuation">[</span>
+        <span class="token punctuation">{</span> <span class="token property">"shape"</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token property">"latency_us"</span><span class="token operator">:</span> <span class="token number">140.2</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token punctuation">{</span> <span class="token property">"shape"</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token number">32</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token property">"latency_us"</span><span class="token operator">:</span> <span class="token number">280.5</span> <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token punctuation">{</span> <span class="token property">"shape"</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token number">300</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token property">"latency_us"</span><span class="token operator">:</span> <span class="token number">6709.0</span> <span class="token punctuation">}</span>
+      <span class="token punctuation">]</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+</code></pre><h2 id="appendix-b-benchmark-operator-coverage">Appendix B: Benchmark Operator Coverage </h2>
+<table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Operators</th>
+<th>Grid</th>
+<th style="text-align:right">Curves</th>
+<th style="text-align:right">Pts/Curve</th>
+<th style="text-align:right">Measurements</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Matrix multiply</td>
+<td>MUL_MAT</td>
+<td>9 (M,K) × 6 dtypes</td>
+<td style="text-align:right">54</td>
+<td style="text-align:right">~12</td>
+<td style="text-align:right">~648</td>
+</tr>
+<tr>
+<td>Fused bias</td>
+<td>MUL_MAT_ADD</td>
+<td>1 (M,K) × 6 dtypes</td>
+<td style="text-align:right">6</td>
+<td style="text-align:right">~12</td>
+<td style="text-align:right">~72</td>
+</tr>
+<tr>
+<td>Flash attention</td>
+<td>FLASH_ATTN_EXT</td>
+<td>10 GQA configs</td>
+<td style="text-align:right">10</td>
+<td style="text-align:right">~16</td>
+<td style="text-align:right">~160</td>
+</tr>
+<tr>
+<td>Normalization</td>
+<td>RMS_NORM</td>
+<td>1D, f32</td>
+<td style="text-align:right">1</td>
+<td style="text-align:right">~12</td>
+<td style="text-align:right">~12</td>
+</tr>
+<tr>
+<td>Fused norm</td>
+<td>RMS_NORM_MUL, RMS_NORM_MUL_ROPE</td>
+<td>1D, f32</td>
+<td style="text-align:right">2</td>
+<td style="text-align:right">~12</td>
+<td style="text-align:right">~24</td>
+</tr>
+<tr>
+<td>Activation</td>
+<td>SILU, GELU, RELU, SOFT_MAX</td>
+<td>1D, f32</td>
+<td style="text-align:right">4</td>
+<td style="text-align:right">~12</td>
+<td style="text-align:right">~48</td>
+</tr>
+<tr>
+<td>Positional</td>
+<td>ROPE, CONT</td>
+<td>1D, f32</td>
+<td style="text-align:right">2</td>
+<td style="text-align:right">~12</td>
+<td style="text-align:right">~24</td>
+</tr>
+<tr>
+<td>Element-wise</td>
+<td>ADD, MUL</td>
+<td>1D, f32</td>
+<td style="text-align:right">2</td>
+<td style="text-align:right">~12</td>
+<td style="text-align:right">~24</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td></td>
+<td></td>
+<td style="text-align:right"><strong>81</strong></td>
+<td style="text-align:right"></td>
+<td style="text-align:right"><strong>~1,012</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Total benchmark time on Intel Arc (Vulkan): <strong>~90 seconds</strong>.</p>
+
+      </div>
+      
+      
+    
+    
+    <script type="module">
+// TODO: If ZenUML gets integrated into mermaid in the future,
+//      we can remove the following lines.
+
+
+var MERMAID_CONFIG = ({"startOnLoad":false});
+if (typeof MERMAID_CONFIG !== 'undefined') {
+  MERMAID_CONFIG.startOnLoad = false
+  MERMAID_CONFIG.cloneCssStyles = false
+  MERMAID_CONFIG.theme = "default"
+}
+
+mermaid.initialize(MERMAID_CONFIG || {})
+if (typeof(window['Reveal']) !== 'undefined') {
+  function mermaidRevealHelper(event) {
+    var currentSlide = event.currentSlide
+    var diagrams = currentSlide.querySelectorAll('div.mermaid')
+    for (var i = 0; i < diagrams.length; i++) {
+      var diagram = diagrams[i]
+      if (!diagram.hasAttribute('data-processed')) {
+        mermaid.init(null, diagram, ()=> {
+          Reveal.slide(event.indexh, event.indexv)
+        })
+      }
+    }
+  }
+  Reveal.addEventListener('slidetransitionend', mermaidRevealHelper)
+  Reveal.addEventListener('ready', mermaidRevealHelper)
+  await mermaid.run({
+    nodes: document.querySelectorAll('div.mermaid')
+  })
+} else {
+  await mermaid.run({
+    nodes: document.querySelectorAll('div.mermaid')
+  })
+}
+</script>
+    
+    
+    
+  
+    </body></html>

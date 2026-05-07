@@ -1978,10 +1978,18 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
         pipeline_shader_create_info.setPNext(&pipeline_shader_stage_required_subgroup_size_create_info);
     }
 
+    static const bool dump_isa = (getenv("GGML_VK_DUMP_ISA") != nullptr);
+
+    vk::PipelineCreateFlags pep_flags{};
+    if (device->pipeline_executable_properties_support) {
+        pep_flags = vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
+        if (dump_isa) {
+            pep_flags |= vk::PipelineCreateFlagBits::eCaptureInternalRepresentationsKHR;
+        }
+    }
+
     vk::ComputePipelineCreateInfo compute_pipeline_create_info(
-        device->pipeline_executable_properties_support ?
-            vk::PipelineCreateFlagBits::eCaptureStatisticsKHR :
-            vk::PipelineCreateFlags{},
+        pep_flags,
         pipeline_shader_create_info,
         pipeline->layout);
 
@@ -2020,6 +2028,46 @@ static void ggml_vk_create_pipeline_func(vk_device& device, vk_pipeline& pipelin
             if (strcmp(s.name, "Register Count") == 0) {
                 VK_LOG_DEBUG(pipeline->name << " " << s.name << ": " << s.value.u64 << " registers");
                 pipeline->register_count = (uint32_t)s.value.u64;
+            }
+        }
+
+        if (dump_isa) {
+            // Print all statistics (Intel may report different ones than NVIDIA)
+            for (auto & s : statistics) {
+                std::cerr << "VK_STAT [" << pipeline->name << "] " << s.name << ": ";
+                switch (s.format) {
+                    case vk::PipelineExecutableStatisticFormatKHR::eBool32:
+                        std::cerr << (s.value.b32 ? "true" : "false"); break;
+                    case vk::PipelineExecutableStatisticFormatKHR::eInt64:
+                        std::cerr << s.value.i64; break;
+                    case vk::PipelineExecutableStatisticFormatKHR::eUint64:
+                        std::cerr << s.value.u64; break;
+                    case vk::PipelineExecutableStatisticFormatKHR::eFloat64:
+                        std::cerr << s.value.f64; break;
+                }
+                std::cerr << std::endl;
+            }
+
+            // Dump internal representations (GEN ISA on Intel)
+            auto reps = device->device.getPipelineExecutableInternalRepresentationsKHR(executableInfo);
+            std::cerr << "VK_ISA_COUNT [" << pipeline->name << "] " << reps.size() << " representations" << std::endl;
+            for (auto & r : reps) {
+                std::cerr << "VK_ISA [" << pipeline->name << "] name=\"" << r.name
+                          << "\" desc=\"" << r.description
+                          << "\" isText=" << r.isText
+                          << " size=" << r.dataSize << std::endl;
+                if (r.dataSize > 0 && r.pData) {
+                    // Write each representation to a file
+                    std::string safe_name = pipeline->name;
+                    for (auto & c : safe_name) { if (c == '/' || c == '\\' || c == ':') c = '_'; }
+                    std::string filename = "isa_dump_" + safe_name + "_" + std::string(r.name.data()) + (r.isText ? ".txt" : ".bin");
+                    FILE* f = fopen(filename.c_str(), "wb");
+                    if (f) {
+                        fwrite(r.pData, 1, r.dataSize, f);
+                        fclose(f);
+                        std::cerr << "  -> wrote " << r.dataSize << " bytes to " << filename << std::endl;
+                    }
+                }
             }
         }
     }
@@ -5872,6 +5920,10 @@ static void ggml_vk_dispatch_pipeline(ggml_backend_vk_context* ctx, vk_context& 
     const uint32_t wg0 = CEIL_DIV(elements[0], pipeline->wg_denoms[0]);
     const uint32_t wg1 = CEIL_DIV(elements[1], pipeline->wg_denoms[1]);
     const uint32_t wg2 = CEIL_DIV(elements[2], pipeline->wg_denoms[2]);
+    static const bool log_pipelines = (getenv("GGML_VK_LOG_PIPELINES") != nullptr);
+    if (log_pipelines) {
+        fprintf(stderr, "VK_DISPATCH: %s [wg=%u,%u,%u]\n", pipeline->name.c_str(), wg0, wg1, wg2);
+    }
     VK_LOG_DEBUG("ggml_vk_dispatch_pipeline(" << pipeline->name << ", {";
     for (auto& buffer : descriptor_buffer_infos) {
         std::cerr << "(" << buffer.buffer << ", " << buffer.offset << ", " << buffer.range << "), ";

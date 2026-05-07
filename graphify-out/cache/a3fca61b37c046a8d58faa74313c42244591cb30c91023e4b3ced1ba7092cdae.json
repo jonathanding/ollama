@@ -1,0 +1,1 @@
+{"nodes": [{"id": "log", "label": "log.h", "file_type": "code", "source_file": "llama\\llama.cpp\\common\\log.h", "source_location": "L1"}], "edges": [{"source": "log", "target": "ggml", "relation": "imports", "confidence": "EXTRACTED", "source_file": "llama\\llama.cpp\\common\\log.h", "source_location": "L3", "weight": 1.0}]}
