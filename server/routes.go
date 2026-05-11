@@ -92,12 +92,13 @@ func initDaop() {
 		return
 	}
 
-	// Placeholder probe - returns zeros. Will be replaced in Task 11.
-	probe := func(text string) ([]float32, error) {
-		return make([]float32, 1024), nil
+	probe, err := daop.NewProbe(cfg)
+	if err != nil {
+		slog.Warn("daop: failed to init probe, disabled", "error", err)
+		return
 	}
 
-	daopRouter = daop.NewRouter(cfg, gate, scorer, probe)
+	daopRouter = daop.NewRouter(cfg, gate, scorer, probe.Extract)
 	slog.Info("daop: initialized successfully", "models", cfg.SupportedModels)
 }
 
