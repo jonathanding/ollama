@@ -33,6 +33,7 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/auth"
+	"github.com/ollama/ollama/daop"
 	"github.com/ollama/ollama/discover"
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
@@ -65,6 +66,40 @@ const (
 	cloudErrWebFetchUnavailable           = "web fetch is unavailable"
 	copilotChatUserAgentPrefix            = "GitHubCopilotChat/"
 )
+
+var daopRouter *daop.Router
+
+func initDaop() {
+	cfg, err := daop.LoadConfig()
+	if err != nil {
+		slog.Warn("daop: config error, disabled", "error", err)
+		return
+	}
+	if cfg == nil || !cfg.Enabled {
+		slog.Info("daop: disabled (no config or enabled=false)")
+		return
+	}
+
+	gate, err := daop.NewSubtaskGate(cfg.GateStats, cfg.GateThreshold)
+	if err != nil {
+		slog.Warn("daop: failed to load gate stats, disabled", "error", err)
+		return
+	}
+
+	scorer, err := daop.NewMFScorer(cfg.MFWeights)
+	if err != nil {
+		slog.Warn("daop: failed to load MF weights, disabled", "error", err)
+		return
+	}
+
+	// Placeholder probe - returns zeros. Will be replaced in Task 11.
+	probe := func(text string) ([]float32, error) {
+		return make([]float32, 1024), nil
+	}
+
+	daopRouter = daop.NewRouter(cfg, gate, scorer, probe)
+	slog.Info("daop: initialized successfully", "models", cfg.SupportedModels)
+}
 
 func writeModelRefParseError(c *gin.Context, err error, fallbackStatus int, fallbackMessage string) {
 	switch {
@@ -1740,6 +1775,8 @@ func (s *Server) GenerateRoutes(rc *ollama.Registry) (http.Handler, error) {
 func Serve(ln net.Listener) error {
 	slog.SetDefault(logutil.NewLogger(os.Stderr, envconfig.LogLevel()))
 	slog.Info("server config", "env", envconfig.Values())
+
+	initDaop()
 	cloudDisabled, _ := internalcloud.Status()
 	slog.Info(fmt.Sprintf("Ollama cloud disabled: %t", cloudDisabled))
 
@@ -2258,6 +2295,45 @@ func (s *Server) ChatHandler(c *gin.Context) {
 		return
 	}
 
+	// DAOP routing check
+	if daopRouter != nil {
+		var daopCtx *daop.DaopContext
+		if req.DaopContext != nil {
+			daopCtx = &daop.DaopContext{Subtask: req.DaopContext.Subtask}
+		}
+
+		// Extract prompt text from last user message
+		promptText := ""
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if req.Messages[i].Role == "user" {
+				promptText = req.Messages[i].Content
+				break
+			}
+		}
+
+		daopResult := daopRouter.Route(req.Model, promptText, daopCtx)
+
+		if daopResult != nil {
+			c.Header("X-DAOP", "true")
+
+			if daopResult.Decision == "fallback" {
+				daopJSON, _ := json.Marshal(daopResult)
+				resp := api.ChatResponse{
+					Model:      req.Model,
+					CreatedAt:  time.Now().UTC(),
+					Message:    api.Message{Role: "assistant"},
+					Done:       true,
+					DoneReason: "daop_fallback",
+					Daop:       daopJSON,
+				}
+				c.JSON(http.StatusOK, resp)
+				return
+			}
+			// offload: store result to attach to final response
+			c.Set("daop_result", daopResult)
+		}
+	}
+
 	caps := []model.Capability{model.CapabilityCompletion}
 	if len(req.Tools) > 0 {
 		caps = append(caps, model.CapabilityTools)
@@ -2605,6 +2681,15 @@ func (s *Server) ChatHandler(c *gin.Context) {
 
 		if len(toolCalls) > 0 {
 			resp.Message.ToolCalls = toolCalls
+		}
+
+		// Attach DAOP metadata to final response
+		if daopResultVal, exists := c.Get("daop_result"); exists {
+			if dr, ok := daopResultVal.(*daop.DaopResult); ok {
+				daopJSON, _ := json.Marshal(dr)
+				resp.Daop = daopJSON
+				c.Header("X-DAOP", "true")
+			}
 		}
 
 		c.JSON(http.StatusOK, resp)
