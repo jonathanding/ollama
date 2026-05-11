@@ -191,6 +191,14 @@ type ChatRequest struct {
 	// each with an associated log probability. Only applies when Logprobs is true.
 	// Valid values are 0-20. Default is 0 (only return the selected token's logprob).
 	TopLogprobs int `json:"top_logprobs,omitempty"`
+
+	// DaopContext provides routing hints for DAOP accuracy-aware routing.
+	DaopContext *DaopContextReq `json:"daop_context,omitempty"`
+}
+
+// DaopContextReq provides routing hints from the client.
+type DaopContextReq struct {
+	Subtask string `json:"subtask,omitempty"`
 }
 
 type Tools []Tool
@@ -557,6 +565,9 @@ type ChatResponse struct {
 	// Logprobs contains log probability information for the generated tokens,
 	// if requested via the Logprobs parameter.
 	Logprobs []Logprob `json:"logprobs,omitempty"`
+
+	// Daop contains the DAOP routing decision metadata.
+	Daop json.RawMessage `json:"daop,omitempty"`
 
 	Metrics
 }
