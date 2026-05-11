@@ -1,0 +1,32 @@
+{
+  "gemma4-e4b-q4": {
+    "leaderboard_ifeval": 0.3302,
+    "leaderboard_math_algebra_hard": 0.0648,
+    "leaderboard_math_counting_and_prob_hard": 0.0515,
+    "leaderboard_math_geometry_hard": 0.0175,
+    "leaderboard_math_intermediate_algebra_hard": 0.0091,
+    "leaderboard_math_num_theory_hard": 0.0312,
+    "leaderboard_math_prealgebra_hard": 0.1083,
+    "leaderboard_math_precalculus_hard": 0.0
+  },
+  "qwen3-4b-q4": {
+    "leaderboard_ifeval": 0.7052,
+    "leaderboard_math_algebra_hard": 0.7571,
+    "leaderboard_math_counting_and_prob_hard": 0.4536,
+    "leaderboard_math_geometry_hard": 0.307,
+    "leaderboard_math_intermediate_algebra_hard": 0.2045,
+    "leaderboard_math_num_theory_hard": 0.5625,
+    "leaderboard_math_prealgebra_hard": 0.6433,
+    "leaderboard_math_precalculus_hard": 0.1714
+  },
+  "qwen3-8b-q4": {
+    "leaderboard_ifeval": 0.8373,
+    "leaderboard_math_algebra_hard": 0.7773,
+    "leaderboard_math_counting_and_prob_hard": 0.5155,
+    "leaderboard_math_geometry_hard": 0.2719,
+    "leaderboard_math_intermediate_algebra_hard": 0.1909,
+    "leaderboard_math_num_theory_hard": 0.6016,
+    "leaderboard_math_prealgebra_hard": 0.7389,
+    "leaderboard_math_precalculus_hard": 0.2
+  }
+}

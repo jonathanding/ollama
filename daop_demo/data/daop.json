@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "probe_model": "Qwen3-0.6B-Q8_0.gguf",
+  "probe_layer": 14,
+  "mf_weights": "mf_weights.bin",
+  "gate_stats": "gate_stats.json",
+  "gate_threshold": 0.80,
+  "accuracy_threshold": 0.80,
+  "supported_models": [
+    "qwen3-8b-q4",
+    "qwen3-4b-q4",
+    "gemma4-e4b-q4"
+  ]
+}

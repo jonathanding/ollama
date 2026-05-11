@@ -27,18 +27,19 @@ func (c *Config) IsModelSupported(model string) bool {
 	return false
 }
 
+// LoadConfig loads daop.json from:
+//  1. <executable_dir>/daop_demo/data/daop.json (self-contained deployment)
+//  2. ~/.ollama/daop.json (development fallback)
+//
+// Relative paths in the config are resolved against the config file's directory.
 func LoadConfig() (*Config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("cannot find home dir: %w", err)
+	configPath := findConfig()
+	if configPath == "" {
+		return nil, nil
 	}
 
-	path := filepath.Join(home, ".ollama", "daop.json")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // No config = DAOP disabled
-		}
 		return nil, fmt.Errorf("read daop.json: %w", err)
 	}
 
@@ -57,5 +58,38 @@ func LoadConfig() (*Config, error) {
 		cfg.ProbeLayer = 14
 	}
 
+	// Resolve relative paths against config file directory
+	configDir := filepath.Dir(configPath)
+	cfg.ProbeModel = resolvePath(configDir, cfg.ProbeModel)
+	cfg.MFWeights = resolvePath(configDir, cfg.MFWeights)
+	cfg.GateStats = resolvePath(configDir, cfg.GateStats)
+
 	return &cfg, nil
+}
+
+func findConfig() string {
+	// 1. Next to executable: <exe_dir>/daop_demo/data/daop.json
+	if exe, err := os.Executable(); err == nil {
+		p := filepath.Join(filepath.Dir(exe), "daop_demo", "data", "daop.json")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	// 2. ~/.ollama/daop.json
+	if home, err := os.UserHomeDir(); err == nil {
+		p := filepath.Join(home, ".ollama", "daop.json")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	return ""
+}
+
+func resolvePath(base, path string) string {
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(base, path)
 }
