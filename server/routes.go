@@ -2470,6 +2470,19 @@ func (s *Server) ChatHandler(c *gin.Context) {
 	go func() {
 		defer close(ch)
 
+		// Send DAOP routing result as first streaming chunk
+		if daopResultVal, exists := c.Get("daop_result"); exists {
+			if dr, ok := daopResultVal.(*daop.DaopResult); ok {
+				daopJSON, _ := json.Marshal(dr)
+				ch <- api.ChatResponse{
+					Model:     req.Model,
+					CreatedAt: time.Now().UTC(),
+					Message:   api.Message{Role: "assistant"},
+					Daop:      daopJSON,
+				}
+			}
+		}
+
 		structuredOutputsState := structuredOutputsState_None
 
 		for {

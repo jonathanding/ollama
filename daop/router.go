@@ -3,6 +3,7 @@ package daop
 import (
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // ProbeFunc extracts a prompt embedding from text. Injected dependency.
@@ -30,6 +31,7 @@ func NewRouter(cfg *Config, gate *SubtaskGate, classifier *SubtaskClassifier, sc
 
 // Route makes the offload/fallback decision for a chat request.
 func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopResult {
+	t0 := time.Now()
 	result := &DaopResult{
 		Model:         model,
 		Threshold:     r.cfg.AccuracyThreshold,
@@ -49,6 +51,7 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 	if err != nil {
 		slog.Warn("daop: probe failed, defaulting to offload", "error", err)
 		result.Decision = "offload"
+		result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
 		return result
 	}
 
@@ -61,6 +64,8 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 		predicted, conf := r.classifier.Predict(embedding)
 		if predicted != "" {
 			subtask = predicted
+			confVal := conf
+			result.ClassifierConf = &confVal
 			slog.Debug("daop: classifier predicted subtask", "subtask", subtask, "confidence", conf)
 		}
 	}
@@ -74,6 +79,7 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 		if !pass {
 			result.Decision = "fallback"
 			result.FallbackReason = "gate"
+			result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
 			slog.Debug("daop: gate blocked", "model", model, "subtask", subtask, "rate", rate)
 			return result
 		}
@@ -84,6 +90,7 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 	if err != nil {
 		slog.Warn("daop: scorer failed, defaulting to offload", "error", err)
 		result.Decision = "offload"
+		result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
 		return result
 	}
 	result.Confidence = &score
@@ -92,11 +99,13 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 	if score < r.cfg.AccuracyThreshold {
 		result.Decision = "fallback"
 		result.FallbackReason = "threshold"
+		result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
 		slog.Debug("daop: below threshold", "model", model, "score", score)
 		return result
 	}
 
 	result.Decision = "offload"
+	result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
 	slog.Debug("daop: offload", "model", model, "score", score)
 	return result
 }
