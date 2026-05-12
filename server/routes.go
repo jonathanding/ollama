@@ -86,6 +86,16 @@ func initDaop() {
 		return
 	}
 
+	var classifier *daop.SubtaskClassifier
+	if cfg.SubtaskClassifier != "" {
+		classifier, err = daop.NewSubtaskClassifier(cfg.SubtaskClassifier)
+		if err != nil {
+			slog.Warn("daop: failed to load subtask classifier, gate will require explicit subtask", "error", err)
+		} else {
+			slog.Info("daop: subtask classifier loaded")
+		}
+	}
+
 	scorer, err := daop.NewMFScorer(cfg.MFWeights, cfg.Temperature)
 	if err != nil {
 		slog.Warn("daop: failed to load MF weights, disabled", "error", err)
@@ -98,7 +108,7 @@ func initDaop() {
 		return
 	}
 
-	daopRouter = daop.NewRouter(cfg, gate, scorer, probe.Extract)
+	daopRouter = daop.NewRouter(cfg, gate, classifier, scorer, probe.Extract)
 	slog.Info("daop: initialized successfully", "models", cfg.SupportedModels)
 }
 

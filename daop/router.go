@@ -10,19 +10,21 @@ type ProbeFunc func(text string) ([]float32, error)
 
 // Router orchestrates the DAOP routing decision.
 type Router struct {
-	cfg     *Config
-	gate    *SubtaskGate
-	scorer  *MFScorer
-	probe   ProbeFunc
-	probeMu sync.Mutex
+	cfg        *Config
+	gate       *SubtaskGate
+	classifier *SubtaskClassifier
+	scorer     *MFScorer
+	probe      ProbeFunc
+	probeMu    sync.Mutex
 }
 
-func NewRouter(cfg *Config, gate *SubtaskGate, scorer *MFScorer, probe ProbeFunc) *Router {
+func NewRouter(cfg *Config, gate *SubtaskGate, classifier *SubtaskClassifier, scorer *MFScorer, probe ProbeFunc) *Router {
 	return &Router{
-		cfg:    cfg,
-		gate:   gate,
-		scorer: scorer,
-		probe:  probe,
+		cfg:        cfg,
+		gate:       gate,
+		classifier: classifier,
+		scorer:     scorer,
+		probe:      probe,
 	}
 }
 
@@ -39,10 +41,28 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 		return nil // nil means DAOP doesn't apply
 	}
 
-	// Step 1: Subtask gate (cheap)
+	// Step 1: Probe (needed for both classifier and MF scoring)
+	r.probeMu.Lock()
+	embedding, err := r.probe(promptText)
+	r.probeMu.Unlock()
+
+	if err != nil {
+		slog.Warn("daop: probe failed, defaulting to offload", "error", err)
+		result.Decision = "offload"
+		return result
+	}
+
+	// Step 2: Subtask gate
 	subtask := ""
 	if ctx != nil {
 		subtask = ctx.Subtask
+	}
+	if subtask == "" && r.classifier != nil {
+		predicted, conf := r.classifier.Predict(embedding)
+		if predicted != "" {
+			subtask = predicted
+			slog.Debug("daop: classifier predicted subtask", "subtask", subtask, "confidence", conf)
+		}
 	}
 	result.Subtask = subtask
 
@@ -57,17 +77,6 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 			slog.Debug("daop: gate blocked", "model", model, "subtask", subtask, "rate", rate)
 			return result
 		}
-	}
-
-	// Step 2: Probe (expensive) — mutex protected
-	r.probeMu.Lock()
-	embedding, err := r.probe(promptText)
-	r.probeMu.Unlock()
-
-	if err != nil {
-		slog.Warn("daop: probe failed, defaulting to offload", "error", err)
-		result.Decision = "offload"
-		return result
 	}
 
 	// Step 3: MF scoring

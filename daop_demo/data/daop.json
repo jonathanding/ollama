@@ -4,6 +4,7 @@
   "probe_layer": 14,
   "mf_weights": "mf_weights.bin",
   "gate_stats": "gate_stats.json",
+  "subtask_classifier": "subtask_classifier.bin",
   "gate_threshold": 0.80,
   "accuracy_threshold": 0.75,
   "temperature": 1.2157,

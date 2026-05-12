@@ -8,15 +8,16 @@ import (
 )
 
 type Config struct {
-	Enabled           bool     `json:"enabled"`
-	ProbeModel        string   `json:"probe_model"`
-	ProbeLayer        int      `json:"probe_layer"`
-	MFWeights         string   `json:"mf_weights"`
-	GateStats         string   `json:"gate_stats"`
-	GateThreshold     float64  `json:"gate_threshold"`
-	AccuracyThreshold float64  `json:"accuracy_threshold"`
-	Temperature       float64  `json:"temperature"`
-	SupportedModels   []string `json:"supported_models"`
+	Enabled             bool     `json:"enabled"`
+	ProbeModel          string   `json:"probe_model"`
+	ProbeLayer          int      `json:"probe_layer"`
+	MFWeights           string   `json:"mf_weights"`
+	GateStats           string   `json:"gate_stats"`
+	SubtaskClassifier   string   `json:"subtask_classifier"`
+	GateThreshold       float64  `json:"gate_threshold"`
+	AccuracyThreshold   float64  `json:"accuracy_threshold"`
+	Temperature         float64  `json:"temperature"`
+	SupportedModels     []string `json:"supported_models"`
 }
 
 func (c *Config) IsModelSupported(model string) bool {
@@ -67,6 +68,7 @@ func LoadConfig() (*Config, error) {
 	cfg.ProbeModel = resolvePath(configDir, cfg.ProbeModel)
 	cfg.MFWeights = resolvePath(configDir, cfg.MFWeights)
 	cfg.GateStats = resolvePath(configDir, cfg.GateStats)
+	cfg.SubtaskClassifier = resolvePath(configDir, cfg.SubtaskClassifier)
 
 	return &cfg, nil
 }

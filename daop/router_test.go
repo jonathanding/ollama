@@ -45,7 +45,7 @@ func setupRouter(t *testing.T) (*Router, string) {
 		return emb, nil
 	}
 
-	router := NewRouter(cfg, gate, scorer, mockProbe)
+	router := NewRouter(cfg, gate, nil, scorer, mockProbe)
 	return router, dir
 }
 
@@ -71,7 +71,7 @@ func TestRouter_GateBlocks(t *testing.T) {
 		t.Errorf("reason: got %q, want gate", result.FallbackReason)
 	}
 	if result.Confidence != nil {
-		t.Error("confidence should be nil when gate blocks (probe didn't run)")
+		t.Error("confidence should be nil when gate blocks")
 	}
 }
 
