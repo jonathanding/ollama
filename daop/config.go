@@ -15,6 +15,7 @@ type Config struct {
 	GateStats         string   `json:"gate_stats"`
 	GateThreshold     float64  `json:"gate_threshold"`
 	AccuracyThreshold float64  `json:"accuracy_threshold"`
+	Temperature       float64  `json:"temperature"`
 	SupportedModels   []string `json:"supported_models"`
 }
 
@@ -56,6 +57,9 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.ProbeLayer == 0 {
 		cfg.ProbeLayer = 14
+	}
+	if cfg.Temperature == 0 {
+		cfg.Temperature = 1.21
 	}
 
 	// Resolve relative paths against config file directory

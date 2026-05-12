@@ -6,6 +6,7 @@
   "gate_stats": "gate_stats.json",
   "gate_threshold": 0.80,
   "accuracy_threshold": 0.80,
+  "temperature": 1.21,
   "supported_models": [
     "qwen3-8b-q4",
     "qwen3-4b-q4",

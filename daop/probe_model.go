@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"runtime"
 	"sync"
 
 	"github.com/ollama/ollama/ml"
@@ -12,6 +14,15 @@ import (
 	"github.com/ollama/ollama/model/models/qwen3"
 	"github.com/ollama/ollama/tokenizer"
 )
+
+var ensureLibraryPath = sync.OnceFunc(func() {
+	if _, ok := os.LookupEnv("OLLAMA_LIBRARY_PATH"); !ok {
+		os.Setenv("OLLAMA_LIBRARY_PATH", ml.LibOllamaPath)
+	}
+	if runtime.GOOS == "windows" {
+		os.Setenv("PATH", ml.LibOllamaPath+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+})
 
 const probeMaxSeqLen = 512
 
@@ -27,38 +38,47 @@ type HiddenStateProbe struct {
 }
 
 func NewHiddenStateProbe(modelPath string, maxLayer int) (*HiddenStateProbe, error) {
+	ensureLibraryPath()
+
+	numBlocks := maxLayer + 1
+	layers := make([]int, numBlocks)
+	for i := range layers {
+		layers[i] = i
+	}
+
+	// First load to discover GPU device IDs (AllocMemory=false is fine for discovery)
+	discoveryParams := ml.BackendParams{
+		AllocMemory: false,
+		NumThreads:  8,
+		GPULayers:   ml.GPULayersList{{}},
+	}
+	dm, err := model.New(modelPath, discoveryParams)
+	if err != nil {
+		return nil, fmt.Errorf("load probe model (discovery): %w", err)
+	}
+	mem := dm.Backend().BackendMemory()
+	dm.Backend().Close()
+
 	params := ml.BackendParams{
 		AllocMemory: true,
 		NumThreads:  8,
 	}
 
-	m, err := model.New(modelPath, params)
-	if err != nil {
-		return nil, fmt.Errorf("load probe model: %w", err)
+	if len(mem.GPUs) > 0 {
+		params.GPULayers = ml.GPULayersList{{
+			DeviceID: mem.GPUs[0].DeviceID,
+			Layers:   layers,
+		}}
 	}
 
-	// Attempt GPU offload if a GPU device is available
-	if devices := m.Backend().BackendDevices(); len(devices) > 0 {
-		for _, dev := range devices {
-			if dev.Library != "" && dev.Library != "cpu" {
-				m.Backend().Close()
-				numBlocks := maxLayer + 1
-				layers := make([]int, numBlocks)
-				for i := range layers {
-					layers[i] = i
-				}
-				params.GPULayers = ml.GPULayersList{{
-					DeviceID: ml.DeviceID{ID: dev.ID, Library: dev.Library},
-					Layers:   layers,
-				}}
-				m, err = model.New(modelPath, params)
-				if err != nil {
-					return nil, fmt.Errorf("load probe model (GPU): %w", err)
-				}
-				slog.Info("daop: probe using GPU", "device", dev.Name, "library", dev.Library)
-				break
-			}
-		}
+	m, err := model.New(modelPath, params)
+	if err != nil && len(mem.GPUs) > 0 {
+		slog.Warn("daop: GPU offload failed, falling back to CPU", "error", err)
+		params.GPULayers = nil
+		m, err = model.New(modelPath, params)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load probe model: %w", err)
 	}
 
 	if err := m.Backend().Load(context.Background(), nil); err != nil {
@@ -195,6 +215,10 @@ func (p *HiddenStateProbe) partialForward(ctx ml.Context, batch input.Batch) (ml
 	}
 
 	return hiddenStates, nil
+}
+
+func (p *HiddenStateProbe) Dim() int {
+	return p.dim
 }
 
 func (p *HiddenStateProbe) Close() {

@@ -60,7 +60,7 @@ func createTestWeights(t *testing.T, dir string) string {
 
 func TestMFScorer_Load(t *testing.T) {
 	path := createTestWeights(t, t.TempDir())
-	scorer, err := NewMFScorer(path)
+	scorer, err := NewMFScorer(path, 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestMFScorer_Load(t *testing.T) {
 
 func TestMFScorer_Score(t *testing.T) {
 	path := createTestWeights(t, t.TempDir())
-	scorer, err := NewMFScorer(path)
+	scorer, err := NewMFScorer(path, 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,9 +106,36 @@ func TestMFScorer_Score(t *testing.T) {
 	}
 }
 
+func TestMFScorer_Temperature(t *testing.T) {
+	path := createTestWeights(t, t.TempDir())
+
+	// With T=1.0: logit=2.0 → sigmoid(2.0) ≈ 0.8808
+	s1, _ := NewMFScorer(path, 1.0)
+	embedding := make([]float32, 8)
+	embedding[0] = 2.0
+	score1, _ := s1.Score("model-a", embedding)
+
+	// With T=2.0: logit=2.0 → sigmoid(2.0/2.0) = sigmoid(1.0) ≈ 0.7311
+	s2, _ := NewMFScorer(path, 2.0)
+	score2, _ := s2.Score("model-a", embedding)
+
+	expected1 := 1.0 / (1.0 + math.Exp(-2.0))
+	expected2 := 1.0 / (1.0 + math.Exp(-1.0))
+
+	if math.Abs(score1-expected1) > 0.001 {
+		t.Errorf("T=1.0: got %f, want %f", score1, expected1)
+	}
+	if math.Abs(score2-expected2) > 0.001 {
+		t.Errorf("T=2.0: got %f, want %f", score2, expected2)
+	}
+	if score2 >= score1 {
+		t.Errorf("higher temperature should compress scores: T=1 score=%f, T=2 score=%f", score1, score2)
+	}
+}
+
 func TestMFScorer_UnknownModel(t *testing.T) {
 	path := createTestWeights(t, t.TempDir())
-	scorer, err := NewMFScorer(path)
+	scorer, err := NewMFScorer(path, 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +149,7 @@ func TestMFScorer_UnknownModel(t *testing.T) {
 
 func TestMFScorer_WrongDim(t *testing.T) {
 	path := createTestWeights(t, t.TempDir())
-	scorer, err := NewMFScorer(path)
+	scorer, err := NewMFScorer(path, 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}

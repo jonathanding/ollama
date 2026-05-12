@@ -33,7 +33,7 @@ func setupRouter(t *testing.T) (*Router, string) {
 		t.Fatal(err)
 	}
 
-	scorer, err := NewMFScorer(weightsPath)
+	scorer, err := NewMFScorer(weightsPath, 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}

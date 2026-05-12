@@ -86,7 +86,7 @@ func initDaop() {
 		return
 	}
 
-	scorer, err := daop.NewMFScorer(cfg.MFWeights)
+	scorer, err := daop.NewMFScorer(cfg.MFWeights, cfg.Temperature)
 	if err != nil {
 		slog.Warn("daop: failed to load MF weights, disabled", "error", err)
 		return

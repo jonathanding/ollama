@@ -9,12 +9,13 @@ import (
 )
 
 // MFScorer implements the pointwise MF model inference in pure Go.
-// Architecture: score = sigmoid(sum(classifier * (normalize(P[model]) ⊙ text_proj(embedding))))
+// Architecture: score = sigmoid(sum(classifier * (normalize(P[model]) ⊙ text_proj(embedding))) / T)
 type MFScorer struct {
-	dim      int
-	textDim  int
-	models   []string
-	modelIdx map[string]int
+	dim         int
+	textDim     int
+	temperature float64
+	models      []string
+	modelIdx    map[string]int
 
 	// Weights (row-major float32)
 	textProj   []float32 // [textDim][dim]
@@ -29,7 +30,7 @@ type weightsHeader struct {
 	Models    []string `json:"models"`
 }
 
-func NewMFScorer(weightsPath string) (*MFScorer, error) {
+func NewMFScorer(weightsPath string, temperature float64) (*MFScorer, error) {
 	data, err := os.ReadFile(weightsPath)
 	if err != nil {
 		return nil, fmt.Errorf("read weights: %w", err)
@@ -64,11 +65,16 @@ func NewMFScorer(weightsPath string) (*MFScorer, error) {
 		return nil, fmt.Errorf("weights body too small: got %d, want %d bytes", len(body), expectedBytes)
 	}
 
+	if temperature <= 0 {
+		temperature = 1.0
+	}
+
 	s := &MFScorer{
-		dim:      header.Dim,
-		textDim:  header.TextDim,
-		models:   header.Models,
-		modelIdx: make(map[string]int),
+		dim:         header.Dim,
+		textDim:     header.TextDim,
+		temperature: temperature,
+		models:      header.Models,
+		modelIdx:    make(map[string]int),
 	}
 	for i, m := range header.Models {
 		s.modelIdx[m] = i
@@ -125,7 +131,7 @@ func (s *MFScorer) Score(model string, embedding []float32) (float64, error) {
 		logit += s.classifier[j] * (normalizedM * projected[j])
 	}
 
-	return sigmoid(float64(logit)), nil
+	return sigmoid(float64(logit) / s.temperature), nil
 }
 
 func (s *MFScorer) HasModel(model string) bool {
