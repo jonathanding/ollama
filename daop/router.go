@@ -29,6 +29,13 @@ func NewRouter(cfg *Config, gate *SubtaskGate, classifier *SubtaskClassifier, sc
 	}
 }
 
+func (r *Router) estimatePrefill(promptText string, result *DaopResult) {
+	if r.cfg.PrefillMsPerByte > 0 {
+		latEst := r.cfg.PrefillBaseMs + r.cfg.PrefillMsPerByte*float64(len(promptText))
+		result.LatencyEstimate = &latEst
+	}
+}
+
 // Route makes the offload/fallback decision for a chat request.
 func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopResult {
 	t0 := time.Now()
@@ -52,6 +59,7 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 		slog.Warn("daop: probe failed, defaulting to offload", "error", err)
 		result.Decision = "offload"
 		result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
+		r.estimatePrefill(promptText, result)
 		return result
 	}
 
@@ -80,6 +88,7 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 			result.Decision = "fallback"
 			result.FallbackReason = "gate"
 			result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
+			r.estimatePrefill(promptText, result)
 			slog.Debug("daop: gate blocked", "model", model, "subtask", subtask, "rate", rate)
 			return result
 		}
@@ -91,6 +100,7 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 		slog.Warn("daop: scorer failed, defaulting to offload", "error", err)
 		result.Decision = "offload"
 		result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
+		r.estimatePrefill(promptText, result)
 		return result
 	}
 	result.Confidence = &score
@@ -100,12 +110,14 @@ func (r *Router) Route(model string, promptText string, ctx *DaopContext) *DaopR
 		result.Decision = "fallback"
 		result.FallbackReason = "threshold"
 		result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
+		r.estimatePrefill(promptText, result)
 		slog.Debug("daop: below threshold", "model", model, "score", score)
 		return result
 	}
 
 	result.Decision = "offload"
 	result.RoutingMs = float64(time.Since(t0).Microseconds()) / 1000.0
+	r.estimatePrefill(promptText, result)
 	slog.Debug("daop: offload", "model", model, "score", score)
 	return result
 }

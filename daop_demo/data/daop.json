@@ -8,6 +8,8 @@
   "gate_threshold": 0.80,
   "accuracy_threshold": 0.75,
   "temperature": 1.2157,
+  "prefill_ms_per_byte": 3.4448,
+  "prefill_base_ms": 872.6,
   "supported_models": [
     "qwen2.5:32b-instruct"
   ]

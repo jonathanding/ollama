@@ -18,6 +18,8 @@ type Config struct {
 	AccuracyThreshold   float64  `json:"accuracy_threshold"`
 	Temperature         float64  `json:"temperature"`
 	SupportedModels     []string `json:"supported_models"`
+	PrefillMsPerByte    float64  `json:"prefill_ms_per_byte"`
+	PrefillBaseMs       float64  `json:"prefill_base_ms"`
 }
 
 func (c *Config) IsModelSupported(model string) bool {
