@@ -20,6 +20,7 @@ type Config struct {
 	SupportedModels     []string `json:"supported_models"`
 	PrefillMsPerByte    float64  `json:"prefill_ms_per_byte"`
 	PrefillBaseMs       float64  `json:"prefill_base_ms"`
+	CloudModel          string   `json:"cloud_model"`
 }
 
 func (c *Config) IsModelSupported(model string) bool {

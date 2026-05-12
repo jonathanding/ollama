@@ -19,4 +19,5 @@ type DaopResult struct {
 	LatencyEstimate     *float64 `json:"latency_estimate_ms,omitempty"` // estimated total latency
 	LatencyActual       *float64 `json:"latency_actual_ms,omitempty"`   // actual latency (offload only)
 	Model               string   `json:"model"`                         // target model name
+	CloudModel          string   `json:"cloud_model,omitempty"`         // cloud model used for fallback
 }

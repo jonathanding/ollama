@@ -12,5 +12,6 @@
   "prefill_base_ms": 872.6,
   "supported_models": [
     "qwen2.5:32b-instruct"
-  ]
+  ],
+  "cloud_model": "qwen-max"
 }

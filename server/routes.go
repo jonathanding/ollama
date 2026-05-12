@@ -68,6 +68,7 @@ const (
 )
 
 var daopRouter *daop.Router
+var daopCloudCfg *daop.CloudConfig
 
 func initDaop() {
 	cfg, err := daop.LoadConfig()
@@ -110,6 +111,16 @@ func initDaop() {
 
 	daopRouter = daop.NewRouter(cfg, gate, classifier, scorer, probe.Extract)
 	slog.Info("daop: initialized successfully", "models", cfg.SupportedModels)
+
+	daopCloudCfg = daop.LoadCloudConfig()
+	if daopCloudCfg != nil {
+		if cfg.CloudModel != "" {
+			daopCloudCfg.Model = cfg.CloudModel
+		}
+		slog.Info("daop: cloud fallback enabled", "model", daopCloudCfg.Model)
+	} else {
+		slog.Info("daop: cloud fallback disabled (no LLM_API_KEY_ALI / LLM_BASE_URL_ALI env vars)")
+	}
 }
 
 func writeModelRefParseError(c *gin.Context, err error, fallbackStatus int, fallbackMessage string) {
@@ -2328,16 +2339,71 @@ func (s *Server) ChatHandler(c *gin.Context) {
 			c.Header("X-DAOP", "true")
 
 			if daopResult.Decision == "fallback" {
-				daopJSON, _ := json.Marshal(daopResult)
-				resp := api.ChatResponse{
-					Model:      req.Model,
-					CreatedAt:  time.Now().UTC(),
-					Message:    api.Message{Role: "assistant"},
-					Done:       true,
-					DoneReason: "daop_fallback",
-					Daop:       daopJSON,
+				if daopCloudCfg != nil {
+					// Stream cloud response
+					daopResult.CloudModel = daopCloudCfg.Model
+					daopJSON, _ := json.Marshal(daopResult)
+
+					c.Header("Content-Type", "application/x-ndjson")
+					c.Writer.WriteHeader(http.StatusOK)
+
+					// First chunk: routing decision
+					firstChunk := api.ChatResponse{
+						Model:     req.Model,
+						CreatedAt: time.Now().UTC(),
+						Message:   api.Message{Role: "assistant"},
+						Daop:      daopJSON,
+					}
+					json.NewEncoder(c.Writer).Encode(firstChunk)
+					c.Writer.Flush()
+
+					// Build messages for cloud
+					cloudMsgs := make([]daop.CloudMessage, 0, len(req.Messages))
+					for _, m := range req.Messages {
+						cloudMsgs = append(cloudMsgs, daop.CloudMessage{
+							Role:    m.Role,
+							Content: m.Content,
+						})
+					}
+
+					// Stream tokens from cloud
+					_, err := daop.StreamCloud(daopCloudCfg, cloudMsgs, func(content string) {
+						chunk := api.ChatResponse{
+							Model:     req.Model,
+							CreatedAt: time.Now().UTC(),
+							Message:   api.Message{Role: "assistant", Content: content},
+						}
+						json.NewEncoder(c.Writer).Encode(chunk)
+						c.Writer.Flush()
+					})
+
+					// Done chunk
+					doneChunk := api.ChatResponse{
+						Model:      req.Model,
+						CreatedAt:  time.Now().UTC(),
+						Message:    api.Message{Role: "assistant"},
+						Done:       true,
+						DoneReason: "stop",
+					}
+					if err != nil {
+						slog.Warn("daop: cloud streaming error", "error", err)
+						doneChunk.DoneReason = "error"
+					}
+					json.NewEncoder(c.Writer).Encode(doneChunk)
+					c.Writer.Flush()
+				} else {
+					// No cloud config — return immediate fallback (original behavior)
+					daopJSON, _ := json.Marshal(daopResult)
+					resp := api.ChatResponse{
+						Model:      req.Model,
+						CreatedAt:  time.Now().UTC(),
+						Message:    api.Message{Role: "assistant"},
+						Done:       true,
+						DoneReason: "daop_fallback",
+						Daop:       daopJSON,
+					}
+					c.JSON(http.StatusOK, resp)
 				}
-				c.JSON(http.StatusOK, resp)
 				return
 			}
 			// offload: store result to attach to final response
