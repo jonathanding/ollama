@@ -873,6 +873,29 @@ func (c *Context) MaxGraphNodes() int {
 	return c.maxGraphNodes
 }
 
+// GraphNodes returns the number of nodes in the currently built graph, or 0
+// if no graph has been built yet. Used by the prefill profiler. This is a
+// pure read of an immutable field (graph node count after build) and does
+// not require synchronization.
+func (c *Context) GraphNodes() int {
+	if c.graph == nil {
+		return 0
+	}
+	return int(C.ggml_graph_n_nodes(c.graph))
+}
+
+// GraphSplits returns the number of splits the scheduler used for the most
+// recent compute on this backend, or 0 if no compute has happened yet.
+// Note: this is a backend-level (not per-context) statistic in ggml; the
+// value reflects whichever Context most recently called ComputeWithNotify
+// or Reserve. For prefill profiling we read it immediately after compute.
+func (c *Context) GraphSplits() int {
+	if c.b == nil || c.b.sched == nil {
+		return 0
+	}
+	return int(C.ggml_backend_sched_get_n_splits(c.b.sched))
+}
+
 func shapeToGGML(shape []int) *C.int64_t {
 	sh := make([]C.int64_t, len(shape))
 	for i, s := range shape {

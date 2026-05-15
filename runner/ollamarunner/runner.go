@@ -326,6 +326,13 @@ type batchState struct {
 
 	// Signaled when this batches outputs are complete and the next batch can proceed
 	outputsReadyCh chan struct{}
+
+	// profile collects per-batch timing samples when OLLAMA_PREFILL_PROFILE
+	// is enabled. The pointer is set in forwardBatch and the existing
+	// channel handoffs to computeBatch already provide happens-before for
+	// all field writes — see prefill_profile.go for the synchronization
+	// rationale. When profiling is disabled, all method calls are no-ops.
+	profile *prefillProfile
 }
 
 type Server struct {
@@ -468,6 +475,15 @@ func (s *Server) run(ctx context.Context) {
 
 // forwardBatch will calculate a batch.
 func (s *Server) forwardBatch(pendingBatch batchState) (nextBatch batchState, err error) {
+	// Probe: forwardBatch entry. Allocated unconditionally (zero cost when
+	// disabled). If batchInputs ends up empty (idle path), Finish() will
+	// skip emission so we don't pollute logs. The profile pointer travels
+	// to computeBatch via batchState; the existing channel pipeline
+	// (computeStartedCh / inputsReadyCh / outputsReadyCh) provides
+	// happens-before, so no extra synchronization is needed.
+	prof := newPrefillProfile(s.batchID)
+	prof.MarkForwardStart()
+
 	// If we have a pending batch still processing, wait until Compute has started
 	// before setting up the next batch so the seqs inputs are ready to receive their
 	// token values and we get the correct input pointers for the batchInputs
@@ -489,7 +505,16 @@ func (s *Server) forwardBatch(pendingBatch batchState) (nextBatch batchState, er
 	}
 	defer s.mu.Unlock()
 
+	tNewCtxStart := time.Time{}
+	tNewCtxEnd := time.Time{}
+	if prof.Enabled() {
+		tNewCtxStart = time.Now()
+	}
 	nextBatch.ctx = s.model.Backend().NewContext()
+	if prof.Enabled() {
+		tNewCtxEnd = time.Now()
+		prof.MarkNewContext(tNewCtxStart, tNewCtxEnd)
+	}
 	defer func() {
 		if err != nil {
 			nextBatch.ctx.Close()
@@ -621,13 +646,23 @@ func (s *Server) forwardBatch(pendingBatch batchState) (nextBatch batchState, er
 	batch.Inputs = nextBatch.ctx.Input().Empty(ml.DTypeI32, len(batchInputs))
 	batch.Outputs = nextBatch.ctx.Input().FromInts(batchOutputs, len(batchOutputs))
 	nextBatch.ctx.SetBatchSize(len(batchInputs))
+	tModelFwdStart := time.Time{}
+	if prof.Enabled() {
+		tModelFwdStart = time.Now()
+	}
 	nextBatch.modelOutput, err = model.Forward(nextBatch.ctx, s.model, batch)
 	if err != nil {
 		err = fmt.Errorf("failed to build graph: %w", err)
 		return
 	}
+	if prof.Enabled() {
+		prof.MarkModelForward(tModelFwdStart, time.Now())
+	}
 	nextBatch.batchInputs = batchInputs
 	nextBatch.batch = batch
+
+	prof.MarkForwardEnd(len(batchInputs), len(batchOutputs))
+	nextBatch.profile = prof
 
 	return
 }
@@ -638,7 +673,36 @@ func (s *Server) computeBatch(activeBatch batchState) {
 		// Nothing to compute
 		return
 	}
-	defer activeBatch.ctx.Close()
+
+	// Profiling defers, in registration order (LIFO when running):
+	//   1. (registered first) Finish() — emits stderr line LAST so the syscall
+	//      cannot stall any pipelined work; runs after Close() and after the
+	//      outputsReadyCh send, both of which are already signaled.
+	//   2. (registered second) ctx.Close() with surrounding timestamps —
+	//      preserves the original "close happens after outputsReadyCh send"
+	//      ordering by being registered before the existing defer below.
+	prof := activeBatch.profile
+	prof.MarkComputeBatchStart()
+	defer prof.Finish()
+	defer func() {
+		var tCloseStart, tCloseEnd time.Time
+		if prof.Enabled() {
+			// Read graph stats while the context (and its sched) is still
+			// valid. ggml's get_n_splits remains valid after sched_reset, so
+			// this reflects the splits used for THIS batch's compute.
+			if gn, ok := activeBatch.ctx.(interface{ GraphNodes() int }); ok {
+				if gs, ok2 := activeBatch.ctx.(interface{ GraphSplits() int }); ok2 {
+					prof.SetGraphStats(gn.GraphNodes(), gs.GraphSplits())
+				}
+			}
+			tCloseStart = time.Now()
+		}
+		activeBatch.ctx.Close()
+		if prof.Enabled() {
+			tCloseEnd = time.Now()
+			prof.MarkClose(tCloseStart, tCloseEnd)
+		}
+	}()
 
 	// Wait until inputs are ready
 	logutil.Trace("computeBatch: waiting for inputs to be ready", "batchID", activeBatch.id)
@@ -712,16 +776,34 @@ func (s *Server) computeBatch(activeBatch batchState) {
 	// At this point the seqs are ready for forwardBatch to move forward so unblock
 	s.mu.Unlock()
 
+	var tInputStart, tInputEnd, tComputeStart, tComputeEnd, tFloatsStart, tFloatsEnd time.Time
+	if prof.Enabled() {
+		tInputStart = time.Now()
+	}
 	activeBatch.batch.Inputs.FromInts(batchInputs)
+	if prof.Enabled() {
+		tInputEnd = time.Now()
+		tComputeStart = tInputEnd
+	}
 	activeBatch.ctx.ComputeWithNotify(
 		func() {
 			logutil.Trace("computeBatch: signaling computeStartedCh", "batchID", activeBatch.id)
 			activeBatch.computeStartedCh <- struct{}{}
 		},
 		activeBatch.modelOutput)
+	if prof.Enabled() {
+		tComputeEnd = time.Now()
+		tFloatsStart = tComputeEnd
+	}
 
 	outputs := activeBatch.modelOutput.Floats()
 	t := time.Now()
+	if prof.Enabled() {
+		tFloatsEnd = t
+		prof.MarkInputInject(tInputStart, tInputEnd)
+		prof.MarkComputeOuter(tComputeStart, tComputeEnd)
+		prof.MarkFloats(tFloatsStart, tFloatsEnd)
+	}
 
 	logutil.Trace("computeBatch: logits ready", "batchID", activeBatch.id)
 
