@@ -490,13 +490,37 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 		return nil
 	}
 
+	// Prefill profile: spans the entire C++ Decode + Synchronize path. This
+	// is the closest analog to ollamarunner's (model_forward + input_inject
+	// + compute_outer + floats) "equivalent work". When OLLAMA_PREFILL_PROFILE
+	// is unset all calls are no-ops with negligible overhead. We do NOT
+	// inject anything into Decode/Synchronize — both keep their original
+	// semantics exactly.
+	prof := newLlamaPrefillProfile(nextLlamaPrefillBatchID(), batch.NumTokens(), numOutputs)
+	defer prof.Finish()
+
 	t := time.Now()
+	tDecodeStart := t
 	if err := s.lc.Decode(batch); err != nil {
 		return fmt.Errorf("failed to decode batch: %w", err)
 	}
+	tDecodeEnd := time.Time{}
+	if prof.Enabled() {
+		tDecodeEnd = time.Now()
+	}
 
 	if numOutputs > 0 {
+		var tSyncStart time.Time
+		if prof.Enabled() {
+			tSyncStart = time.Now()
+		}
 		s.lc.Synchronize()
+		if prof.Enabled() {
+			prof.MarkSync(tSyncStart, time.Now())
+		}
+	}
+	if prof.Enabled() {
+		prof.MarkDecode(tDecodeStart, tDecodeEnd)
 	}
 
 	for i, seq := range s.seqs {

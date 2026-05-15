@@ -820,10 +820,13 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
+    // EXPERIMENT ONLY: track per-ubatch reuse decision for the prefill profiler.
+    bool reused_this_ubatch = false;
     if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         n_reused++;
+        reused_this_ubatch = true;
     } else {
         res->reset();
 
@@ -863,6 +866,28 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
+    }
+
+    // EXPERIMENT ONLY — DO NOT MERGE.
+    // When OLLAMA_PREFILL_PROFILE=1, emit one line per ubatch with graph
+    // statistics so the Go-side profiler can correlate them with the
+    // PREFILL_PROFILE_LLAMA timing samples. Reads getenv once via static.
+    {
+        static const bool prefill_profile_enabled = []{
+            const char * e = getenv("OLLAMA_PREFILL_PROFILE");
+            if (e == nullptr || *e == '\0') return false;
+            // Treat "0" / "false" / "FALSE" as disabled; anything else as enabled.
+            if (e[0] == '0' && e[1] == '\0') return false;
+            if (strcmp(e, "false") == 0 || strcmp(e, "FALSE") == 0) return false;
+            return true;
+        }();
+        if (prefill_profile_enabled) {
+            LLAMA_LOG_INFO("PREFILL_PROFILE_LLAMA_GRAPH n_tokens=%u graph_nodes=%d graph_splits=%d reused=%d\n",
+                ubatch.n_tokens,
+                ggml_graph_n_nodes(res->get_gf()),
+                ggml_backend_sched_get_n_splits(sched.get()),
+                reused_this_ubatch ? 1 : 0);
+        }
     }
 
     ret = GGML_STATUS_SUCCESS;
