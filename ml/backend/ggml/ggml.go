@@ -29,6 +29,7 @@ import (
 	"unicode"
 	"unsafe"
 
+	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/fs"
 	fsggml "github.com/ollama/ollama/fs/ggml"
@@ -166,6 +167,40 @@ func New(modelPath string, params ml.BackendParams) (ml.Backend, error) {
 			cpuDeviceBufferType.bts = append(cpuDeviceBufferType.bts, bt)
 
 			btDeviceMemory[C.ggml_backend_dev_buffer_type(d)] = &requiredMemory.CPU
+		}
+	}
+
+	// EXPERIMENTAL: when OLLAMA_PINNED_HOST_BUFFER=1, prepend the GPU's host
+	// buffer type (cudaMallocHost-backed pinned memory) to the CPU buft list
+	// so weights routed to "CPU" land in pinned memory. This lets the GPU
+	// DMA them at full PCIe bandwidth (~25 GB/s vs ~14 GB/s pageable) and
+	// mirrors llama.cpp's make_cpu_buft_list (llama-model.cpp:343-349).
+	//
+	// Allocation safety: createTensor walks bts in order; if cudaMallocHost
+	// fails (rare on a 128 GB host but possible under pressure), the next
+	// fallback is the original plain CPU buffer, so behavior is at worst
+	// equivalent to the disabled path.
+	//
+	// Only the first GPU's host buft is added (matching llama.cpp). On
+	// systems with no CUDA GPU this loop is a no-op. The pinned buffer's
+	// memory still counts against system RAM, so we map it to CPU memory
+	// accounting like the other CPU bufts above.
+	if envconfig.PinnedHostBuffer() {
+		for _, d := range gpus {
+			hostBuft := C.ggml_backend_dev_host_buffer_type(d)
+			if hostBuft == nil {
+				continue
+			}
+			cpuDeviceBufferType.bts = append(
+				[]C.ggml_backend_buffer_type_t{hostBuft},
+				cpuDeviceBufferType.bts...,
+			)
+			btDeviceMemory[hostBuft] = &requiredMemory.CPU
+			slog.Info("OLLAMA_PINNED_HOST_BUFFER enabled: prefer cuda_host pinned for CPU-resident tensors",
+				"buft", C.GoString(C.ggml_backend_buft_name(hostBuft)),
+				"device", C.GoString(C.ggml_backend_dev_name(d)),
+			)
+			break
 		}
 	}
 
