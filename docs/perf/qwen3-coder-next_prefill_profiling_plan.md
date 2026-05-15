@@ -227,15 +227,255 @@ PREFILL_PROFILE batch_id=N n_inputs=1024 n_outputs=1
 
 ---
 
-## 五、Phase 2 结果（待填）
+## 五、Phase 2 结果（2026-05-15）
 
-详见 Phase 1 输出格式，将完整数据放置于此。
+### 5.1 测试条件
+
+- **配置**：batch_size=1024 / prompt=1024 / max_tokens=16 / epochs=6 / warmup=4
+- **bench-sweep prefill_ms**：ollama 2093 ms / llama 1569 ms（差 524 ms / +33%）
+- **环境变量**：`OLLAMA_PREFILL_PROFILE=1`
+- **原始日志**：`test/llama-runner/{ollama,llama}-runner-prefill-profile.txt`
+
+### 5.2 阶段耗时对照（prefill batch 平均，去掉首次 warm-up）
+
+| 阶段 | ollama (ms) | llama (ms) | 差值 (ms) | 备注 |
+|---|---:|---:|---:|---|
+| **forward_total** | 144 | n/a | - | 含 `<-pendingBatch.computeStartedCh` 等待，不是真开销 |
+| └ new_context | <0.5 | n/a | - | time.Now 精度限制，实际亚毫秒 |
+| └ model_forward（Go 构图） | 6.5 | (含在 decode) | - | **远小于预期，CGO 累积不是主因** |
+| └ forward_other | 138 | n/a | - | channel 等待为主 |
+| **compute_total** | 2125 | 1580 | **+545** | **gap 几乎全部在此** |
+| └ compute_outer | 2125 | (decode) | - | 内含 `graph_compute_async` 全部工作 |
+| └ floats | <0.5 | <0.5 | - | sync 在 compute_outer 内部已完成 |
+| └ close | 2.2 | n/a | - | 可忽略 |
+| **bench-sweep prefill_ms** | 2093 | 1569 | 524 | 与 compute_total 相符 |
+
+### 5.3 图统计对照（prefill）
+
+| 指标 | ollama | llama | 差值 |
+|---|---:|---:|---|
+| graph_nodes | 17,556 | 34,628 | **ollama 少一半** |
+| graph_splits | 595 | 612 | 几乎相同 |
+
+**这与原假设相反**：Go 模型实现产生的图节点反而比 C++ 少（约 50%）；splits 数也几乎一致。但 ollama 仍然慢 545 ms。
+
+### 5.4 Decode 阶段对照（n_tokens=1，去除等待异常值）
+
+| 指标 | ollama | llama |
+|---|---:|---:|
+| 总耗时 | ~95–130 ms | ~95 ms |
+| graph_nodes | 5,875 | 6,362 |
+| **graph_splits** | **3** | **49** |
+
+**反向发现**：decode 阶段 ollama splits 仅为 llama 的 1/16。这正解释了 ollama decode 反而快 ~50% 的现象——splits 少 → backend 间 sync 少 → 总时间短。
+
+### 5.5 graph_reuse 实测命中率（llama runner）
+
+C++ 端 `PREFILL_PROFILE_LLAMA_GRAPH` 日志显示：
+
+| 类别 | reused=1 命中数 |
+|---|---|
+| Prefill batches | **0 / 10** |
+| Decode batches | **0 / 146** |
+
+**`can_reuse` 在此 workload 下一次都未命中**。这彻底解释了之前 `LLAMA_GRAPH_REUSE_DISABLE=0/1` 实验毫无差异的结果——本来就没有 reuse 行为可被禁用。
+
+## 六、Phase 3：根因定位与优化方向
+
+### 6.1 关键证据链
+
+1. **gap 几乎全部（545/524 ms）在 `compute_total` / `lc.Decode` 内部**，不在 Go 层任何阶段
+2. **图节点数 ollama < llama**（17.5k vs 34.6k）但 ollama 反而慢——节点数不是直接因子
+3. **splits 数几乎相同**（595 vs 612）——backend 切分粒度不是主因
+4. **Decode 阶段 ollama splits 只有 3**（vs llama 49）——证明 ollama 在简单 batch 上的 split 优化是好的，**但在 prefill 大 batch 上未达到同等优势**
+5. **can_reuse 0% 命中率**——porting 该机制无收益
+
+### 6.2 真正的 root cause 候选
+
+gap 来自 ggml backend 内部的 `compute_splits`（ggml-backend.cpp:1480）执行——具体说，**595 splits 之间的 H2D/D2H 拷贝、sync 点、与 GPU compute 的交互模式**在两端不同。即使 splits 数量接近，每个 split 包含的 nodes、归属哪个 backend、需要拷贝哪些张量都不同。
+
+可能的细分原因：
+
+| 候选 | 说明 |
+|---|---|
+| **A. CPU split 比例不同** | 49 层 hybrid offload 下，ollama 和 llama 给 CPU 跑的层组合可能不同；CPU 跑的层是慢节拍 |
+| **B. MoE expert weight 拷贝模式不同** | `mul_mat_id` 的 expert offload heuristic（ggml-backend.cpp:1515-1599）有"only used experts"优化；可能 ollama 触发更多 expert 拷贝 |
+| **C. Node fusion 程度不同** | ollama 节点少一半暗示更多 fusion，但**也可能某些 fused op 在 partial offload 下走 CPU 路径慢于 llama 端的非 fused 但全在 GPU 上的 op** |
+| **D. KV cache 路径** | 49 层中包含 attention 层与 deltanet 层；Go 与 C++ 实现的 KV cache 写入策略可能不同 |
+
+### 6.3 不应做的优化方向（已被数据排除）
+
+- ❌ **porting `can_reuse`**：实测 0% 命中率，无收益
+- ❌ **优化 model.Forward 的 CGO 累积**：6.5 ms 构图开销可忽略
+- ❌ **Context 生命周期复用**：new_context + close 加起来 < 5 ms
+- ❌ **简化 Go 模型节点数**：ollama 已经比 llama 节点少一半还慢，方向相反
+
+## 七、Phase 4：GPU 利用率对照 + 旧实验交叉验证（2026-05-15）
+
+Phase 3 用代码静态读得出"split 内部执行模式不同"的猜测，Phase 4 通过两条独立证据链把猜测**收紧到一行根因**。
+
+### 7.1 GPU 利用率曲线对照
+
+**采样方法**：`scripts/profile-gpu-prefill.ps1` 用 `nvidia-smi --query-gpu` 50ms 采样 GPU util / power / memory ctrl util / SM clock，与 bench-sweep 同时运行。
+
+**原始 PNG**：`test/llama-runner/gpu-profile/{ollama,llama}-runner-*/gpu-trace.png`
+
+| 指标 | ollama runner | llama runner |
+|---|---|---|
+| Prefill 期间 GPU util peak | ~60% | **~85%** |
+| GPU util 形状 | 中频锯齿（多峰谷） | 持续高位平台 |
+| GPU 功耗 peak | 220W | **245W** |
+| 单 prefill 周期长度 | ~3.0s | ~3.0s（含 16 decode token） |
+| 单 prefill GPU 累计高电平时长 | ~1.5s 但分散 | ~1.5s 但连续 |
+
+**关键解读**：
+
+- **ollama 的 GPU util 呈 20-60% 反复振荡的锯齿**——典型的"GPU 跑一段 → 等 CPU 算下一段 → GPU 再跑"模式，GPU 在 prefill 期间从未达到 80%
+- **llama 的 GPU util 是 80-90% 持续平台**——GPU 在 prefill 期间几乎一直在跑，**说明所有 layer 的计算都在 GPU**
+
+GPU 功耗也吻合：llama 持续把 GPU 推到 245W（接近 RTX 3090 stress），ollama 只到 220W 且常波动。
+
+### 7.2 Task Manager 截图反向佐证
+
+| 指标 | ollama | llama |
+|---|---|---|
+| Dedicated GPU memory | 22.9 / 24.0 GB | 21.4 / 24.0 GB |
+| **Shared GPU memory** | **0.1 GB** | **29.4 GB** |
+
+llama runner 占用了 ~30 GB shared GPU memory（即 GPU 通过 PCIe DMA 访问的 host pinned memory）；ollama 几乎没用——说明 ollama 的"CPU 层权重"是 plain malloc 在系统 RAM，不是 pinned。
+
+### 7.3 旧实验对照（feat/moe-split-prefetch 分支，docs/perf/2026-04-22-moe-split-prefill-full-experiment-report.html）
+
+旧实验的关键阶段与本次 llama runner 对照：
+
+| 实验 | 配置 | prefill_mean (ms) | 与 baseline 差 |
+|---:|---|---:|---:|
+| Stage 1（ollama baseline） | 默认 hybrid offload，20 GPU + 29 CPU 层（**CPU 层在 CPU 算**） | 2096 | — |
+| Stage 2（MoE split, **pageable**） | dense 全 GPU + MoE expert pageable，触发 ggml op_offload，**GPU 算** | 2060 | -36 |
+| **Stage 3（MoE split + pinned, selective）** | dense 全 GPU + MoE expert **pinned host**，selective copy_experts | **1392** | **-704** |
+| **Stage 4（DSB + pinned, full tensor prefetch）** | dense 全 GPU + MoE expert pinned，**full** copy + 独立 prefetch stream | **1648** | -448 |
+| **当前 llama runner 实测** | CUDA_Host buffer (29.8 GiB pinned) + ggml 标准 op_offload | **1597** | -499 |
+| 当前 ollama runner 实测 | 默认 hybrid，与 Stage 1 一致 | 2117 | -- |
+
+**Stage 4 (1648 ms) ≈ llama runner (1597 ms)**——差距仅 51 ms。两者执行模式完全一致：
+- 把"应在 CPU 上的权重"放在 **pinned host memory**
+- 触发**完整**的 expert 权重 H2D
+- 让 **GPU 计算 mul_mat**
+
+51 ms 的微差完全可以用实现细节解释（Stage 4 用 DSB + 独立 stream 做 overlap，能藏 ~210 ms compute；llama runner 走 ggml 标准 path 在 splits 间串行）。
+
+**Stage 1 (2096 ms) ≈ 当前 ollama runner (2117 ms)**——差距 21 ms（噪声范围内），证明 ollama runner 的执行模式跟 baseline 完全一致："CPU 层在 CPU 算"。
+
+### 7.4 代码层证据
+
+**根因锁定：CPU 层 weight buffer type 选择**。
+
+#### llama.cpp 端（正确的做法）
+
+`llama/llama.cpp/src/llama-model.cpp:321-380` `make_cpu_buft_list`：
+
+```cpp
+static buft_list_t make_cpu_buft_list(const std::vector<ggml_backend_dev_t> & devices, ...) {
+    buft_list_t buft_list;
+
+    // ...先加 ACCEL buffer...
+
+    // add a host buffer type
+    // storing the tensors in a host buffer is useful when the processing of large batches
+    // is offloaded to a GPU device, since it reduces the time spent on data transfers
+    if (!no_host) {
+        for (auto * dev : devices) {                                    // ← devices 含 GPU dev
+            ggml_backend_buffer_type_t buft = ggml_backend_dev_host_buffer_type(dev);  // ← 拿 CUDA pinned host buft
+            if (buft) {
+                buft_list.emplace_back(dev, buft);                      // ← 优先级靠前
+                break;
+            }
+        }
+    }
+
+    // 后面才是真正的 plain CPU buffer fallback
+    // ...
+}
+```
+
+`ggml_backend_dev_host_buffer_type(cuda_dev)` 返回 `ggml_backend_cuda_host_buffer_type()`（cuda.cu:1291），**底层是 `cudaMallocHost`**（cuda.cu:1264）。
+
+运行日志可见：
+```
+load_tensors: CUDA_Host model buffer size = 29804.92 MiB
+```
+
+#### ollama 端（缺失的做法）
+
+`ml/backend/ggml/ggml.go:160-170`：
+
+```go
+cpuDeviceBufferType := deviceBufferType{d: ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)}
+for _, d := range append(accels, append(gpus, cpus...)...) {
+    switch ggml_backend_dev_type(d) {
+    case GGML_BACKEND_DEVICE_TYPE_CPU,
+         GGML_BACKEND_DEVICE_TYPE_ACCEL:                 // ← 只对 CPU/ACCEL device
+        bt := ggml_backend_dev_buffer_type(d)            // ← 用 plain CPU malloc
+        cpuDeviceBufferType.bts = append(cpuDeviceBufferType.bts, bt)
+    }
+    // GPU device 被 switch 跳过 → 完全不调用 ggml_backend_dev_host_buffer_type(gpu_dev)
+}
+```
+
+**ollama runner 完全跳过了 `ggml_backend_dev_host_buffer_type(gpu_dev)` 这条调用**。CPU 层的 weight 被存到 plain malloc 的 host memory，`is_host` 虽然返回 true，但 buft 不是 cuda_host buft，不参与 cuda backend 的 op_offload 路径——op 跟着 weight 走，落到 CPU backend 上跑。
+
+运行日志可见：
+```
+compute graph device=CUDA0 size=884.1 MiB     ← 只有 GPU 层的中间张量
+compute graph device=CPU size=270.6 MiB        ← CPU 上有 270 MiB compute buffer
+```
+（无 `CUDA_Host model buffer` 这一行）
+
+### 7.5 三条独立证据汇合
+
+| 证据线 | 结论 |
+|---|---|
+| GPU 利用率曲线 | ollama 锯齿 60% / llama 平台 85% → ollama 工作不连续 |
+| Task Manager Shared GPU memory | ollama 0.1 GB / llama 29.4 GB → llama 把 ~30 GB 映射到 GPU 可访问的 pinned memory |
+| 旧实验 Stage 4 ≈ llama runner（1648 vs 1597 ms） | 完整 H2D + pinned + GPU compute 的执行模式精确还原 llama runner 性能 |
+| 代码 grep | ollama 跳过 `ggml_backend_dev_host_buffer_type(gpu_dev)` |
+| ggml 内部日志 | llama 有 `CUDA_Host model buffer = 29804.92 MiB`，ollama 没有 |
+
+**结论**：500ms gap 的全部来源 = "**ollama 把 CPU 层权重放在 plain malloc → CPU 上跑 mul_mat**" vs "**llama 把 CPU 层权重放在 cudaMallocHost pinned → GPU 通过 PCIe DMA 拉取 → GPU 上跑 mul_mat**"。
 
 ---
 
-## 六、变更日志
+## 八、Phase 5：优化路线
+
+### 8.1 短期目标（追平 llama runner）
+
+修改 `ml/backend/ggml/ggml.go:160-170`，让 ollama 在构建 `cpuDeviceBufferType.bts` 时也调用 `ggml_backend_dev_host_buffer_type(gpu_dev)` 并放在优先位（参考 `llama-model.cpp:343-349`）。
+
+预期效果：ollama prefill 从 2117 ms 拉到 ~1600 ms，与 llama runner 持平，但**保留 ollama 的 decode 优势**（decode batch_size=1 不触发 op_offload，依然是 CPU 算单 token，仍是 ollama 18 t/s vs llama 11 t/s）。
+
+但需要注意几个潜在副作用：
+1. **VRAM 占用增加**：CUDA driver 为 pinned 页建立映射会占额外 dedicated VRAM（旧实验 §4.4 提到 +1 GB 量级）。需在 24 GB VRAM 内验证 fit
+2. **冷启动慢**：cudaMallocHost 30+ GB 系统内存，模型加载时间会延长
+3. **Decode 模式适用性**：要确保 decode 路径（batch_size<32）不会被 op_offload 错误触发
+
+### 8.2 中期目标（**超过** llama runner）
+
+旧实验 Stage 3 的 selective copy_experts (1392 ms) 比 llama runner (1597 ms) 还快 ~205 ms。如果 ollama 复用 Stage 3 的 selective 优化，可能比 llama runner 还快。
+
+但这不是 1.x 阶段目标——先追平再说。
+
+### 8.3 不应做的（已被数据排除）
+
+- ❌ porting `can_reuse`：实测 0% 命中
+- ❌ 优化 model.Forward CGO：6.5 ms 可忽略
+- ❌ Context 生命周期复用：< 5 ms 可忽略
+- ❌ 减少 Go 模型节点数：ollama 已比 llama 少一半还慢
+
+## 九、变更日志
 
 | 日期 | 变更 | 原因 |
 |---|---|---|
 | 2026-05-15 | 初稿 | 三组 reuse 实验确认 can_reuse 在单 ubatch 场景无收益，重新规划 profiling 方向 |
 | 2026-05-15 | 删除 Phase 0，合并至 Phase 1 | 单独看 ollama 端 nodes/splits 无对照价值，且 slog.Debug 输出会被淹没 |
+| 2026-05-15 | 填入 Phase 2 数据 + Phase 3 归因 | 实测：gap 几乎全在 compute_total（545 ms），与图构建/CGO/生命周期无关；can_reuse 实测 0% 命中；ollama 图节点反而比 llama 少一半；推荐 Phase 1.5 走 split 内部 timing + 100% GPU offload 对照 |
+| 2026-05-15 | 加入 Phase 4 GPU 利用率分析 + 旧实验对照（Stage 4 ≈ llama runner）；把 root cause 收紧到 `ml/backend/ggml/ggml.go:160-170` 缺失 `ggml_backend_dev_host_buffer_type(gpu_dev)` 调用；写出 Phase 5 优化路线 | 三条独立证据线（GPU util、shared memory、Stage 4 对照）汇合，无需进一步 split 内部 timing |
